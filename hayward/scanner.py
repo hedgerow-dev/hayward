@@ -1638,6 +1638,13 @@ _GGUF_JINJA_STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 
 GGUF_MAGIC = b"GGUF"
 
+# GGML is GGUF's predecessor and is still shipped: whisper.cpp publishes its
+# models in it, often under a .gguf name. Stored little-endian, its magic
+# 0x67676d6c reads as b"lmgg" on disk. Calling one of those "corrupted" is
+# wrong twice over, since the file is neither corrupt nor GGUF, and a hub
+# sweep found this was 10 of 17 actionable findings across 1,974 real files.
+GGML_MAGICS = (b"lmgg", b"fmgg", b"tjgg")   # ggml, ggmf, ggjt
+
 GGUF_METADATA_SCAN_BYTES = 10_000_000
 
 # Standard GGUF `general.*` keys documented as free-text/descriptive (per the
@@ -1657,7 +1664,19 @@ _GGUF_FREETEXT_KEYS = frozenset({
     # and "__import__" (measured: unsloth's DeepSeek-V4 GGUFs trip three of
     # the patterns below on vocab alone). Vocabulary is data, and no code
     # path in a GGUF runtime executes it.
+    #
+    # The same argument covers the other tokenizer tables. merges is the BPE
+    # merge list, built from the same training text and equally certain to
+    # contain arbitrary substrings. A 2,456-file hub sweep found unsloth's
+    # gemma GGUFs tripping the "subprocess" pattern on merges alone, which is
+    # this exact false positive recurring on a different key. token_type and
+    # scores are numeric, and the chat template keeps its own dedicated check
+    # (MFV-GGUF-003), which looks for execution constructs rather than
+    # substrings.
     "tokenizer.ggml.tokens",
+    "tokenizer.ggml.merges",
+    "tokenizer.ggml.token_type",
+    "tokenizer.ggml.scores",
 })
 
 _GGUF_TYPE_STRING = 8
@@ -3641,6 +3660,15 @@ class ModelFileScanner:
         findings: list[Finding] = []
 
         if len(data) < 8 or data[:4] != GGUF_MAGIC:
+            if data[:4] in GGML_MAGICS:
+                # A known format we do not parse, so the honest verdict is
+                # non-coverage rather than a claim about the content.
+                return [_skip_unverified_finding(
+                    file_path,
+                    "The file is in GGML format, GGUF's predecessor, which this "
+                    "scanner does not parse.",
+                    metadata={"skipped_reason": "ggml_format"},
+                )]
             return [Finding(
                 rule_id="MFV-GGUF-001",
                 message="GGUF magic number invalid or missing. Corrupted or non-GGUF file.",
