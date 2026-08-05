@@ -23,11 +23,13 @@ Covers:
 from __future__ import annotations
 
 import ast
+import bz2
 import contextlib
 import dataclasses
 import io
 import json
 import logging
+import lzma
 import re
 import reprlib
 import shutil
@@ -2701,6 +2703,44 @@ SKIP_DIR_NAMES = frozenset({
 })
 
 
+
+# joblib.dump(compress=...) accepts zlib, gzip, bz2, lzma and xz. Sniffing
+# only zlib meant an lzma-compressed pickle was handed to the pickle walker
+# still compressed, found no opcodes, and passed clean. A published bypass
+# proof of concept exploits exactly that: payload2_lzma_rce.joblib carries
+# builtins.eval("__import__('os').popen('id').read()") behind lzma.
+_COMPRESSED_STREAM_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x1f\x8b", "gzip"),
+    (b"BZh", "bz2"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"\x5d\x00\x00", "lzma"),
+)
+
+
+def _sniff_compression(data: bytes) -> str | None:
+    """Which codec wraps this stream, if any."""
+    for magic, name in _COMPRESSED_STREAM_MAGIC:
+        if data.startswith(magic):
+            return name
+    # zlib has no constant magic: byte 0 is 0x78 for the window sizes any
+    # real compressor emits, and byte 1 encodes the check bits.
+    if len(data) >= 2 and data[0] == 0x78 and data[1] in (0x01, 0x5E, 0x9C, 0xDA):
+        return "zlib"
+    return None
+
+
+def _new_decompressor(kind: str):
+    if kind == "zlib":
+        return zlib.decompressobj()
+    if kind == "gzip":
+        return zlib.decompressobj(16 + zlib.MAX_WBITS)
+    if kind == "bz2":
+        return bz2.BZ2Decompressor()
+    if kind == "xz":
+        return lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+    return lzma.LZMADecompressor(format=lzma.FORMAT_ALONE)
+
+
 class ModelFileScanner:
     """Scans ML model files for backdoors and unsafe content."""
 
@@ -5169,6 +5209,27 @@ class ModelFileScanner:
 
     # ── joblib scanning ────────────────────────────────────────────
 
+    def _decompress_capped(self, data: bytes, max_bytes: int,
+                           codec: str = "zlib") -> bytes | None:
+        """Bounded decompression for any codec joblib writes.
+
+        Same contract as the zlib-only version it generalises: chunked, and
+        None once the output would exceed the cap, so a small archive cannot
+        expand into a memory-exhausting payload.
+        """
+        decompressor = _new_decompressor(codec)
+        out = bytearray()
+        step = 1 << 20
+        for offset in range(0, len(data), step):
+            chunk = data[offset:offset + step]
+            produced = decompressor.decompress(chunk, max_bytes - len(out) + 1)
+            out.extend(produced)
+            if len(out) > max_bytes:
+                return None
+            if getattr(decompressor, "eof", False):
+                break
+        return bytes(out)
+
     def _decompress_zlib_capped(self, data: bytes, max_bytes: int) -> bytes | None:
         """Inflate a raw zlib stream in bounded chunks, aborting once
         max_bytes is exceeded.
@@ -5219,18 +5280,20 @@ class ModelFileScanner:
         -cap compressed stream can still expand into a memory-exhausting
         payload, so this never calls the unbounded `zlib.decompress`.
         """
-        if len(data) >= 2 and data[0] == 0x78 and data[1] in (0x01, 0x5E, 0x9C, 0xDA):
+        codec = _sniff_compression(data)
+        if codec is not None:
             try:
-                decompressed = self._decompress_zlib_capped(data, self.MAX_ZIP_MEMBER_BYTES)
-            except zlib.error:
+                decompressed = self._decompress_capped(
+                    data, self.MAX_ZIP_MEMBER_BYTES, codec)
+            except (zlib.error, OSError, EOFError, lzma.LZMAError):
                 pass
             else:
                 if decompressed is None:
                     return [Finding(
                         rule_id="MFV-JOBLIB-002",
-                        message=f"joblib file's zlib-compressed payload exceeds "
+                        message=f"joblib file's {codec}-compressed payload exceeds "
                                 f"{self.MAX_ZIP_MEMBER_BYTES // 1_000_000}MB decompressed size "
-                                f"limit -- possible zlib bomb. Skipping for memory safety.",
+                                f"limit -- possible decompression bomb. Skipping for memory safety.",
                         severity=Severity.HIGH,
                         category=Category.AI_ML,
                         file_path=str(file_path),

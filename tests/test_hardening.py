@@ -1128,3 +1128,60 @@ class TestSevenZipLinkEscape:
 
         findings = ModelFileScanner().scan_file(p)
         assert any(f.rule_id == "MFV-PICKLE-001" for f in findings)
+class TestJoblibCompressionCodecs:
+    """joblib.dump(compress=...) writes zlib, gzip, bz2, lzma or xz.
+
+    Sniffing only zlib meant any other codec was handed to the pickle walker
+    still compressed: no opcodes were found and the file passed clean. A
+    published bypass proof of concept exploits exactly that, carrying
+    builtins.eval("__import__('os').popen('id').read()") behind lzma.
+    """
+
+    _PAYLOAD = _os_system_pickle("echo pwned")
+
+    @staticmethod
+    def _compress(kind: str, blob: bytes) -> bytes:
+        import bz2 as _bz2
+        import gzip as _gzip
+        import lzma as _lzma
+        import zlib as _zlib
+        if kind == "zlib":
+            return _zlib.compress(blob)
+        if kind == "gzip":
+            return _gzip.compress(blob)
+        if kind == "bz2":
+            return _bz2.compress(blob)
+        if kind == "xz":
+            return _lzma.compress(blob, format=_lzma.FORMAT_XZ)
+        return _lzma.compress(blob, format=_lzma.FORMAT_ALONE)
+
+    @pytest.mark.parametrize("codec", ["zlib", "gzip", "bz2", "xz", "lzma"])
+    def test_payload_is_found_behind_every_codec(self, tmp_path, codec):
+        p = tmp_path / f"model_{codec}.joblib"
+        p.write_bytes(self._compress(codec, self._PAYLOAD))
+
+        findings = ModelFileScanner().scan_file(p)
+
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings), (
+            f"{codec}-compressed payload was not seen: "
+            f"{[(f.rule_id, f.message[:60]) for f in findings]}"
+        )
+
+    @pytest.mark.parametrize("codec", ["zlib", "gzip", "bz2", "xz", "lzma"])
+    def test_benign_content_stays_quiet_behind_every_codec(self, tmp_path, codec):
+        p = tmp_path / f"clean_{codec}.joblib"
+        p.write_bytes(self._compress(codec, pickle.dumps({"weights": [1.0, 2.0]})))
+
+        assert ModelFileScanner().scan_file(p) == []
+
+    def test_decompression_bomb_is_capped_not_expanded(self, tmp_path, monkeypatch):
+        scanner = ModelFileScanner()
+        monkeypatch.setattr(scanner, "MAX_ZIP_MEMBER_BYTES", 4096)
+
+        p = tmp_path / "bomb.joblib"
+        p.write_bytes(self._compress("xz", b"\x00" * 5_000_000))
+
+        findings = scanner.scan_file(p)
+        assert any(f.rule_id == "MFV-JOBLIB-002" for f in findings), (
+            [(f.rule_id, f.message[:70]) for f in findings]
+        )
