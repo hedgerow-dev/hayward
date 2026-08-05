@@ -1,0 +1,20 @@
+Hayward
+Copyright (c) 2026 Hedgerow
+
+This product includes data derived from picklescan
+(https://github.com/mmaitre314/picklescan), copyright (c) Matthieu Maitre,
+licensed under the MIT License.
+
+Specifically, the list of dangerous global references in
+hayward/scanner.py (`PICKLE_DENIED_GLOBALS` and `_PICKLE_DENIED_MODULES`)
+was harvested from picklescan's `_unsafe_globals`, including its
+whole-module wildcard entries. Those entries carry inline comments in the
+source recording their origin.
+
+We measured what that data is worth rather than assuming it. Removing every
+picklescan-derived entry costs 9 of 35 detections on picklescan's own test
+corpus. The list is load-bearing, and picklescan deserves the credit.
+
+This product also depends on defusedxml (https://github.com/tiran/defusedxml),
+copyright (c) Christian Heimes, licensed under the Python Software Foundation
+License.

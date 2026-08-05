@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hayward"
+version = "1.0.0"
+description = "Security scanner for machine-learning model files: detects code execution in pickle, GGUF, ONNX, Keras and other checkpoints"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Hedgerow", email = "hello@hedgerow.dev" }]
+keywords = [
+    "security", "security-scanner", "vulnerability-scanner",
+    "machine-learning", "mlsecops", "ai-security",
+    "pickle", "deserialization", "supply-chain", "malware-detection",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+
+# defusedxml is the only runtime dependency. It backs the PMML reader, where
+# the entity-expansion defence is the point of the check rather than an
+# implementation detail.
+dependencies = ["defusedxml>=0.7,<1.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0,<9.0", "ruff>=0.4,<1.0"]
+
+[project.urls]
+Homepage = "https://github.com/hedgerow-dev/hayward"
+Source = "https://github.com/hedgerow-dev/hayward"
+Issues = "https://github.com/hedgerow-dev/hayward/issues"
+
+[project.scripts]
+hayward = "hayward.cli:main"
+
+[project.gui-scripts]
+hayward-gui = "hayward.gui:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hayward"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S"]
+# S301/S403 flag pickle imports. This package parses pickle streams as
+# opcodes and never unpickles anything; `pickletools` is the tool for that
+# job and cannot be swapped for something the linter prefers.
+ignore = ["S301", "S403", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests construct deliberately unsafe fixtures. That is the fixture, not a bug.
+"tests/*" = ["S", "B011"]
