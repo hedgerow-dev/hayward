@@ -25,7 +25,10 @@ you download from a hub is an executable, and opening it is running it.
 ## What makes it different
 
 **It stays quiet.** Zero findings above INFO across 215 real models from the
-HuggingFace Hub. A gate that cries wolf gets switched off.
+HuggingFace Hub, and five in the unknown tier. A gate that cries wolf gets
+switched off. That figure is **self-measured and not yet reproducible**: the
+corpus and harness are not published. [Accuracy](docs/accuracy.md) sets out
+what it does and does not support.
 
 **It tells you when it could not look.** A file it cannot parse produces an
 explicit finding, never silence. Attackers hide payloads behind deliberate

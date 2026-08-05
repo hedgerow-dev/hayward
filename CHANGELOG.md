@@ -67,5 +67,6 @@ files, the miss being a `.7z` archive with no extractor installed. Against
 PickleCloak: 49 of 57 exploits and 91 of 97 gadget chains. Against MalHug:
 87 of 87 read and detected, 86 naming the sink the corpus records.
 
-All self-measured. The harness is
-[quickset](https://github.com/hedgerow-dev/quickset).
+All self-measured against corpora that do not ship in this repository, using
+a harness that is not published yet. Not reproducible by a reader today; see
+docs/accuracy.md.

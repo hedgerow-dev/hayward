@@ -1,9 +1,16 @@
 # Accuracy
 
-**Every number on this page is self-measured.** Discount it accordingly, and
-re-run it. The harness is [quickset](https://github.com/hedgerow-dev/quickset),
-which scores five scanners against the same corpora and publishes the rows
-where Hayward loses.
+**Every number on this page is self-measured, and none of it ships in this
+repository.**
+
+The corpora live in a separate harness, quickset, which scores five scanners
+against the same files. **That harness is not public yet**, so nothing here can
+currently be reproduced by a reader. Until it is, treat every figure below as
+a vendor claim, which is exactly the standard this page applies to everyone
+else's numbers.
+
+What ships here that you *can* check today: the 342 tests, which build their
+own fixtures and need no network, and the scanner itself.
 
 Measured 2026-08-05 at version 1.0.0.
 
@@ -90,12 +97,19 @@ quantity. Not breadth, and not a longer list.
 
 ## Reproducing this
 
+**Not possible from this repository today.** The harness is not published, and
+saying so is more useful than a command that does not work.
+
+When it is published, the shape is: the benign corpus is fetched from the Hub
+and hash-pinned on first use, and malicious payloads are generated at run time
+and never stored, so nothing malicious ships in either repository.
+
+What you can run now:
+
 ```bash
-git clone https://github.com/hedgerow-dev/quickset
-cd quickset && pip install -e ".[scanners]"
-python -m quickset.run
+pip install -e ".[dev]" && pytest      # 342 tests, no network
+hayward scan ./your-own-models         # your files, your numbers
 ```
 
-The benign corpus is fetched and hash-pinned on first use. Malicious payloads
-are generated at run time and never stored, so nothing malicious ships in
-either repository.
+The second is worth more than our table. If Hayward is noisy on your models,
+that is a bug report we want.

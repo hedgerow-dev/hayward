@@ -4738,7 +4738,7 @@ class ModelFileScanner:
     _PMML_DANGEROUS_FUNCTION_PATTERNS = (
         "exec(", "eval(", "__import__", "os.", "subprocess",
         "java.lang.Runtime", "java.lang.ProcessBuilder",
-        "Runtime.getRuntime", "exec(",
+        "Runtime.getRuntime",
     )
 
     def _scan_pmml(self, file_path: Path, data: bytes) -> list[Finding]:
