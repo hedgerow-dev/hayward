@@ -3211,6 +3211,12 @@ class ModelFileScanner:
         # invisible to a directory scan, which is how the tool is actually run.
         for ext in (*self._format_map, *self._AMBIGUOUS_EXTENSIONS):
             for f in root.rglob(f"*{ext}"):
+                # rglob matches directories too. Model caches routinely name a
+                # directory after the file it holds (`<repo>--model.joblib/`),
+                # so without this every such directory was handed to scan_file,
+                # failed to read, and produced a spurious MFV-SKIP-003.
+                if not f.is_file():
+                    continue
                 try:
                     parts = f.relative_to(root).parts
                 except ValueError:
@@ -4906,10 +4912,32 @@ class ModelFileScanner:
                 )]
 
             findings: list[Finding] = []
+            tmp_root = Path(tmp).resolve()
             self._archive_depth += 1
             try:
                 for extracted in sorted(Path(tmp).rglob("*")):
-                    if not extracted.is_file():
+                    # A 7z member can be a symlink, and the extractor will
+                    # happily create it. Following one reads a file outside the
+                    # extraction directory and prints its contents into the
+                    # report, which turns a scan into an arbitrary-file-read
+                    # primitive for whoever supplied the archive (CWE-59/22).
+                    # Only regular files that resolve inside tmp are scanned.
+                    try:
+                        resolved = extracted.resolve()
+                    except OSError:
+                        continue
+                    if extracted.is_symlink() or resolved != extracted:
+                        if tmp_root not in resolved.parents:
+                            findings.append(_skip_unverified_finding(
+                                file_path,
+                                f"Archive member {extracted.name!r} is a link "
+                                f"pointing outside the extraction directory, so "
+                                f"it was not followed.",
+                                metadata={"skipped_reason": "link_escape",
+                                          "member": extracted.name},
+                            ))
+                            continue
+                    if not resolved.is_file():
                         continue
                     member = str(extracted.relative_to(tmp))
                     for f in self.scan_file(extracted):

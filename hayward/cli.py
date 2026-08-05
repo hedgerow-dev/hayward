@@ -16,12 +16,12 @@ is the one case where a passing build tells you nothing.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 from hayward import __version__
 from hayward.findings import Finding, Severity, is_coverage_gap
+from hayward.report import render
 from hayward.scanner import ModelFileScanner
 
 _THRESHOLDS = {
@@ -74,17 +74,6 @@ def _print_text(findings: list[Finding], root: Path, colour: bool) -> None:
         )
 
 
-def _print_json(findings: list[Finding], root: Path) -> None:
-    gaps = [f for f in findings if is_coverage_gap(f)]
-    print(json.dumps({
-        "tool": "hayward",
-        "version": __version__,
-        "root": str(root),
-        "findings": [f.to_dict() for f in findings],
-        "coverage_gaps": [f.file_path for f in gaps],
-    }, indent=2))
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="hayward",
@@ -99,8 +88,12 @@ def main(argv: list[str] | None = None) -> int:
     scan = sub.add_parser("scan", help="scan a file or directory")
     scan.add_argument("target", type=Path, help="model file or directory of them")
     scan.add_argument(
-        "-f", "--format", choices=("text", "json"), default="text",
-        help="output format (default: text)",
+        "-f", "--format", choices=("text", "json", "html", "markdown"),
+        default="text", help="output format (default: text)",
+    )
+    scan.add_argument(
+        "-o", "--output", type=Path, metavar="FILE",
+        help="write the report to a file instead of stdout",
     )
     scan.add_argument(
         "--fail-on", choices=tuple(_THRESHOLDS), default="high",
@@ -130,10 +123,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     root = target if target.is_dir() else target.parent
-    if args.format == "json":
-        _print_json(findings, root)
-    else:
+
+    if args.format == "text" and not args.output:
         _print_text(findings, root, colour=not args.no_colour and sys.stdout.isatty())
+    else:
+        fmt = "json" if args.format == "text" else args.format
+        report = render(fmt, findings, root, __version__)
+        if args.output:
+            try:
+                args.output.write_text(report, encoding="utf-8")
+            except OSError as exc:
+                print(f"hayward: could not write report: {exc}", file=sys.stderr)
+                return 2
+            print(f"Report written to {args.output}")
+        else:
+            print(report)
 
     limit = _THRESHOLDS[args.fail_on]
     if any(f.severity_order <= limit for f in findings):

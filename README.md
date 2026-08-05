@@ -49,8 +49,9 @@ PMML. Format comes from magic bytes, so a renamed file does not slip through.
 ## Three ways to run it
 
 ```bash
-hayward scan ./models              # command line
-hayward-gui                        # desktop window
+hayward scan ./models                          # command line
+hayward scan ./models -f html -o report.html   # shareable report
+hayward-gui                                    # desktop window
 ```
 
 ```python

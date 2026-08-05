@@ -1,40 +1,55 @@
-"""Desktop window for the security scanner, for people who would rather not
-use a terminal.
+"""Desktop window for the scanner, for people who would rather not use a
+terminal.
 
     hayward-gui
 
-Built on tkinter, which ships with Python, so the GUI adds no dependency and
-no packaging story. Drop a file or a folder on the window, or use the button.
+Built on tkinter, which ships with Python, so the desktop app adds no
+dependency and no packaging story.
 
-The scan runs on a worker thread and reports back through a queue, because a
-large directory takes long enough that a frozen window would look like a
-crash. Nothing here loads or executes a model; it calls the same scanner the
-CLI does.
+Two things govern how this looks. It uses the platform's native ttk theme
+rather than forcing one, because a forced theme is what makes a Python GUI
+look like a Python GUI. And severity is carried by a small coloured marker
+against otherwise plain text, because a table where every row is a different
+colour is harder to read, not easier.
+
+The scan runs on a worker thread and reports through a queue, since a large
+directory takes long enough that a frozen window would look like a crash.
+Nothing here loads or executes a model; it calls the same scanner the command
+line does.
 """
 
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, font, messagebox, ttk
 
 from hayward import __version__
 from hayward.findings import Finding, Severity, is_coverage_gap
+from hayward.report import SUFFIXES, render
 from hayward.scanner import ModelFileScanner
 
+# Muted rather than saturated. These sit next to body text all day.
 _SEVERITY_COLOUR = {
-    Severity.CRITICAL: "#b3261e",
-    Severity.HIGH: "#c2410c",
-    Severity.MEDIUM: "#a16207",
-    Severity.LOW: "#1d4ed8",
-    Severity.INFO: "#6b7280",
+    Severity.CRITICAL: "#c0392b",
+    Severity.HIGH: "#d35400",
+    Severity.MEDIUM: "#b7950b",
+    Severity.LOW: "#2874a6",
+    Severity.INFO: "#7b8794",
 }
 
-_INTRO = (
-    "Drop a model file or a folder here, or use Choose.\n\n"
-    "Nothing is loaded or executed. Files are read as bytes."
+_INK = "#1f2933"
+_MUTED = "#7b8794"
+_HAIRLINE = "#dfe3e8"
+_SURFACE = "#ffffff"
+
+_EMPTY_TITLE = "No scan yet"
+_EMPTY_BODY = (
+    "Choose a model file or a folder to scan.\n"
+    "Files are read as bytes. Nothing is loaded or executed."
 )
 
 
@@ -43,55 +58,118 @@ class HaywardApp:
         self.root = root
         self.queue: queue.Queue = queue.Queue()
         self.scanning = False
+        self.findings: list[Finding] = []
+        self.visible: list[Finding] = []
+        self.target: Path | None = None
 
-        root.title(f"Hayward {__version__}")
-        root.geometry("980x620")
-        root.minsize(760, 460)
+        root.title("Hayward")
+        root.geometry("1040x700")
+        root.minsize(820, 520)
+        root.configure(background=_SURFACE)
 
-        self._build_toolbar()
-        self._build_table()
-        self._build_status()
+        self._init_style()
+        self._build_header()
+        self._build_body()
+        self._build_footer()
         self._enable_drop()
+        self._show_empty()
 
-        self.detail = tk.StringVar(value=_INTRO)
-        detail_box = ttk.Label(
-            root, textvariable=self.detail, wraplength=940,
-            justify="left", padding=(12, 10),
-        )
-        detail_box.pack(fill="x", side="bottom")
+        root.after(80, self._drain_queue)
 
-        root.after(100, self._drain_queue)
+    # ── appearance ──────────────────────────────────────────────────
+
+    def _init_style(self) -> None:
+        style = ttk.Style()
+        # Keep the native theme where there is one. "clam" is only a fallback
+        # for bare X11 builds, where the alternatives look worse.
+        if sys.platform == "darwin" and "aqua" in style.theme_names():
+            style.theme_use("aqua")
+        elif sys.platform.startswith("win") and "vista" in style.theme_names():
+            style.theme_use("vista")
+        elif "clam" in style.theme_names():
+            style.theme_use("clam")
+
+        base = font.nametofont("TkDefaultFont")
+        family = base.actual("family")
+        size = base.actual("size")
+
+        self.f_title = font.Font(family=family, size=size + 5, weight="bold")
+        self.f_body = font.Font(family=family, size=size)
+        self.f_small = font.Font(family=family, size=max(size - 1, 9))
+        self.f_mono = font.Font(family="Menlo" if sys.platform == "darwin" else "Courier",
+                                size=max(size - 1, 9))
+
+        style.configure("Surface.TFrame", background=_SURFACE)
+        style.configure("Hairline.TFrame", background=_HAIRLINE)
+        style.configure("Title.TLabel", background=_SURFACE,
+                        foreground=_INK, font=self.f_title)
+        style.configure("Body.TLabel", background=_SURFACE,
+                        foreground=_INK, font=self.f_body)
+        style.configure("Muted.TLabel", background=_SURFACE,
+                        foreground=_MUTED, font=self.f_small)
+        style.configure("Count.TLabel", background=_SURFACE,
+                        foreground=_INK, font=self.f_small)
+
+        # Rows need air. The default rowheight is built for 1998.
+        style.configure("Results.Treeview", background=_SURFACE,
+                        fieldbackground=_SURFACE, foreground=_INK,
+                        rowheight=30, borderwidth=0, font=self.f_body)
+        style.configure("Results.Treeview.Heading", font=self.f_small)
+        style.layout("Results.Treeview", style.layout("Treeview"))
+
+    def _hairline(self, parent: tk.Misc) -> None:
+        ttk.Frame(parent, style="Hairline.TFrame", height=1).pack(fill="x")
 
     # ── layout ──────────────────────────────────────────────────────
 
-    def _build_toolbar(self) -> None:
-        bar = ttk.Frame(self.root, padding=(12, 10))
+    def _build_header(self) -> None:
+        bar = ttk.Frame(self.root, style="Surface.TFrame", padding=(24, 20, 24, 16))
         bar.pack(fill="x")
 
-        ttk.Button(bar, text="Choose file", command=self._pick_file).pack(side="left")
-        ttk.Button(bar, text="Choose folder", command=self._pick_dir).pack(
-            side="left", padx=(8, 0))
+        left = ttk.Frame(bar, style="Surface.TFrame")
+        left.pack(side="left")
+        ttk.Label(left, text="Hayward", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(left, text=f"Security scanner for model files  ·  {__version__}",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
-        self.show_info = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            bar, text="Show unknowns (INFO)", variable=self.show_info,
-            command=self._refill,
-        ).pack(side="right")
+        right = ttk.Frame(bar, style="Surface.TFrame")
+        right.pack(side="right")
+        ttk.Button(right, text="Scan folder", command=self._pick_dir).pack(side="right")
+        ttk.Button(right, text="Scan file", command=self._pick_file).pack(
+            side="right", padx=(0, 8))
+        self.export_button = ttk.Button(right, text="Export report",
+                                        command=self._export, state="disabled")
+        self.export_button.pack(side="right", padx=(0, 16))
 
-    def _build_table(self) -> None:
-        frame = ttk.Frame(self.root, padding=(12, 0))
-        frame.pack(fill="both", expand=True)
+        self._hairline(self.root)
 
-        columns = ("severity", "rule", "file")
-        self.tree = ttk.Treeview(frame, columns=columns, show="headings", height=18)
-        self.tree.heading("severity", text="Severity")
-        self.tree.heading("rule", text="Rule")
-        self.tree.heading("file", text="File")
-        self.tree.column("severity", width=110, anchor="w", stretch=False)
-        self.tree.column("rule", width=170, anchor="w", stretch=False)
-        self.tree.column("file", anchor="w")
+    def _build_body(self) -> None:
+        self.body = ttk.Frame(self.root, style="Surface.TFrame")
+        self.body.pack(fill="both", expand=True)
 
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        # Empty state and results share the same slot.
+        self.empty = ttk.Frame(self.body, style="Surface.TFrame", padding=(24, 90))
+        ttk.Label(self.empty, text=_EMPTY_TITLE, style="Body.TLabel").pack()
+        ttk.Label(self.empty, text=_EMPTY_BODY, style="Muted.TLabel",
+                  justify="center").pack(pady=(6, 0))
+
+        self.results = ttk.Frame(self.body, style="Surface.TFrame")
+
+        table = ttk.Frame(self.results, style="Surface.TFrame", padding=(16, 8, 16, 0))
+        table.pack(fill="both", expand=True)
+
+        self.tree = ttk.Treeview(
+            table, columns=("severity", "rule", "file"),
+            show="headings", style="Results.Treeview", selectmode="browse",
+        )
+        self.tree.heading("severity", text="  SEVERITY", anchor="w")
+        self.tree.heading("rule", text="RULE", anchor="w")
+        self.tree.heading("file", text="FILE", anchor="w")
+        self.tree.column("severity", width=130, minwidth=110, stretch=False, anchor="w")
+        self.tree.column("rule", width=170, minwidth=150, stretch=False, anchor="w")
+        self.tree.column("file", minwidth=240, anchor="w")
+
+        scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
@@ -100,18 +178,38 @@ class HaywardApp:
             self.tree.tag_configure(severity.value, foreground=colour)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-    def _build_status(self) -> None:
-        self.status = tk.StringVar(value="Ready")
-        ttk.Label(
-            self.root, textvariable=self.status, padding=(12, 6),
-            relief="flat", anchor="w",
-        ).pack(fill="x")
+        # Detail pane. Fixed height so the table does not jump as selection
+        # moves between a one-line finding and a long one.
+        self._hairline(self.results)
+        detail = ttk.Frame(self.results, style="Surface.TFrame",
+                           padding=(24, 14, 24, 16), height=132)
+        detail.pack(fill="x")
+        detail.pack_propagate(False)
+
+        self.detail_rule = tk.StringVar(value="")
+        self.detail_text = tk.StringVar(value="")
+        ttk.Label(detail, textvariable=self.detail_rule,
+                  style="Muted.TLabel", font=self.f_mono).pack(anchor="w")
+        ttk.Label(detail, textvariable=self.detail_text, style="Body.TLabel",
+                  wraplength=940, justify="left").pack(anchor="w", pady=(6, 0))
+
+    def _build_footer(self) -> None:
+        self._hairline(self.root)
+        bar = ttk.Frame(self.root, style="Surface.TFrame", padding=(24, 12))
+        bar.pack(fill="x")
+
+        self.summary = tk.StringVar(value="Ready")
+        ttk.Label(bar, textvariable=self.summary, style="Count.TLabel").pack(side="left")
+
+        self.show_info = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Show unknowns", variable=self.show_info,
+                        command=self._refill).pack(side="right")
 
     def _enable_drop(self) -> None:
         """Register for file drops when tkdnd is present.
 
-        tkdnd is an optional Tk extension and is absent on a stock install, so
-        the buttons remain the guaranteed path in.
+        tkdnd is an optional Tk extension, absent from a stock install, so the
+        buttons remain the guaranteed way in.
         """
         try:
             self.root.tk.call("package", "require", "tkdnd")
@@ -119,6 +217,14 @@ class HaywardApp:
             self.root.bind("<<Drop>>", self._on_drop)
         except tk.TclError:
             pass
+
+    def _show_empty(self) -> None:
+        self.results.pack_forget()
+        self.empty.pack(fill="both", expand=True)
+
+    def _show_results(self) -> None:
+        self.empty.pack_forget()
+        self.results.pack(fill="both", expand=True)
 
     # ── actions ─────────────────────────────────────────────────────
 
@@ -141,7 +247,7 @@ class HaywardApp:
             self._start(Path(path))
 
     def _on_drop(self, event: tk.Event) -> None:
-        raw = self.root.tk.splitlist(event.data)
+        raw = self.root.tk.splitlist(event.data)  # type: ignore[attr-defined]
         if raw:
             self._start(Path(raw[0]))
 
@@ -150,10 +256,12 @@ class HaywardApp:
             return
         self.scanning = True
         self.target = target
+        self.findings = []
         self.tree.delete(*self.tree.get_children())
-        self.findings: list[Finding] = []
-        self.detail.set("")
-        self.status.set(f"Scanning {target} ...")
+        self.detail_rule.set("")
+        self.detail_text.set("")
+        self.summary.set(f"Scanning {target.name} ...")
+        self._show_results()
         threading.Thread(target=self._worker, args=(target,), daemon=True).start()
 
     def _worker(self, target: Path) -> None:
@@ -177,65 +285,108 @@ class HaywardApp:
         else:
             self.scanning = False
             if kind == "error":
-                self.status.set(f"Could not scan: {payload}")
+                self.summary.set(f"Could not scan: {payload}")
             else:
                 self.findings = payload
                 self._refill()
-        self.root.after(100, self._drain_queue)
+        self.root.after(80, self._drain_queue)
 
     def _refill(self) -> None:
-        findings = getattr(self, "findings", [])
         self.tree.delete(*self.tree.get_children())
 
-        shown = [
-            f for f in findings
-            if self.show_info.get() or f.severity is not Severity.INFO
-        ]
-        for index, finding in enumerate(
-            sorted(shown, key=lambda f: (f.severity_order, f.file_path))
-        ):
-            try:
-                where = Path(finding.file_path).relative_to(self.target)
-            except (ValueError, AttributeError):
-                where = Path(finding.file_path).name
+        self.visible = sorted(
+            (f for f in self.findings
+             if self.show_info.get() or f.severity is not Severity.INFO),
+            key=lambda f: (f.severity_order, f.file_path),
+        )
+        for index, finding in enumerate(self.visible):
             self.tree.insert(
                 "", "end", iid=str(index),
-                values=(finding.severity.value.upper(), finding.rule_id, str(where)),
+                values=(
+                    f"  ●  {finding.severity.value.upper()}",
+                    finding.rule_id,
+                    self._display_path(finding),
+                ),
                 tags=(finding.severity.value,),
             )
-        self._sorted = sorted(shown, key=lambda f: (f.severity_order, f.file_path))
 
-        actionable = sum(1 for f in findings if f.severity is not Severity.INFO)
-        gaps = sum(1 for f in findings if is_coverage_gap(f))
-        parts = [f"{actionable} finding(s) above INFO"]
+        self._update_summary()
+        self.export_button.configure(
+            state="normal" if self.target is not None else "disabled")
+        if self.visible:
+            self.tree.selection_set("0")
+            self.tree.focus("0")
+        else:
+            self.detail_rule.set("")
+            self.detail_text.set(
+                "Nothing to show at this filter."
+                if self.findings else "No findings."
+            )
+
+    def _display_path(self, finding: Finding) -> str:
+        path = Path(finding.file_path)
+        if self.target and self.target.is_dir():
+            try:
+                return str(path.relative_to(self.target))
+            except ValueError:
+                pass
+        return path.name
+
+    def _update_summary(self) -> None:
+        if not self.findings:
+            self.summary.set(f"No findings in {self.target.name if self.target else ''}")
+            return
+        counts: dict[str, int] = {}
+        for finding in self.findings:
+            counts[finding.severity.value] = counts.get(finding.severity.value, 0) + 1
+        order = ("critical", "high", "medium", "low", "info")
+        parts = [f"{counts[s]} {s}" for s in order if s in counts]
+        gaps = sum(1 for f in self.findings if is_coverage_gap(f))
+        line = "   ".join(parts)
         if gaps:
-            parts.append(f"{gaps} file(s) not fully read")
-        if not findings:
-            parts = ["Nothing found"]
-        self.status.set(" | ".join(parts))
-        if not shown:
-            self.detail.set(_INTRO)
+            line += f"      {gaps} file(s) not fully read"
+        self.summary.set(line)
+
+    def _export(self) -> None:
+        if self.target is None:
+            return
+        default = f"hayward-{self.target.name or 'scan'}"
+        path = filedialog.asksaveasfilename(
+            title="Export report",
+            initialfile=f"{default}.html",
+            defaultextension=".html",
+            filetypes=[
+                ("HTML report", "*.html"),
+                ("Markdown", "*.md"),
+                ("JSON", "*.json"),
+            ],
+        )
+        if not path:
+            return
+
+        suffix = Path(path).suffix.lower()
+        fmt = next((k for k, v in SUFFIXES.items() if v == suffix), "html")
+        root = self.target if self.target.is_dir() else self.target.parent
+        try:
+            Path(path).write_text(
+                render(fmt, self.findings, root, __version__), encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+        self.summary.set(f"Report written to {Path(path).name}")
 
     def _on_select(self, _event: tk.Event) -> None:
         selection = self.tree.selection()
         if not selection:
             return
-        finding = self._sorted[int(selection[0])]
-        cwe = (
-            "  CWE: " + ", ".join(f"CWE-{c}" for c in finding.cwe_ids)
-            if finding.cwe_ids else ""
-        )
-        self.detail.set(
-            f"{finding.rule_id}  ({finding.severity.value}){cwe}\n\n{finding.message}"
-        )
+        finding = self.visible[int(selection[0])]
+        cwe = "   " + ", ".join(f"CWE-{c}" for c in finding.cwe_ids) if finding.cwe_ids else ""
+        self.detail_rule.set(f"{finding.rule_id}{cwe}")
+        self.detail_text.set(finding.message)
 
 
 def main() -> int:
     root = tk.Tk()
-    try:
-        ttk.Style().theme_use("clam")
-    except tk.TclError:
-        pass
     HaywardApp(root)
     root.mainloop()
     return 0

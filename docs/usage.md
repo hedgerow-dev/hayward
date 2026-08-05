@@ -15,11 +15,13 @@ extensions, no model framework, and no network access at any point.
 hayward scan model.pt              # one file
 hayward scan ./models              # a directory, recursively
 hayward scan ./models -f json      # machine-readable
+hayward scan ./models -f html -o report.html   # shareable
 ```
 
 | Option | Default | Effect |
 |---|---|---|
-| `-f, --format` | `text` | `text` or `json` |
+| `-f, --format` | `text` | `text`, `json`, `html` or `markdown` |
+| `-o, --output` | stdout | Write the report to a file |
 | `--fail-on` | `high` | Lowest severity that exits non-zero. `critical`, `high`, `medium`, `low`, `info`, `never` |
 | `--fail-on-coverage` | off | Also exit non-zero when a file could not be fully read |
 | `--no-colour` | off | Plain output regardless of terminal |
@@ -36,6 +38,17 @@ hayward scan ./models -f json      # machine-readable
 threshold you pick, state it whenever you quote a number from it. The
 difference between counting the INFO tier and not counting it is the single
 largest lever on any scanner's false-positive rate, this one included.
+
+## Reports
+
+`html` produces one self-contained page: no external stylesheet, font or
+script, so it opens from an email attachment on a machine with no network and
+renders the same. `markdown` is for pasting into a ticket or a pull request.
+`json` is for machines.
+
+The desktop app exports the same three through **Export report**, choosing the
+format from the extension you give the file. A report written from the window
+is byte-identical to one written from the command line.
 
 ### JSON output
 
@@ -105,8 +118,9 @@ hayward-gui
 ```
 
 One window. Choose a file or a folder, or drop one on it if your Tk build has
-`tkdnd`. Results are listed by severity; selecting one shows the full message
-and any CWE mapping. The "Show unknowns" checkbox is the same decision the CLI
+`tkdnd`. **Export report** writes HTML, Markdown or JSON, choosing the format
+from the extension you give the file. Results are listed by severity, and
+selecting one shows the full message and any CWE mapping. The "Show unknowns" checkbox is the same decision the CLI
 exposes as `--fail-on`.
 
 Built on tkinter, which ships with Python, so the desktop app adds no

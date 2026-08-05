@@ -1030,3 +1030,101 @@ class TestSevenZipExtraction:
 
         assert any(f.rule_id == "MFV-SKIP-003" for f in findings)
         assert scanner._archive_depth == 0, "depth counter leaked"
+class TestDirectoryDiscoverySkipsDirectories:
+    """`rglob("*.joblib")` matches a *directory* called `model.joblib` as
+    readily as a file. Model caches name directories after the file they hold
+    (`<repo>--sklearn_model.joblib/`), so every one of them was handed to
+    scan_file, failed to read, and produced a spurious MFV-SKIP-003. On a
+    215-model corpus that turned 11 findings into 300.
+    """
+
+    def test_directory_named_like_a_model_is_not_scanned(self, tmp_path):
+        holder = tmp_path / "acme--demo--sklearn_model.joblib"
+        holder.mkdir()
+        (holder / "sklearn_model.joblib").write_bytes(pickle.dumps({"ok": True}))
+
+        findings = ModelFileScanner().scan_directory(tmp_path)
+
+        assert not any(f.rule_id == "MFV-SKIP-003" for f in findings), (
+            [(f.rule_id, f.file_path) for f in findings]
+        )
+
+    def test_the_file_inside_it_is_still_scanned(self, tmp_path):
+        holder = tmp_path / "acme--demo--model.pkl"
+        holder.mkdir()
+        (holder / "model.pkl").write_bytes(_os_system_pickle("echo pwned"))
+
+        findings = ModelFileScanner().scan_directory(tmp_path)
+
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings), (
+            [(f.rule_id, f.file_path) for f in findings]
+        )
+class TestSevenZipLinkEscape:
+    """A 7z member can be a symlink, and the extractor creates it happily.
+
+    Following one reads a file outside the extraction directory and prints its
+    contents into the report, so a crafted archive turns a scan into an
+    arbitrary-file-read primitive for whoever supplied it (CWE-59, CWE-22).
+    Verified before the fix: the planted file outside tmp came back as a
+    CRITICAL finding attributed to the archive.
+    """
+
+    _MAGIC = b"7z\xbc\xaf\x27\x1c"
+
+    @staticmethod
+    def _install_stub(tmp_path, monkeypatch, body: str, env: dict | None = None):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        stub = bindir / "7zz"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, pathlib, os\n"
+            "args = sys.argv[1:]\n"
+            "if args and args[0] == 'l':\n"
+            "    print('Size = 100')\n"
+            "    sys.exit(0)\n"
+            "if args and args[0] == 'x':\n"
+            "    outdir = pathlib.Path(next(a[2:] for a in args if a.startswith('-o')))\n"
+            "    outdir.mkdir(parents=True, exist_ok=True)\n"
+            f"{body}\n"
+            "    sys.exit(0)\n"
+            "sys.exit(1)\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+        for key, value in (env or {}).items():
+            monkeypatch.setenv(key, value)
+
+    def test_link_out_of_the_extraction_dir_is_not_followed(self, tmp_path, monkeypatch):
+        secret = tmp_path / "outside.pkl"
+        secret.write_bytes(_os_system_pickle("echo outside-the-sandbox"))
+
+        self._install_stub(
+            tmp_path, monkeypatch,
+            "    (outdir / 'weights.pkl').symlink_to(pathlib.Path(os.environ['ESCAPE_TARGET']))",
+            env={"ESCAPE_TARGET": str(secret)},
+        )
+
+        p = tmp_path / "evil.7z"
+        p.write_bytes(self._MAGIC + b"x")
+
+        findings = ModelFileScanner().scan_file(p)
+
+        assert not any(f.rule_id == "MFV-PICKLE-001" for f in findings), (
+            "content outside the extraction directory was read"
+        )
+        assert any(f.rule_id == "MFV-SKIP-003" for f in findings), (
+            "the skipped link must be reported, not silently dropped"
+        )
+
+    def test_ordinary_member_still_scans(self, tmp_path, monkeypatch):
+        self._install_stub(
+            tmp_path, monkeypatch,
+            "    (outdir / 'model.pkl').write_bytes(pathlib.Path(args[-1]).read_bytes()[6:])",
+        )
+
+        p = tmp_path / "m.7z"
+        p.write_bytes(self._MAGIC + _os_system_pickle("echo pwned"))
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings)
