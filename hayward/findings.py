@@ -29,6 +29,7 @@ class Category(str, Enum):
     DESERIALIZATION = "deserialization"
     INJECTION = "injection"
     PATH_TRAVERSAL = "path_traversal"
+    SSRF = "ssrf"
     SSTI = "ssti"
 
 

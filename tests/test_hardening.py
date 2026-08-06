@@ -19,6 +19,7 @@ Covers:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import pickle
@@ -1185,3 +1186,106 @@ class TestJoblibCompressionCodecs:
         assert any(f.rule_id == "MFV-JOBLIB-002" for f in findings), (
             [(f.rule_id, f.message[:70]) for f in findings]
         )
+class TestNameAndLocationAbuse:
+    """A tensor name is not a filename until some tool makes it one, and
+    plenty of real tooling does: shard converters, save_pretrained round
+    trips, anything materialising tensors individually. Published bypass
+    proofs of concept ship five SafeTensors variants of this and one GGUF.
+    """
+
+    @staticmethod
+    def _safetensors(name: str) -> bytes:
+        header = json.dumps(
+            {name: {"dtype": "F32", "shape": [4], "data_offsets": [0, 16]}}
+        ).encode()
+        return struct.pack("<Q", len(header)) + header + b"\x00" * 16
+
+    @pytest.mark.parametrize("name", [
+        "../../../tmp/pwned",
+        "..\\..\\..\\tmp\\pwned",
+        "model.layers.0/../../etc/cron.d/evil",
+        "weight\r\nX-Injected: true",
+        "weight\x00../../etc/passwd",
+        "/etc/passwd",
+        "C:\\Windows\\System32\\evil",
+    ])
+    def test_unsafe_tensor_name_is_reported(self, tmp_path, name):
+        p = tmp_path / "model.safetensors"
+        p.write_bytes(self._safetensors(name))
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-ST-006" for f in findings), (
+            f"{name!r} was not reported: {[(f.rule_id, f.message[:60]) for f in findings]}"
+        )
+
+    @pytest.mark.parametrize("name", [
+        "weight", "model.layers.0.attn.q_proj.weight",
+        "encoder/block_0/dense", "a.b-c_d.0",
+    ])
+    def test_ordinary_tensor_names_stay_quiet(self, tmp_path, name):
+        p = tmp_path / "model.safetensors"
+        p.write_bytes(self._safetensors(name))
+        assert ModelFileScanner().scan_file(p) == []
+
+
+class TestOnnxRemoteExternalData:
+    """external_data names a sibling file. A URL there makes loading the
+    model issue a request, and a published proof of concept points one at
+    169.254.169.254, the cloud instance metadata endpoint."""
+
+    @staticmethod
+    def _onnx_with_location(location: str) -> bytes:
+        def field(num, wire, payload):
+            return bytes([(num << 3) | wire]) + payload
+
+        def ld(num, raw):
+            return field(num, 2, bytes([len(raw)]) + raw)
+
+        entry = ld(1, b"location") + ld(2, location.encode())
+        tensor = ld(8, entry) + field(9, 0, b"\x02")
+        return ld(1, ld(12, tensor)) + b"\x08\x07"
+
+    @pytest.mark.parametrize("location", [
+        "http://169.254.169.254/latest/meta-data/",
+        "https://example.invalid/weights.bin",
+        "file:///etc/passwd",
+        "//attacker.invalid/share/w.bin",
+    ])
+    def test_remote_location_is_reported(self, tmp_path, location):
+        p = tmp_path / "model.onnx"
+        p.write_bytes(self._onnx_with_location(location))
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-ONNX-004" for f in findings), (
+            [(f.rule_id, f.message[:70]) for f in findings]
+        )
+
+    def test_ordinary_sibling_file_stays_quiet(self, tmp_path):
+        p = tmp_path / "model.onnx"
+        p.write_bytes(self._onnx_with_location("model.weights"))
+        assert not any(f.rule_id == "MFV-ONNX-004"
+                       for f in ModelFileScanner().scan_file(p))
+
+
+class TestNestedPickleLiteral:
+    """numpy.load(BytesIO(<pickle>)): the outer callable is on nobody's deny
+    list, the outer arguments carry no URL or shell string, and the payload
+    only exists once the inner bytes are themselves unpickled."""
+
+    def test_nested_denied_global_is_critical(self, tmp_path):
+        inner = _os_system_pickle("echo pwned")
+        outer = pickle.dumps({"weights": inner})
+
+        p = tmp_path / "model.pkl"
+        p.write_bytes(outer)
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-PICKLE-008"
+                   and f.severity == Severity.CRITICAL for f in findings), (
+            [(f.rule_id, f.message[:70]) for f in findings]
+        )
+
+    def test_ordinary_bytes_payload_stays_quiet(self, tmp_path):
+        p = tmp_path / "clean.pkl"
+        p.write_bytes(pickle.dumps({"weights": b"\x00\x01\x02" * 500,
+                                    "name": "resnet"}))
+        assert ModelFileScanner().scan_file(p) == []

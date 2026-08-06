@@ -30,6 +30,7 @@ import io
 import json
 import logging
 import lzma
+import pickletools
 import re
 import reprlib
 import shutil
@@ -1433,6 +1434,59 @@ def _iter_pickle_host_port_pairs(value: Any, _seen: set[int] | None = None):
             yield from _iter_pickle_host_port_pairs(item, _seen)
 
 
+# A pickle stream begins with a PROTO opcode (protocols 2 and up) or one of
+# the handful of opcodes a protocol-0 or -1 stream can open with.
+_NESTED_PICKLE_OPENERS = (b"\x80", b"(", b"]", b"}", b"c", b"\x8c", b"\x95")
+
+
+def _nested_pickle_globals(blob: bytes) -> list[str] | None:
+    """Globals referenced by a pickle stream carried inside a bytes literal.
+
+    Resolution is delegated to the same walker the outer stream uses, so
+    STACK_GLOBAL and the memo behave identically one level down. A hand-rolled
+    opcode scan here saw only ``<stack_global>`` and missed every protocol-4
+    payload, which is most of them.
+    """
+    if not isinstance(blob, (bytes, bytearray)) or len(blob) < 4:
+        return None
+    if bytes(blob[:1]) not in _NESTED_PICKLE_OPENERS:
+        return None
+    try:
+        names, _calls, _memo = _resolve_pickle_globals(bytes(blob))
+    except Exception:                                    # noqa: BLE001
+        return None
+    return sorted(names) or None
+
+
+def _embedded_pickle_denied_globals(data: bytes) -> list[str]:
+    """Denied callables hiding in a pickle stream carried as a bytes literal.
+
+    `numpy.load(BytesIO(<pickle>))` is the published shape. numpy.load is on
+    nobody's deny list, the outer stream contains no URL or shell string, and
+    the payload only exists once the inner bytes are themselves unpickled.
+    Any loader handed those bytes will read them, so this scanner reads them
+    too, one level down.
+
+    Deliberately narrow: only inner streams referencing an already-denied
+    callable are reported. A nested pickle on its own is unusual rather than
+    dangerous, and reporting merely unusual structure is how a scanner starts
+    flagging real models.
+    """
+    found: list[str] = []
+    try:
+        ops = list(pickletools.genops(io.BytesIO(data)))
+    except Exception:                                    # noqa: BLE001
+        return found
+    for op, arg, _pos in ops:
+        if op.name not in ("SHORT_BINBYTES", "BINBYTES", "BINBYTES8"):
+            continue
+        nested = _nested_pickle_globals(arg if isinstance(arg, bytes) else b"")
+        for name in nested or ():
+            if _classify_pickle_global(name) == "denied":
+                found.append(name)
+    return sorted(set(found))
+
+
 def _triage_unknown_pickle_call(
     call: PickleResolvedCall | None,
 ) -> tuple[Severity, str] | None:
@@ -1478,6 +1532,7 @@ def _triage_unknown_pickle_call(
 
     if next(_iter_pickle_host_port_pairs(arguments), None) is not None:
         return (Severity.HIGH, "invoked with a network endpoint (host, port) argument")
+
 
     for text in texts:
         # A literal string that *names* something denied, handed to some other
@@ -1946,6 +2001,34 @@ _SAFETENSORS_DTYPE_SIZES: dict[str, int] = {
 _SAFETENSORS_MAX_TENSOR_BYTES = 1 << 32
 
 
+def _unsafe_name_reason(name: str) -> str | None:
+    """Why a tensor or member name is not safe to use as a filename.
+
+    Names inside a model container look inert, but plenty of real tooling
+    turns them into paths: shard converters, `save_pretrained` round trips,
+    and anything that materialises tensors individually. A name carrying a
+    traversal segment, an absolute path or a control character is aimed at
+    that behaviour, and it is not something a training run produces by
+    accident. Published bypass proofs of concept ship exactly these five
+    shapes for SafeTensors alone.
+    """
+    if not isinstance(name, str) or not name:
+        return None
+    if "\x00" in name:
+        return "embedded NUL byte"
+    if "\r" in name or "\n" in name:
+        return "embedded newline, which can forge a record boundary"
+    normalised = name.replace("\\", "/")
+    parts = normalised.split("/")
+    if ".." in parts:
+        return "parent-directory traversal segment"
+    if normalised.startswith("/"):
+        return "absolute path"
+    if len(name) > 1 and name[1] == ":" and name[0].isalpha():
+        return "Windows drive-absolute path"
+    return None
+
+
 def _check_safetensors_layout(header: object, data_section_len: int) -> list[str]:
     """Replay a SafeTensors header's size arithmetic against the file.
 
@@ -1959,6 +2042,9 @@ def _check_safetensors_layout(header: object, data_section_len: int) -> list[str
         return problems
     spans: list[tuple[int, int, str]] = []
     for name, entry in header.items():
+        reason = _unsafe_name_reason(name)
+        if reason is not None:
+            problems.append(f"tensor name {name!r} carries a {reason}")
         if name == "__metadata__" or not isinstance(entry, dict):
             continue
         offsets = entry.get("data_offsets")
@@ -2108,6 +2194,15 @@ def _check_gguf_layout(data: bytes) -> list[str]:
             if name_len > _GGUF_MAX_KEY_BYTES:
                 problems.append(f"tensor {i} name length {name_len} bytes")
                 return problems
+            try:
+                tensor_name = data[offset + 8:offset + 8 + name_len].decode(
+                    "utf-8", "replace")
+            except (ValueError, IndexError):
+                tensor_name = ""
+            reason = _unsafe_name_reason(tensor_name)
+            if reason is not None:
+                problems.append(
+                    f"tensor {i} name {tensor_name!r} carries a {reason}")
             if offset + 8 + name_len + 16 > file_size:
                 problems.append(f"tensor info {i} extends past end of file")
                 return problems
@@ -2590,6 +2685,12 @@ _ONNX_EXTERNAL_DATA_KEYS: frozenset[str] = frozenset(
 # with "/" by convention ("/bert/Cast"), so a leading slash anywhere else is
 # the naming scheme, not a path.
 _ONNX_ABSOLUTE_PATH_RE = re.compile(r"^(?:/[^/]|\\\\|[A-Za-z]:[\\/])")
+
+# Anything that is not a plain relative filename: a scheme, a UNC path,
+# or a protocol-relative reference.
+_ONNX_REMOTE_LOCATION_RE = re.compile(
+    r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*://|//|\\\\\\\\)"
+)
 
 
 def _string_string_entry(value: bytes) -> tuple[str, str] | None:
@@ -3306,6 +3407,25 @@ class ModelFileScanner:
         state_dict the same CRITICAL verdict as actual malware).
         """
         findings: list[Finding] = []
+
+        embedded = _embedded_pickle_denied_globals(data)
+        if embedded:
+            findings.append(Finding(
+                rule_id="MFV-PICKLE-008",
+                message=f"Pickle file carries a second pickle stream as a bytes "
+                        f"literal, and that inner stream references: "
+                        f"{', '.join(embedded)}. Anything handed those bytes "
+                        f"deserializes them, so the outer callable does not need "
+                        f"to be dangerous itself.",
+                severity=Severity.CRITICAL,
+                category=Category.DESERIALIZATION,
+                file_path=str(file_path),
+                start_line=0,
+                confidence=0.9,
+                cwe_ids=[502],
+                engine="mfv",
+                metadata={"nested_globals": embedded},
+            ))
 
         try:
             globals_found, resolved_calls, memo_profile = _resolve_pickle_globals(data)
@@ -4699,6 +4819,33 @@ class ModelFileScanner:
             ))
 
         external_maps = _onnx_external_data_maps(data)
+        # A location is meant to name a sibling file. A URL there makes the
+        # loader fetch it, which is SSRF from inside a model: a published
+        # proof of concept points one at 169.254.169.254, the cloud instance
+        # metadata endpoint, to lift credentials during a scan or a load.
+        remote_locations = sorted({
+            location
+            for entries in external_maps
+            for location in [entries.get("location", "")]
+            if _ONNX_REMOTE_LOCATION_RE.match(location)
+        })
+        if remote_locations:
+            findings.append(Finding(
+                rule_id="MFV-ONNX-004",
+                message=f"ONNX external_data location(s) point off the filesystem: "
+                        f"{', '.join(remote_locations[:5])}. The loader fetches "
+                        f"what location names, so a URL here makes loading the "
+                        f"model issue a request the operator never asked for.",
+                severity=Severity.HIGH,
+                category=Category.SSRF,
+                file_path=str(file_path),
+                start_line=0,
+                confidence=0.85,
+                cwe_ids=[918],
+                engine="mfv",
+                metadata={"locations": remote_locations[:20]},
+            ))
+
         bad_locations = sorted({
             location
             for entries in external_maps
