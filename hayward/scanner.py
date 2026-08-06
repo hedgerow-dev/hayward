@@ -1016,6 +1016,8 @@ def _walk_one_pickle(
             if len(parts) == 2:
                 ref = f"{parts[0]}.{parts[1]}"
                 globals_found.append(ref)
+                if (laundered := _laundered_denied_ref(parts[1])) is not None:
+                    globals_found.append(laundered)
                 stack.append(_PickleGlobalRef(ref))
         elif name == "INST" and isinstance(arg, str):
             # Protocol 0's old-style-class instantiation opcode. Resolves a
@@ -1035,6 +1037,8 @@ def _walk_one_pickle(
             if len(parts) == 2:
                 ref = f"{parts[0]}.{parts[1]}"
                 globals_found.append(ref)
+                if (laundered := _laundered_denied_ref(parts[1])) is not None:
+                    globals_found.append(laundered)
                 _record_call(ref, call_args)
                 # Real semantics push the newly constructed *instance*, not
                 # the class -- an opaque value, so a later opcode can't
@@ -1060,6 +1064,9 @@ def _walk_one_pickle(
                 module = stack.pop()
                 ref = f"{module}.{qualname}"
                 globals_found.append(ref)
+                if isinstance(module, str) and isinstance(qualname, str):
+                    if (laundered := _laundered_denied_ref(qualname)) is not None:
+                        globals_found.append(laundered)
                 stack.append(_PickleGlobalRef(ref))
         elif name == "REDUCE":
             if len(stack) >= 2:
@@ -1178,6 +1185,45 @@ def _classify_pickle_global(ref: str) -> str:
     if root in _PICKLE_ALLOWED_ML_CLASS_ROOTS and _PICKLE_ML_CLASS_NAME_RE.match(name):
         return "allowed"
     return "unknown"
+
+
+def _laundered_denied_ref(qualname: str) -> str | None:
+    """The denied callable a dotted GLOBAL *name* reaches by attribute walk.
+
+    A deny list keyed on the joined `module.name` string is bypassed by moving
+    the interesting half into the name. CPython's `Unpickler.find_class`, for
+    protocol 4 and above, resolves the name with `pickle._getattribute`, which
+    splits on "." and getattrs each segment in turn. So
+
+        GLOBAL "torch.serialization" "os.system"
+
+    resolves to `os.system` on load, while the joined ref this walk records is
+    `torch.serialization.os.system`, which is on no list and lands in the
+    unknown bucket. Any module that does `import os` works as the prefix --
+    logging, shutil, zipfile, pathlib, tarfile and platform all do -- so the
+    supply of benign-looking prefixes is effectively unlimited and no amount of
+    adding names to the deny list closes it.
+
+    Every tail of the qualname is reachable, not just the whole of it, because
+    the walk is per-segment: `_getattribute(os, "path.os.system")` succeeds the
+    same way. The module half is not traversed (it is a single `sys.modules`
+    lookup), so tails starting inside it are not candidates.
+
+    Returns the first tail that is already denied, or None. Deliberately
+    narrow: nothing is reported unless it resolves to something the deny list
+    already covers, so a benign dotted qualname such as a nested class
+    `Outer.Inner` is unaffected. Not gated on the protocol byte -- a dotted
+    name that spells a denied callable is evidence of intent even in a
+    protocol-2 stream where it would fail to load.
+    """
+    if "." not in qualname:
+        return None
+    parts = qualname.split(".")
+    for i in range(len(parts) - 1):
+        candidate = ".".join(parts[i:])
+        if _classify_pickle_global(candidate) == "denied":
+            return candidate
+    return None
 
 
 # ── Unknown-bucket re-triage ────────────────────────────────────────
@@ -3023,6 +3069,7 @@ class ModelFileScanner:
             # "data-only" rejection assumed.
             ".pmml": ModelFormat.PMML,
         }
+
 
     def scan_file(self, file_path: Path) -> list[Finding]:
         """Scan a single model file."""

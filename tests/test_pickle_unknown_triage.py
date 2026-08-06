@@ -1041,3 +1041,80 @@ class TestDynamicMemberLookupChain:
         )
         assert triaged[0].severity == Severity.MEDIUM
         assert "its own result is then invoked" in triaged[0].message
+
+
+class TestDottedGlobalNameLaundering:
+    """A deny list keyed on the joined `module.name` is bypassed by moving
+    the interesting half into the *name*.
+
+    For protocol 4 and above, `Unpickler.find_class` resolves the name with
+    `pickle._getattribute`, which splits on "." and walks the attributes one
+    segment at a time. So `GLOBAL "torch" "serialization.os.system"` reaches
+    `os.system` on load, while the joined reference is
+    `torch.serialization.os.system`, which matches no list entry and lands in
+    the unknown bucket.
+
+    The prefix supply is unlimited: any module that does `import os` works,
+    and logging, shutil, zipfile, pathlib, tarfile, platform and site all do.
+    Adding names to the deny list therefore cannot close this.
+
+    The two-segment fixture below is the shape found in the wild (PickleBall's
+    CCS'25 artifact, `ours/call_system.pkl`); note that the module half there
+    is just `torch`, so checking only the whole qualname would miss it and the
+    walk has to consider every tail.
+    """
+
+    def test_dotted_name_reaching_denied_callable_is_denied(self, tmp_path):
+        data = (
+            b"\x80\x04"
+            + b"ctorch\nserialization.os.system\n"   # GLOBAL, dotted name
+            + b"(" + _short_binunicode("echo pwned")
+            + b"tR."                                  # TUPLE, REDUCE, STOP
+        )
+        findings = _scan(tmp_path, "laundered_global.pkl", data)
+        denied = [f for f in findings if f.rule_id == "MFV-PICKLE-001"]
+        assert denied, (
+            "dotted-name laundering stayed out of the deny list: "
+            f"{[(f.rule_id, f.severity) for f in findings]}"
+        )
+        assert "os.system" in denied[0].message
+
+    def test_laundering_via_stack_global_is_denied(self, tmp_path):
+        data = (
+            b"\x80\x04"
+            + _short_binunicode("zipfile") + _short_binunicode("os.system") + b"\x93"
+            + _short_binunicode("echo pwned") + b"\x85"
+            + b"R."
+        )
+        findings = _scan(tmp_path, "laundered_stack_global.pkl", data)
+        denied = [f for f in findings if f.rule_id == "MFV-PICKLE-001"]
+        assert denied, (
+            "STACK_GLOBAL laundering stayed out of the deny list: "
+            f"{[(f.rule_id, f.severity) for f in findings]}"
+        )
+
+    def test_deeper_tail_is_still_reached(self, tmp_path):
+        """`_getattribute` walks every segment, so a tail buried further in
+        resolves too: os -> os.path -> os.path.os -> .system."""
+        data = (
+            b"\x80\x04"
+            + b"cos\npath.os.system\n"
+            + b"(" + _short_binunicode("echo pwned")
+            + b"tR."
+        )
+        findings = _scan(tmp_path, "laundered_deep.pkl", data)
+        assert [f for f in findings if f.rule_id == "MFV-PICKLE-001"]
+
+    def test_benign_dotted_qualname_is_not_promoted(self, tmp_path):
+        """A nested class serialises as a dotted qualname too. Nothing is
+        reported unless a tail resolves to something already denied, so the
+        ordinary case is untouched."""
+        data = (
+            b"\x80\x04"
+            + _short_binunicode("mypackage.models") + _short_binunicode("Outer.Inner")
+            + b"\x93" + b")R."
+        )
+        findings = _scan(tmp_path, "benign_nested_class.pkl", data)
+        assert not [f for f in findings if f.rule_id == "MFV-PICKLE-001"], (
+            f"benign nested class was denied: {[f.rule_id for f in findings]}"
+        )
