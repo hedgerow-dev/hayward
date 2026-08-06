@@ -7,6 +7,10 @@ suppression, a ticket or a dashboard, so they do not get renamed.
 Hayward dispatches on magic bytes, walks the container, and simulates the
 pickle virtual machine without importing or executing anything it reads.
 
+A name that a model file uses to identify a tensor is treated as a path
+wherever real tooling would write it to one. A traversal segment or an
+embedded newline in a tensor name is not something a training run produces.
+
 Severity is fixed per rule except `MFV-PICKLE-005` and `MFV-PICKLE-006`, which
 derive theirs from the strength of the evidence found.
 
@@ -21,6 +25,7 @@ derive theirs from the strength of the evidence found.
 | `MFV-PICKLE-005` | HIGH/MEDIUM/LOW | 502 | An unknown callable's **resolved arguments** convict it: a URL, a shell-shaped string, a `(host, port)` pair, or a literal naming a denied global. Severity follows the strength of the signal, never the callable's name |
 | `MFV-PICKLE-006` | HIGH/MEDIUM | 502 | An allow-listed callable is handed an argument no legitimate model would supply |
 | `MFV-PICKLE-007` | HIGH | 502 | Memo slots sit in a band far from the rest of the stream, the signature of a spliced-in pickle |
+| `MFV-PICKLE-008` | CRITICAL | 502 | A **second pickle stream is carried as a bytes literal** and references a denied callable. `numpy.load(BytesIO(<pickle>))` is the shape: the outer callable is on no deny list and the payload exists only once the inner bytes are read |
 | `MFV-JOBLIB-002` | HIGH | - | joblib's zlib payload exceeds the decompressed-size limit |
 
 ## SafeTensors
@@ -32,7 +37,7 @@ derive theirs from the strength of the evidence found.
 | `MFV-ST-003` | HIGH | - | Header extends past the end of the file |
 | `MFV-ST-004` | HIGH | - | Header is not valid JSON |
 | `MFV-ST-005` | CRITICAL | - | Metadata carries keys that could attempt execution on load |
-| `MFV-ST-006` | HIGH | 787 | Offsets, shapes and dtypes do not agree with the file. Loaders allocate and `memcpy` from these numbers |
+| `MFV-ST-006` | HIGH | 787 | Offsets, shapes and dtypes do not agree with the file (loaders allocate and `memcpy` from these numbers), **or a tensor name carries a path**: traversal segment, absolute or drive-absolute path, embedded NUL or newline |
 
 ## GGUF
 
@@ -42,7 +47,7 @@ derive theirs from the strength of the evidence found.
 | `MFV-GGUF-002` | CRITICAL | - | Metadata carries suspicious content |
 | `MFV-GGUF-003` | CRITICAL | 94, 1336 | `tokenizer.chat_template` contains a code-execution construct in Jinja2 syntax |
 | `MFV-GGUF-004` | INFO | - | Magic is valid but the KV section will not parse. **Not a clean verdict**, see coverage limits |
-| `MFV-GGUF-005` | HIGH | 787, 190 | Container arithmetic wraps or overruns the file. The `CVE-2025-53630` / `CVE-2026-27940` / `CVE-2026-33298` class |
+| `MFV-GGUF-005` | HIGH | 787, 190 | Container arithmetic wraps or overruns the file (the `CVE-2025-53630` / `CVE-2026-27940` / `CVE-2026-33298` class), **or a tensor name carries a path** |
 
 ## Other formats
 
@@ -53,6 +58,7 @@ derive theirs from the strength of the evidence found.
 | `MFV-ONNX-001` | HIGH | 502, 94 | Custom op with documented code-execution behaviour (PyOp/PythonOp) |
 | `MFV-ONNX-002` | MEDIUM | 22 | Path string with `..` traversal, or an absolute `external_data` location |
 | `MFV-ONNX-003` | HIGH | 502 | `external_data` key outside the four-key contract. `CVE-2026-34445` |
+| `MFV-ONNX-004` | HIGH | 918 | `external_data` location points off the filesystem (a URL, UNC or protocol-relative reference). The loader fetches what `location` names, so loading the model issues a request. A published proof of concept points one at `169.254.169.254`, the cloud metadata endpoint |
 | `MFV-TF-001` | HIGH | 502, 94 | SavedModel graph op that touches the filesystem or invokes embedded Python |
 | `MFV-TFLITE-001` | HIGH | 190, 125 | Tensor dimensions inconsistent with a 32-bit loader. `CVE-2026-42627` |
 | `MFV-NPZ-001` | MEDIUM | 22 | NPZ member violates zip-safety discipline (traversal, absolute path, duplicate name) |

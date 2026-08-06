@@ -65,7 +65,7 @@ findings = ModelFileScanner().scan_directory(Path("models"))
 ## Documentation
 
 - [Usage](docs/usage.md): CLI reference, exit codes, CI, the GUI, the Python API
-- [Rules](docs/rules.md): all 40 rules with severities and CWE mappings
+- [Rules](docs/rules.md): all 42 rules with severities and CWE mappings
 - [Coverage](docs/coverage.md): what it does when it cannot read a file, and why that is a finding
 - [How it works](docs/how-it-works.md): opcode walking and argument-evidence promotion
 - [Accuracy](docs/accuracy.md): measured results, the caveats, and where it loses

@@ -4,6 +4,44 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- `MFV-PICKLE-008`: a second pickle stream carried as a bytes literal, where
+  the inner stream references a denied callable. `numpy.load(BytesIO(<pickle>))`
+  is the shape, and the outer callable is on no deny list.
+- `MFV-ONNX-004`: an `external_data` location pointing off the filesystem. A
+  published proof of concept points one at `169.254.169.254`, so loading the
+  model reaches the cloud metadata endpoint.
+- Tensor names are validated as paths wherever tooling would write them to
+  one, covering traversal segments, absolute and drive-absolute paths, and
+  embedded NUL or newline. Folded into `MFV-ST-006` and `MFV-GGUF-005`.
+- joblib is read behind gzip, bz2, lzma and xz, not only zlib. A published
+  proof of concept hides `builtins.eval` behind lzma, and every scanner
+  measured missed it.
+
+### Fixed
+
+- A `.7z` member that is a symlink was followed out of the extraction
+  directory, so a crafted archive could read an arbitrary file and print it
+  into the report (CWE-59, CWE-22).
+- Directory scans reported directories named like model files as unreadable.
+  Model caches name directories after the file they hold, so this was
+  routine.
+- GGML files, which whisper.cpp still publishes under a `.gguf` name, were
+  reported as corrupt GGUF. They are now non-coverage.
+- `tokenizer.ggml.merges` and the other tokenizer tables tripped the metadata
+  content check. They are vocabulary built from training text.
+- A crafted GGUF raised `OverflowError` out of the scanner rather than
+  producing a verdict.
+- `python -m hayward` had no entry point.
+
+### Changed
+
+- Accuracy figures are labelled self-measured and not currently reproducible,
+  because the harness that produces them is not published.
+
 ## 1.0.0 (2026-08-05)
 
 First release. The scanner was developed inside a larger static-analysis tool
