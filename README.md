@@ -1,7 +1,19 @@
-# Hayward
+<h1 align="center">Hayward</h1>
 
-**Security scanner for machine-learning model files.** Know whether a
-checkpoint will run code on your machine, before you load it.
+<p align="center">
+  <strong>Security scanner for machine-learning model files.</strong><br>
+  Know whether a checkpoint will run code on your machine, before you load it.
+</p>
+
+<p align="center">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
+  <img alt="Dependencies: 1" src="https://img.shields.io/badge/dependencies-1-brightgreen">
+  <img alt="Rules: 42" src="https://img.shields.io/badge/rules-42-orange">
+  <img alt="Runs offline" src="https://img.shields.io/badge/network-none-informational">
+</p>
+
+---
 
 ```bash
 pip install hayward
@@ -19,8 +31,11 @@ CRITICAL MFV-PICKLE-001  checkpoints/model.pt
 ## The problem
 
 `torch.load`, `joblib.load` and `numpy.load(allow_pickle=True)` execute code
-from the file they read. That is not a bug, it is what pickle does. Every model
-you download from a hub is an executable, and opening it is running it.
+from the file they read. That is not a bug, it is what pickle does.
+
+The file is named `pytorch_model.bin`, and the `.bin` is doing a lot of work
+in that sentence. It is a program. Loading it is running it, on your laptop,
+with your credentials, as you.
 
 ## What makes it different
 
@@ -46,9 +61,15 @@ extensions, no network. Python 3.10 and up.
 
 ## What it scans
 
-Pickle in every wrapper it ships in (PyTorch, joblib, NumPy, TorchServe,
-NeMo, skops), plus SafeTensors, GGUF, Keras, ONNX, TensorFlow, TFLite and
-PMML. Format comes from magic bytes, so a renamed file does not slip through.
+| | Formats |
+|---|---|
+| **Pickle, and everything that wraps it** | PyTorch (zip and legacy), joblib, NumPy `.npy` / `.npz`, TorchServe `.mar`, NVIDIA NeMo, skops |
+| **Tensor containers** | SafeTensors, GGUF, TFLite |
+| **Graph formats** | ONNX, TensorFlow SavedModel, Keras (H5 and `.keras`), PMML |
+
+24 extensions in total. **Format comes from magic bytes**, so a payload
+renamed `weights.safetensors` does not walk past on the strength of its
+extension.
 
 ## Three ways to run it
 
@@ -63,6 +84,13 @@ from hayward import ModelFileScanner
 findings = ModelFileScanner().scan_directory(Path("models"))
 ```
 
+## What a clean result means
+
+That Hayward read the files and recognised nothing dangerous in them. Not that
+the model is safe. It is a smoke alarm, not a survey of the building, and
+[coverage](docs/coverage.md) is the page where it owns up to the rooms it
+could not get into.
+
 ## Documentation
 
 - [Usage](docs/usage.md): CLI reference, exit codes, CI, the GUI, the Python API
@@ -73,7 +101,9 @@ findings = ModelFileScanner().scan_directory(Path("models"))
 
 ## Contributing
 
-The most useful contribution is a file Hayward gets wrong.
+The most useful contribution is a file Hayward gets wrong. False alarms count
+just as much as misses. A scanner nobody trusts is a scanner nobody runs, and
+then it may as well not exist.
 
 ```bash
 git clone https://github.com/hedgerow-dev/hayward
