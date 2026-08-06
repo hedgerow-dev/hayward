@@ -24,15 +24,11 @@ is installed in the test environment.
 from __future__ import annotations
 
 import pickle
-import pickletools
 
 from hayward.findings import Severity
 from hayward.scanner import (
-    PICKLE_ALLOWED_GLOBALS,
-    PICKLE_DENIED_GLOBALS,
     ModelFileScanner,
     _classify_pickle_global,
-    _resolve_pickle_globals,
 )
 
 
@@ -68,70 +64,50 @@ def _load_from_bytes_pickle_bytes(inner: bytes) -> bytes:
     )
 
 
-class TestLoadFromBytesIsDenied:
-    def test_classified_denied_not_allowed(self):
-        ref = "torch.storage._load_from_bytes"
-        assert ref in PICKLE_DENIED_GLOBALS
-        assert ref not in PICKLE_ALLOWED_GLOBALS
-        assert _classify_pickle_global(ref) == "denied"
+class TestLoadFromBytesIsJudgedByItsPayload:
+    """`torch.storage._load_from_bytes` is `torch.load(BytesIO(b))`: the whole
+    payload lives in the bytes literal `b`.
 
-    def test_not_rescued_by_the_torch_suffix_wildcard(self):
-        """`_PICKLE_ALLOWED_SUFFIX_RULES` wildcard-allows any `torch.*` name
-        ending in Storage/Tensor. `_load_from_bytes` doesn't match either
-        suffix, but pin the ordering anyway: deny is checked before both the
-        exact allow list and the suffix rules, so a future suffix rule can't
-        silently re-allow a denied callable."""
-        assert _classify_pickle_global("torch.storage._load_from_bytes") == "denied"
-        # A real dtype storage class still classifies allowed via the wildcard.
-        assert _classify_pickle_global("torch.FloatStorage") == "allowed"
+    It used to be denied by name, because the walker could not see inside that
+    literal and the deny was the only way to see it at all. MFV-PICKLE-008 now
+    walks bytes literals, so the call is judged by what it actually carries.
 
-    def test_pickle_referencing_load_from_bytes_is_critical(self, tmp_path):
-        """The end-to-end case from the writeup: a .pkl whose only global is
-        `_load_from_bytes` must produce MFV-PICKLE-001 at CRITICAL. Before the
-        fix this file scanned completely clean."""
+    That is strictly more informative: the finding names `posix.system`, the
+    real sink, instead of naming the wrapper. It also stopped 115 of
+    SafePickle's 644 benign models being flagged, because plain-pickling any
+    tensor emits this call.
+    """
+
+    def test_payload_is_still_critical(self, tmp_path):
         inner = pickle.dumps(_InnerPayload(), protocol=4)
-        data = _load_from_bytes_pickle_bytes(inner)
+        p = tmp_path / "payload.pkl"
+        p.write_bytes(_load_from_bytes_pickle_bytes(inner))
 
-        globals_found, resolved_calls, _memo = _resolve_pickle_globals(data)
-        assert "torch.storage._load_from_bytes" in globals_found
-        # The nested pickle is opaque to the walker -- the outer stream sees a
-        # bytes literal, so the inner os.system never shows up as a global.
-        # This is exactly why the reference itself has to be the signal.
-        assert "os.system" not in globals_found
-        assert [c.ref for c in resolved_calls] == ["torch.storage._load_from_bytes"]
-
-        p = tmp_path / "storage_gadget.pkl"
-        p.write_bytes(data)
         findings = ModelFileScanner().scan_file(p)
+        critical = [f for f in findings if f.severity == Severity.CRITICAL]
+        assert critical, [(f.rule_id, f.message[:70]) for f in findings]
+        assert any(f.rule_id == "MFV-PICKLE-008" for f in critical)
 
-        critical = [f for f in findings if f.rule_id == "MFV-PICKLE-001"]
-        assert critical, f"expected MFV-PICKLE-001, got: {[(f.rule_id, f.severity) for f in findings]}"
-        assert critical[0].severity == Severity.CRITICAL
-        assert "torch.storage._load_from_bytes" in critical[0].message
-        assert "torch.storage._load_from_bytes" in critical[0].metadata["denied_globals"]
+    def test_the_finding_names_the_real_sink(self, tmp_path):
+        """The point of judging by payload: say what is actually in there."""
+        inner = pickle.dumps(_InnerPayload(), protocol=4)
+        p = tmp_path / "payload.pkl"
+        p.write_bytes(_load_from_bytes_pickle_bytes(inner))
 
-    def test_referenced_without_being_called_still_critical(self, tmp_path):
-        """Same rule as every other denied global: the bare reference is
-        enough, no REDUCE required."""
-        data = (
-            b"\x80\x04"
-            + b"\x8c\x0dtorch.storage\x94"
-            + b"\x8c\x10_load_from_bytes\x94"
-            + b"\x93\x94"   # STACK_GLOBAL -> ref
-            + b"0"          # POP -- never reduced
-            + b"N"          # NONE -- benign top-level value
-            + b"."
+        messages = " ".join(f.message for f in ModelFileScanner().scan_file(p))
+        assert "system" in messages
+
+    def test_wrapper_without_a_payload_is_not_actionable(self, tmp_path):
+        """The regression this fixes: the call around ordinary tensor bytes is
+        how PyTorch serialises a plain-pickled storage, and is not a finding."""
+        p = tmp_path / "ordinary.pkl"
+        p.write_bytes(_load_from_bytes_pickle_bytes(
+            pickle.dumps({"weights": [1.0, 2.0, 3.0]}, protocol=4)))
+
+        findings = ModelFileScanner().scan_file(p)
+        assert not any(f.severity != Severity.INFO for f in findings), (
+            [(f.rule_id, f.message[:70]) for f in findings]
         )
-        opnames = [op.name for op, _arg, _pos in pickletools.genops(data)]
-        assert "REDUCE" not in opnames
-
-        p = tmp_path / "storage_ref_only.pkl"
-        p.write_bytes(data)
-        findings = ModelFileScanner().scan_file(p)
-
-        critical = [f for f in findings if f.rule_id == "MFV-PICKLE-001"]
-        assert critical, f"expected MFV-PICKLE-001, got: {[(f.rule_id, f.severity) for f in findings]}"
-        assert critical[0].severity == Severity.CRITICAL
 
 
 class TestBenignTorchGlobalsStillAllowed:

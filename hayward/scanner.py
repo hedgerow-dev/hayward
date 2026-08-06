@@ -114,25 +114,33 @@ PICKLE_DENIED_GLOBALS: frozenset[str] = frozenset({
     "trace.Trace.run", "trace.Trace.runctx",
     # cloudpickle reconstructs live functions from marshalled code objects --
     # arbitrary code execution by construction, and no model's weights need it.
-    "cloudpickle.cloudpickle._builtin_type",
+    #
+    # `_builtin_type` is the exception and is deliberately absent: it maps a
+    # name to a type object ("CodeType" -> types.CodeType) and executes
+    # nothing on its own. It appeared in 56 files of SafePickle's benign half,
+    # 140 of whose 144 flagged files relied on cloudpickle or torch internals
+    # with no sink anywhere in the stream. The companions below are what turn
+    # a code object into a callable, and they stay.
     "cloudpickle.cloudpickle._function_setstate",
     "cloudpickle.cloudpickle._make_cell",
     "cloudpickle.cloudpickle._make_empty_cell",
     "cloudpickle.cloudpickle._make_function",
     "cloudpickle.cloudpickle.subimport",
     # torch's own internals reachable from a checkpoint.
-    # `def _load_from_bytes(b): return torch.load(io.BytesIO(b), weights_only=False)`
-    # (torch/storage.py) -- a nested *unrestricted* torch.load whose argument is a
-    # complete second pickle carried inline as a literal bytes blob. Unlike the
-    # other entries here it needs no companion global to be useful: the whole
-    # payload lives inside `b`, which this walker never descends into, so the
-    # inner stream is invisible to opcode analysis. PyTorch's own weights_only
-    # allowlist deliberately excludes it, which is why torch.load(weights_only=True)
-    # rejects it; this scanner previously *allowed* it, making it more permissive
-    # than the loader it models. torch.save() never emits it (storages go through
-    # persistent_id), so real .pt/.pth checkpoints are unaffected -- it appears only
-    # when a tensor/storage is plain-pickled, which is itself a load-time RCE sink.
-    "torch.storage._load_from_bytes",
+    #
+    # `torch.storage._load_from_bytes` is deliberately absent. It is
+    # `torch.load(io.BytesIO(b), weights_only=False)`: a nested unrestricted
+    # load whose whole payload lives in the bytes literal `b`. It was denied
+    # outright because that inner stream was invisible to this walker, which
+    # made the deny the only way to see it at all.
+    #
+    # That justification expired when MFV-PICKLE-008 started walking bytes
+    # literals. The inner stream is now read directly, so the call is judged
+    # by what it actually carries rather than by its name. The old comment
+    # also claimed torch.save() never emits it, so real checkpoints were
+    # unaffected: SafePickle's benign half contains 115 files that do, because
+    # plain-pickling a tensor emits it too. Denying it unconditionally cost
+    # 115 false positives to catch payloads the nested walk now sees.
     "torch.serialization.load",
     "torch.utils.collect_env.run",
     "torch._inductor.codecache.compile_file",
@@ -1201,6 +1209,48 @@ _PICKLE_ARG_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]{1,15}://", re.I)
 # rather than merely present. `curl http://x | sh` matches; an ordinary
 # value like `a;b` or a base64 blob containing `+/=` does not.
 _PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`|\s[;&|]|[;&|]\s")
+# Callables that rebuild a code object or a function from its parts. Every
+# code object carries co_filename, the absolute path of the source it was
+# compiled from, so a path argument here is structural metadata rather than a
+# choice the pickle's author made. Measured on SafePickle's benign half: 81 of
+# 644 real models were promoted to a LOW finding on strings like
+# "/nfs/staff-hdd/.../site-packages/timm/layers/conv2d_same.py".
+#
+# The same applies to the identifier arguments. dill and cloudpickle serialise
+# a function together with the names its body references, so a function that
+# calls compile() or open() carries those names as data. Reading them as a
+# getattr/attrgetter chain resolving a denied callable is the same mistake as
+# reading co_filename as a chosen path: 80 more of SafePickle's 644 benign
+# models were promoted this way.
+#
+# Suppressed for these callables: the path signal and the attribute-name
+# signal. Still promoting: a URL, a shell-shaped string, a (host, port) pair,
+# and a literal that is Python *source* resolving a denied callable. None of
+# those is anything a code object carries by construction, and the real sink
+# in a dill-based gadget is still reached by MFV-PICKLE-001.
+_PICKLE_CODE_OBJECT_BUILDERS: frozenset[str] = frozenset({
+    "dill._dill._create_code",
+    "dill._dill._create_function",
+    "dill._dill._create_type",
+    "cloudpickle.cloudpickle._make_function",
+    "cloudpickle.cloudpickle._make_skel_func",
+    "cloudpickle.cloudpickle._builtin_type",
+    "types.CodeType",
+    "types.FunctionType",
+    "marshal.loads",
+})
+
+
+# Callables whose first argument is a pattern, not a command. A regex is dense
+# with the same characters a shell line uses (| ^ $ ( ) . *), so running the
+# command-shape patterns over one measures how complex the regex is. 40 of
+# SafePickle's benign models were promoted on tokeniser patterns like
+# "^§|^%|^=|^—|^–|^\\+(?![0-9])".
+_PICKLE_PATTERN_ARG_CALLABLES: frozenset[str] = frozenset({
+    "re._compile", "re.compile", "regex._compile", "regex.compile",
+})
+
+
 _PICKLE_ARG_PATH_RE = re.compile(r"^(?:/|~/|[A-Za-z]:[\\/])|\.\.[\\/]")
 _PICKLE_ARG_HOSTNAME_RE = re.compile(
     r"^(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9\-]+$"
@@ -1551,6 +1601,11 @@ def _triage_unknown_pickle_call(
         # does not guess at values it cannot verify.
         return None
 
+    # A code object carries its source path in co_filename, so the path signal
+    # says nothing about this call. Every other signal still applies.
+    is_code_builder = call.ref in _PICKLE_CODE_OBJECT_BUILDERS
+    takes_pattern = call.ref in _PICKLE_PATTERN_ARG_CALLABLES
+
     if call.partial_texts:
         # Only some arguments resolved. The text signals below still apply --
         # a literal is a literal wherever it sat in the argument list -- but
@@ -1567,6 +1622,9 @@ def _triage_unknown_pickle_call(
         ]
 
     for text in texts:
+        if takes_pattern:
+            # The argument is a regular expression by the callable's contract.
+            continue
         if _PICKLE_ARG_URL_RE.search(text):
             return (Severity.HIGH, "invoked with a URL argument")
         if _PICKLE_ARG_SHELL_RE.search(text) or (text.startswith("/") and " " in text.strip()):
@@ -1610,7 +1668,7 @@ def _triage_unknown_pickle_call(
                 f"of an eval-family gadget, where the evaluator is interchangeable and only "
                 f"the target it is handed matters",
             )
-        if text in _PICKLE_DENIED_ATTR_NAMES:
+        if text in _PICKLE_DENIED_ATTR_NAMES and not is_code_builder:
             return (
                 Severity.MEDIUM,
                 f"invoked with {text!r}, the attribute name of a known code-execution "
@@ -1649,7 +1707,13 @@ def _triage_unknown_pickle_call(
     # MEDIUM, matching the getattr/attrgetter tier above: this establishes that
     # a member is being resolved dynamically and then called, not what it
     # resolves to.
-    if call.chained_from and call.result_invoked:
+    # Code-object builders are exempt, and they are the counterexample this
+    # comment worried about. `dill._create_function(_create_code(...),
+    # globals, '__name__', ...)` has all three links by construction: it
+    # consumes a code object, is handed the function's own name as a literal,
+    # and the function it returns is then called. Measured on SafePickle's
+    # benign half, that shape alone promoted 80 of 644 real models.
+    if call.chained_from and call.result_invoked and not is_code_builder:
         identifiers = [t for t in texts if t.isidentifier()]
         if identifiers:
             return (
@@ -1661,7 +1725,7 @@ def _triage_unknown_pickle_call(
             )
 
     for text in texts:
-        if _PICKLE_ARG_PATH_RE.search(text):
+        if _PICKLE_ARG_PATH_RE.search(text) and not is_code_builder:
             # Weak on its own -- `pathlib.PurePosixPath('/home/u/model.bin')`
             # looks identical to `linecache.getline('/etc/passwd', 1)` at the
             # opcode level, and a file read is not code execution either way.
