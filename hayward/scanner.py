@@ -163,6 +163,10 @@ PICKLE_ALLOWED_GLOBALS: frozenset[str] = frozenset({
     "collections.Counter", "collections.deque",
     "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.list",
     "builtins.tuple", "builtins.bytearray", "builtins.complex",
+    # slice() builds a data object and cannot execute anything. It appears in
+    # ordinary sklearn and pandas pickles, and only became visible here once
+    # the walk learned to resync past raw array bytes.
+    "builtins.slice",
     "__builtin__.set", "__builtin__.frozenset",
     "copyreg._reconstructor", "copyreg.__newobj__", "copyreg.__newobj_ex__",
     "_codecs.encode",
@@ -605,6 +609,29 @@ class PickleResolvedCall:
         return f"{self.ref}({', '.join(parts)})"
 
 
+# A protocol-2-or-later pickle opens with PROTO and its version byte. That
+# two-byte marker is what a resync looks for: it is specific enough not to
+# match often in tensor data, and every payload worth finding after a raw
+# array uses one.
+_PICKLE_RESYNC_MARKERS: tuple[bytes, ...] = tuple(
+    b"\x80" + bytes([proto]) for proto in range(2, 6)
+)
+
+# Bounded so a file of near-misses cannot turn the walk quadratic. Real
+# joblib files interleave a handful of arrays, not hundreds.
+_MAX_PICKLE_RESYNCS = 16
+
+
+def _next_pickle_offset(data: bytes, at: int) -> int | None:
+    """Where the next pickle plausibly starts, at or after `at`."""
+    best: int | None = None
+    for marker in _PICKLE_RESYNC_MARKERS:
+        found = data.find(marker, at)
+        if found != -1 and (best is None or found < best):
+            best = found
+    return best
+
+
 def _resolve_pickle_globals(
     data: bytes,
 ) -> tuple[list[str], list[PickleResolvedCall], PickleMemoProfile]:
@@ -654,6 +681,7 @@ def _resolve_pickle_globals(
     stream = io.BytesIO(data)
     total = len(data)
     is_first = True
+    resyncs = 0
     while stream.tell() < total:
         start = stream.tell()
         calls_before = len(resolved_calls)
@@ -689,7 +717,21 @@ def _resolve_pickle_globals(
         # reset at STOP, so a chain cannot span two pickles.
         _propagate_result_invoked(resolved_calls, calls_before)
         if stopped:
-            break
+            # The walk died inside raw data spliced into the stream. joblib
+            # does this by design, and a payload placed *after* the arrays was
+            # therefore never read: ModelAudit finds one that this walk missed
+            # (quickset case joblib-payload-after-raw-array). Skip forward to
+            # the next PROTO marker and keep going rather than giving up on
+            # the rest of the file.
+            if resyncs >= _MAX_PICKLE_RESYNCS:
+                break
+            resume = _next_pickle_offset(data, max(stream.tell(), start + 1))
+            if resume is None:
+                break
+            resyncs += 1
+            stream.seek(resume)
+            is_first = False
+            continue
         if stream.tell() <= start:
             # Defensive: a zero-length advance would spin forever on a
             # malformed stream, and this walks attacker-controlled bytes.

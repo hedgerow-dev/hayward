@@ -1289,3 +1289,50 @@ class TestNestedPickleLiteral:
         p.write_bytes(pickle.dumps({"weights": b"\x00\x01\x02" * 500,
                                     "name": "resnet"}))
         assert ModelFileScanner().scan_file(p) == []
+class TestWalkResyncsPastRawArrayBytes:
+    """joblib splices raw array data into the opcode stream, so the walk dies
+    partway through by design. Breaking out of the loop there meant a payload
+    placed *after* the arrays was never read.
+
+    Found by the benchmark rather than by review: ModelAudit flags the
+    published proof of concept (vellaveto/joblib-scanner-bypass-poc,
+    payload3_hidden_in_numpy) and this scanner did not.
+    """
+
+    @staticmethod
+    def _payload_after_raw(filler: bytes) -> bytes:
+        head = pickle.dumps({"description": "weights follow"})
+        return head + filler + _os_system_pickle("echo pwned")
+
+    def test_payload_after_raw_bytes_is_found(self, tmp_path):
+        p = tmp_path / "model.pkl"
+        p.write_bytes(self._payload_after_raw(b"\x01\x02\x03\x04" * 2048))
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings), (
+            [(f.rule_id, f.message[:70]) for f in findings]
+        )
+
+    def test_payload_after_compressed_raw_bytes_is_found(self, tmp_path):
+        p = tmp_path / "model.joblib"
+        p.write_bytes(zlib.compress(self._payload_after_raw(b"\x00\xff" * 4096)))
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings)
+
+    def test_resync_is_bounded(self, tmp_path):
+        """A file of near-misses must not turn the walk quadratic."""
+        import time
+        p = tmp_path / "noise.pkl"
+        p.write_bytes(pickle.dumps({"x": 1}) + (b"\x80\x04" + b"\xff" * 64) * 4000)
+
+        start = time.monotonic()
+        ModelFileScanner().scan_file(p)
+        assert time.monotonic() - start < 10, "resync did not bound its work"
+
+    def test_ordinary_model_gains_no_findings(self, tmp_path):
+        """Reading further must not invent findings in plain tensor data."""
+        p = tmp_path / "clean.pkl"
+        p.write_bytes(pickle.dumps({"weights": b"\x80\x04\x95" + b"\x00" * 8192,
+                                    "name": "resnet"}))
+        assert ModelFileScanner().scan_file(p) == []
