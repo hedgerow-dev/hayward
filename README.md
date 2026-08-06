@@ -1,19 +1,13 @@
-<h1 align="center">Hayward</h1>
+# Hayward
 
-<p align="center">
-  <strong>Security scanner for machine-learning model files.</strong><br>
-  Know whether a checkpoint will run code on your machine, before you load it.
-</p>
+**Security scanner for machine-learning model files.** Know whether a
+checkpoint will run code on your machine, before you load it.
 
-<p align="center">
-  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
-  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
-  <img alt="Dependencies: 1" src="https://img.shields.io/badge/dependencies-1-brightgreen">
-  <img alt="Rules: 42" src="https://img.shields.io/badge/rules-42-orange">
-  <img alt="Runs offline" src="https://img.shields.io/badge/network-none-informational">
-</p>
-
----
+![License MIT](https://img.shields.io/badge/license-MIT-013D5A?style=flat-square&labelColor=013D5A)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-013D5A?style=flat-square&labelColor=013D5A)
+![Rules 42](https://img.shields.io/badge/rules-42-013D5A?style=flat-square&labelColor=013D5A)
+![Dependencies 1](https://img.shields.io/badge/dependencies-1-708C69?style=flat-square&labelColor=013D5A)
+![No outbound calls](https://img.shields.io/badge/outbound_calls-none-F4A25B?style=flat-square&labelColor=013D5A)
 
 ```bash
 pip install hayward
@@ -36,6 +30,12 @@ from the file they read. That is not a bug, it is what pickle does.
 The file is named `pytorch_model.bin`, and the `.bin` is doing a lot of work
 in that sentence. It is a program. Loading it is running it, on your laptop,
 with your credentials, as you.
+
+## Who it is for
+
+Teams that pull checkpoints from public hubs and want the check to run in a CI
+pipeline, on a laptop, or inside a regulated environment where nothing is
+allowed to leave the network.
 
 ## What makes it different
 
