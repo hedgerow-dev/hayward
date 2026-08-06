@@ -109,7 +109,7 @@ and never stored, so nothing malicious ships in either repository.
 What you can run now:
 
 ```bash
-pip install -e ".[dev]" && pytest      # 381 tests, no network
+pip install -e ".[dev]" && pytest      # 378 tests, no network
 hayward scan ./your-own-models         # your files, your numbers
 ```
 

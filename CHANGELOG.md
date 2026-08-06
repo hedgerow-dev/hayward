@@ -73,9 +73,7 @@ ended.
   threshold, and `--fail-on-coverage` for builds that should not pass on an
   unread file.
 - `hayward-gui`, a single tkinter window. No added dependency.
-- `ModelFileScanner.scan_file` and `.scan_directory` as the library API, with
-  `.supported_extensions()` so a caller deciding which files to hand over can
-  ask instead of keeping its own copy of the list.
+- `ModelFileScanner.scan_file` and `.scan_directory` as the library API.
 
 ### Measured position
 

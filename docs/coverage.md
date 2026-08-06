@@ -85,10 +85,11 @@ recognised.
 
 ## Why this is worth reporting
 
-We ran five scanners over the same 215 real models. Three returned no verdict
-at all on more than half the corpus while reporting no findings for those
-files. One silently read zero files out of 130. Another emitted "could not
-parse" on 95 files while printing a clean summary.
+We ran five scanners over the same 254 files, 215 of them real models from
+the HuggingFace Hub. Two returned no verdict on more than half the corpus
+while reporting no findings for those files: one on 160 of the 254, the other
+on 142. A third returned no verdict on 37. Only two of the five returned a
+verdict on every file.
 
 None of that is visible unless coverage is reported as a number. That is the
 argument for making it one.
