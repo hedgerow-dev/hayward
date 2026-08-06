@@ -24,6 +24,7 @@ import logging
 import os
 import pickle
 import struct
+import sys
 import tempfile
 import zipfile
 import zlib
@@ -972,12 +973,14 @@ class TestSevenZipExtraction:
 
     @staticmethod
     def _install_stub(tmp_path, monkeypatch, body: str):
-        """Put a fake `7zz` on PATH implementing `l -slt` and `x -y -o<dir>`."""
+        """Put a fake `7zz` on PATH implementing `l -slt` and `x -y -o<dir>`.
+
+        Windows cannot execute a shebang script, so there the code goes in a
+        .py file behind a .bat shim, which shutil.which finds via PATHEXT.
+        """
         bindir = tmp_path / "bin"
         bindir.mkdir()
-        stub = bindir / "7zz"
-        stub.write_text(
-            "#!/usr/bin/env python3\n"
+        code = (
             "import sys, pathlib\n"
             "args = sys.argv[1:]\n"
             "if args and args[0] == 'l':\n"
@@ -990,8 +993,16 @@ class TestSevenZipExtraction:
             "    sys.exit(0)\n"
             "sys.exit(1)\n"
         )
-        stub.chmod(0o755)
-        monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+        if os.name == "nt":
+            (bindir / "stub7zz.py").write_text(code)
+            (bindir / "7zz.bat").write_text(
+                f'@"{sys.executable}" "%~dp0stub7zz.py" %*\n'
+            )
+        else:
+            stub = bindir / "7zz"
+            stub.write_text("#!/usr/bin/env python3\n" + code)
+            stub.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 
     def test_payload_inside_a_7z_is_found(self, tmp_path, monkeypatch):
         self._install_stub(tmp_path, monkeypatch,
@@ -1076,9 +1087,7 @@ class TestSevenZipLinkEscape:
     def _install_stub(tmp_path, monkeypatch, body: str, env: dict | None = None):
         bindir = tmp_path / "bin"
         bindir.mkdir()
-        stub = bindir / "7zz"
-        stub.write_text(
-            "#!/usr/bin/env python3\n"
+        code = (
             "import sys, pathlib, os\n"
             "args = sys.argv[1:]\n"
             "if args and args[0] == 'l':\n"
@@ -1091,8 +1100,16 @@ class TestSevenZipLinkEscape:
             "    sys.exit(0)\n"
             "sys.exit(1)\n"
         )
-        stub.chmod(0o755)
-        monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+        if os.name == "nt":
+            (bindir / "stub7zz.py").write_text(code)
+            (bindir / "7zz.bat").write_text(
+                f'@"{sys.executable}" "%~dp0stub7zz.py" %*\n'
+            )
+        else:
+            stub = bindir / "7zz"
+            stub.write_text("#!/usr/bin/env python3\n" + code)
+            stub.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
         for key, value in (env or {}).items():
             monkeypatch.setenv(key, value)
 

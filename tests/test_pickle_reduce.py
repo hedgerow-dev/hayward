@@ -163,7 +163,9 @@ class TestPickleReduceArgumentResolution:
         assert critical[0].severity == Severity.CRITICAL
 
         message = critical[0].message
-        assert "os.system" in message or "posix.system" in message
+        # os.system pickles under its __module__, which is "posix" or "nt"
+        # depending on the platform that wrote the fixture.
+        assert any(s in message for s in ("os.system", "posix.system", "nt.system"))
         # Must not have synthesized a call expression for the dynamic arg.
         assert "system(" not in message
         assert "not-a-literal-once-reduced" not in message

@@ -24,6 +24,7 @@ import json
 import os
 import pickle
 import struct
+import sys
 import tarfile
 import zipfile
 import zlib
@@ -212,16 +213,23 @@ class TestSevenZScanning:
         """With a 7zz present, members are extracted and scanned. The
         extractor is faked with a python script that writes a malicious
         pickle member."""
-        script = tmp_path / "fake7zz"
         payload = tmp_path / "payload.pkl"
         payload.write_bytes(b"\x80\x04cos\nsystem\nS'id'\n\x85R.")
-        script.write_text(
-            "#!/usr/bin/env python3\n"
+        code = (
             "import shutil, sys, pathlib\n"
             "out = next(a[2:] for a in sys.argv[1:] if a.startswith('-o'))\n"
             f"shutil.copy({str(payload)!r}, str(pathlib.Path(out) / 'payload.pkl'))\n"
         )
-        script.chmod(0o755)
+        if os.name == "nt":
+            # Windows cannot execute a shebang script: park the code in a .py
+            # file behind a .bat shim and hand the shim to the scanner.
+            (tmp_path / "fake7zz.py").write_text(code)
+            script = tmp_path / "fake7zz.bat"
+            script.write_text(f'@"{sys.executable}" "{tmp_path / "fake7zz.py"}" %*\n')
+        else:
+            script = tmp_path / "fake7zz"
+            script.write_text("#!/usr/bin/env python3\n" + code)
+            script.chmod(0o755)
         monkeypatch.setattr(
             "hayward.scanner.shutil.which",
             lambda name: str(script) if name == "7zz" else None,
@@ -945,7 +953,12 @@ class TestNumpyAllowPickleScanning:
     def test_npz_duplicate_normalized_names_flagged(self, tmp_path):
         p = tmp_path / "evil.npz"
         with zipfile.ZipFile(p, "w") as zf:
-            zf.writestr("dir\\arr_0.npy", b"one")
+            # ZipInfo.__init__ rewrites os.sep to "/", which on Windows would
+            # silently turn this member into its twin; set the name after
+            # construction so the backslash survives on every platform.
+            info = zipfile.ZipInfo("placeholder")
+            info.filename = "dir\\arr_0.npy"
+            zf.writestr(info, b"one")
             zf.writestr("dir/arr_0.npy", b"two")
 
         findings = ModelFileScanner().scan_file(p)
