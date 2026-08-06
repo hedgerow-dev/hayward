@@ -120,8 +120,9 @@ hayward-gui
 One window. Choose a file or a folder, or drop one on it if your Tk build has
 `tkdnd`. **Export report** writes HTML, Markdown or JSON, choosing the format
 from the extension you give the file. Results are listed by severity, and
-selecting one shows the full message and any CWE mapping. The "Show unknowns" checkbox is the same decision the CLI
-exposes as `--fail-on`.
+selecting one shows the full message and any CWE mapping. The "Show unknowns"
+checkbox controls whether INFO findings are listed, the same choice the CLI's
+`--fail-on` threshold makes.
 
 Built on tkinter, which ships with Python, so the desktop app adds no
 dependency. The scan runs on a worker thread, so a large directory does not
@@ -160,14 +161,14 @@ for f in findings:
 | `severity` | `Severity` | `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO` |
 | `category` | `Category` | Coarse grouping for reporting |
 | `file_path` | `str` | Absolute path |
-| `confidence` | `float` | The scanner's own estimate, reported rather than applied |
+| `confidence` | `float` | The scanner's own estimate. Reported for information; it does not change severity |
 | `cwe_ids` | `list[int]` | CWE mappings where one applies |
 | `metadata` | `dict` | Rule-specific detail, including `skipped_reason` |
 
 `severity_order` sorts findings, with 0 as the most severe.
 
-Importing the package loads five modules in about 25 milliseconds, so calling
-it per file in a loop is fine.
+Importing the package is cheap: one dependency, no model framework and no
+native extensions, so calling it per file in a loop is fine.
 
 ## Suppressing findings
 

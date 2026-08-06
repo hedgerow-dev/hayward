@@ -25,10 +25,11 @@ you download from a hub is an executable, and opening it is running it.
 ## What makes it different
 
 **It stays quiet.** Zero findings above INFO across 215 real models from the
-HuggingFace Hub, and five in the unknown tier. A gate that cries wolf gets
-switched off. That figure is **self-measured and not yet reproducible**: the
-corpus and harness are not published. [Accuracy](docs/accuracy.md) sets out
-what it does and does not support.
+HuggingFace Hub, and five findings at INFO, the tier for content it could not
+verify. A gate that cries wolf gets switched off. That figure is
+**self-measured and not yet reproducible**: the corpus and harness are not
+published. [Accuracy](docs/accuracy.md) sets out what it does and does not
+support.
 
 **It tells you when it could not look.** A file it cannot parse produces an
 explicit finding, never silence. Attackers hide payloads behind deliberate
@@ -41,7 +42,7 @@ and port. That is what generalises past the deny list.
 **It installs anywhere.** One dependency, no model framework, no native
 extensions, no network. Python 3.10 and up.
 
-**It fits a build.** Deliberate exit codes, JSON output, a threshold you set.
+**It fits a build.** Documented exit codes, JSON output, a threshold you set.
 
 ## What it scans
 
@@ -67,7 +68,7 @@ findings = ModelFileScanner().scan_directory(Path("models"))
 - [Usage](docs/usage.md): CLI reference, exit codes, CI, the GUI, the Python API
 - [Rules](docs/rules.md): all 42 rules with severities and CWE mappings
 - [Coverage](docs/coverage.md): what it does when it cannot read a file, and why that is a finding
-- [How it works](docs/how-it-works.md): opcode walking and argument-evidence promotion
+- [How it works](docs/how-it-works.md): how it reads pickle without running it, and how unknown callables are judged by their arguments
 - [Accuracy](docs/accuracy.md): measured results, the caveats, and where it loses
 
 ## Contributing

@@ -7,8 +7,8 @@ suppression, a ticket or a dashboard, so they do not get renamed.
 Hayward dispatches on magic bytes, walks the container, and simulates the
 pickle virtual machine without importing or executing anything it reads.
 
-A name that a model file uses to identify a tensor is treated as a path
-wherever real tooling would write it to one. A traversal segment or an
+Some tools write tensors to disk under the names the file gives them, so
+Hayward checks tensor names as filesystem paths. A traversal segment or an
 embedded newline in a tensor name is not something a training run produces.
 
 Severity is fixed per rule except `MFV-PICKLE-005` and `MFV-PICKLE-006`, which
@@ -26,7 +26,7 @@ derive theirs from the strength of the evidence found.
 | `MFV-PICKLE-006` | HIGH/MEDIUM | 502 | An allow-listed callable is handed an argument no legitimate model would supply |
 | `MFV-PICKLE-007` | HIGH | 502 | Memo slots sit in a band far from the rest of the stream, the signature of a spliced-in pickle |
 | `MFV-PICKLE-008` | CRITICAL | 502 | A **second pickle stream is carried as a bytes literal** and references a denied callable. `numpy.load(BytesIO(<pickle>))` is the shape: the outer callable is on no deny list and the payload exists only once the inner bytes are read |
-| `MFV-JOBLIB-002` | HIGH | - | joblib's zlib payload exceeds the decompressed-size limit |
+| `MFV-JOBLIB-002` | HIGH | - | joblib's compressed payload exceeds the decompressed-size limit |
 
 ## SafeTensors
 
@@ -57,7 +57,7 @@ derive theirs from the strength of the evidence found.
 | `MFV-KERAS-002` | INFO | 502 | Layer class not on the known-builtin list |
 | `MFV-ONNX-001` | HIGH | 502, 94 | Custom op with documented code-execution behaviour (PyOp/PythonOp) |
 | `MFV-ONNX-002` | MEDIUM | 22 | Path string with `..` traversal, or an absolute `external_data` location |
-| `MFV-ONNX-003` | HIGH | 502 | `external_data` key outside the four-key contract. `CVE-2026-34445` |
+| `MFV-ONNX-003` | HIGH | 502 | `external_data` key beyond the four the format defines. `CVE-2026-34445` |
 | `MFV-ONNX-004` | HIGH | 918 | `external_data` location points off the filesystem (a URL, UNC or protocol-relative reference). The loader fetches what `location` names, so loading the model issues a request. A published proof of concept points one at `169.254.169.254`, the cloud metadata endpoint |
 | `MFV-TF-001` | HIGH | 502, 94 | SavedModel graph op that touches the filesystem or invokes embedded Python |
 | `MFV-TFLITE-001` | HIGH | 190, 125 | Tensor dimensions inconsistent with a 32-bit loader. `CVE-2026-42627` |
@@ -74,9 +74,9 @@ derive theirs from the strength of the evidence found.
 
 | Rule | Severity | CWE | Fires when |
 |------|----------|-----|------------|
-| `MFV-EXEC-001` | HIGH | 506 | A loadable binary (PE, ELF, Mach-O) is embedded. No serialization format writes one |
+| `MFV-EXEC-001` | HIGH | 506 | A loadable binary (PE, ELF, Mach-O) is embedded. No serialisation format writes one |
 | `MFV-CONFUSE-001` | HIGH | - | Extension implies one format, magic bytes say another |
-| `MFV-SKIP-001` | LOW | - | File exceeds the 500MB cap and is not a ZIP container |
+| `MFV-SKIP-001` | LOW | - | File exceeds the 500MB cap and cannot be streamed (ZIP and Keras HDF5 can) |
 | `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed |
 | `MFV-SKIP-003` | LOW | - | Content could not be verified |
 | `MFV-7Z-001` | INFO | - | A `.7z` archive is present and no extractor is available |
@@ -97,10 +97,10 @@ Known blind spots as of 2026-08-05:
 - **`.7z` archives need a system `7zz` or `7z` on PATH.** py7zr is LGPL-2.1 and
   cannot be bundled. With an extractor present the archive is unpacked to a
   temporary directory and every member scanned; without one, `MFV-7Z-001`
-  reports the non-coverage. One malicious sample in picklescan's own suite is
+  reports the gap. One malicious sample in picklescan's own suite is
   missed on a machine with no extractor.
 - **Nested archives are scanned to a depth of 4.** Beyond that `MFV-SKIP-003`
-  reports the non-coverage rather than recursing.
+  reports the gap rather than recursing.
 - **`MFV-PICKLE-004` is the unknown-global bucket**, structurally the same tier
   as picklescan's `suspicious` and ModelAudit's `warning`. It is INFO by design.
   Any published false-positive figure must state whether INFO was counted.

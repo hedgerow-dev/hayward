@@ -9,10 +9,10 @@ currently be reproduced by a reader. Until it is, treat every figure below as
 a vendor claim, which is exactly the standard this page applies to everyone
 else's numbers.
 
-What ships here that you *can* check today: the 342 tests, which build their
+What ships here that you *can* check today: the 378 tests, which build their
 own fixtures and need no network, and the scanner itself.
 
-Measured 2026-08-05 at version 1.0.0.
+Measured 2026-08-06 at version 1.0.0.
 
 ## False positives
 
@@ -29,7 +29,8 @@ is the single largest lever on any scanner's false-positive rate. Whenever you
 quote one of these, say which.
 
 The five INFO findings are two sklearn Cython loss classes, an attribute
-access on an allow-listed reconstruction, a Keras functional-API marker, and a
+lookup on an object rebuilt by an allow-listed callable, a Keras
+functional-API marker, and a
 user-defined transformer in `__main__` from scikit-learn's own documentation.
 That last one is the scanner being correct: a class defined in `__main__` is
 exactly what static analysis cannot verify.
@@ -38,7 +39,7 @@ exactly what static analysis cannot verify.
 
 | Corpus | Result |
 |---|---|
-| picklescan `tests/data`, 35 malicious | 34 |
+| picklescan `tests/data`, 35 malicious | 34 of 35 |
 | PickleCloak exploits | 49 of 57 |
 | PickleCloak gadget chains | 91 of 97 |
 | MalHug, 87 fetchable in-the-wild models | 87 read, 87 detected, 86 naming the correct sink |
@@ -52,10 +53,11 @@ all-malicious corpus is meaningless without a false-positive figure from a
 real one.
 
 **The picklescan corpus tests a list Hayward inherited.** Matching it closely
-is near tautological. Strip every picklescan-derived entry from the deny data
-and Hayward drops to 25 of 35 there, below picklescan's own 34. On PickleCloak
-the same stripped build stays ahead, at 42 of 57 against picklescan's 27,
-which is where the argument-evidence work shows up.
+mostly measures that the list was inherited. Strip every picklescan-derived
+entry from the deny data and Hayward drops to 25 of 35 there, below
+picklescan's own 34. On PickleCloak the same stripped build stays ahead, at
+42 of 57 against picklescan's 27, which is where judging callables by their
+arguments shows up. See [how it works](how-it-works.md).
 
 **The one miss on picklescan's corpus is `malicious1.7z`**, on a machine with
 no `7z` extractor installed. It is reported as a coverage gap rather than
@@ -70,9 +72,9 @@ disassembled at the opcode level and contain no code-execution path; the label
 reflects imports outside HuggingFace's allowlist, not a malware finding. That
 audit was also ours.
 
-**Reason-correctness is uncontested rather than won.** Naming the sink the
-corpus records, in 86 of 87 MalHug detections, is a figure no competing tool
-publishes, so there is nothing to compare it against.
+**No one else publishes the last figure.** Naming the sink the corpus
+records, in 86 of 87 MalHug detections, has nothing to be compared against,
+so treat it as unopposed rather than as a win.
 
 ## Prior art
 
@@ -107,7 +109,7 @@ and never stored, so nothing malicious ships in either repository.
 What you can run now:
 
 ```bash
-pip install -e ".[dev]" && pytest      # 342 tests, no network
+pip install -e ".[dev]" && pytest      # 381 tests, no network
 hayward scan ./your-own-models         # your files, your numbers
 ```
 

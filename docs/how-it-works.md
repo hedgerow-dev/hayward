@@ -3,7 +3,7 @@
 ## Nothing is executed
 
 Pickle streams are walked as opcodes with `pickletools`, simulating the stack
-and the memo. No `pickle.load`, no `pickle.loads`, no `__import__`, no
+and the memo (pickle's object cache). No `pickle.load`, no `pickle.loads`, no `__import__`, no
 `importlib`, no `eval`. Containers are read member by member. XML goes through
 `defusedxml`, so entity expansion is refused rather than performed.
 
@@ -75,8 +75,9 @@ of the thing that opens it.
 ## Format-specific checks
 
 - **ONNX**: custom ops with documented execution behaviour (`PyOp`,
-  `PythonOp`), `external_data` keys outside the format's four-key contract
-  (CVE-2026-34445), and locations that are absolute or traverse upward.
+  `PythonOp`), `external_data` entries carrying keys beyond the four the
+  format defines (CVE-2026-34445), and locations that are absolute or
+  traverse upward.
 - **Keras**: Lambda layers, which embed a marshalled Python function, and
   layer classes that are not built in.
 - **TensorFlow**: GraphDef ops that read or write the filesystem or invoke

@@ -1,7 +1,7 @@
 # Coverage
 
-Most scanners answer one question: did I find something. Hayward answers two,
-because the second is where the failures hide.
+Most scanners answer one question: did I find something. Hayward also answers
+a second: did I actually read the file. The second is where the failures hide.
 
 **A clean report should mean the file was examined and found clean, not that
 the parser gave up.**
@@ -66,8 +66,8 @@ Keras models are both scanned. Anything else over the cap reports
 
 This limit used to be absolute, and it cost real detections: two 553 MB Keras
 models in the MalHug corpus carry genuine malicious Lambda layers and were
-never read. Both are now found in about ten milliseconds, at roughly 67 MB of
-peak memory rather than 553 MB.
+never read. Both are now found by streaming to the config, holding a bounded
+window in memory rather than the whole file.
 
 **`.7z` archives** need a system `7zz` or `7z` on `PATH`. py7zr is LGPL-2.1
 and is not bundled. With an extractor present the archive is unpacked to a
@@ -85,10 +85,10 @@ recognised.
 
 ## Why this is worth reporting
 
-Measured across five scanners on the same 215 real models, three returned no
-verdict at all on more than half the corpus while reporting no findings for
-those files. One silently read zero files out of 130. Another emitted "could
-not parse" on 95 files while printing a clean summary.
+We ran five scanners over the same 215 real models. Three returned no verdict
+at all on more than half the corpus while reporting no findings for those
+files. One silently read zero files out of 130. Another emitted "could not
+parse" on 95 files while printing a clean summary.
 
 None of that is visible unless coverage is reported as a number. That is the
 argument for making it one.
