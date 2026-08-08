@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hayward"
-version = "1.0.0"
+version = "1.0.1"
 description = "Security scanner for machine-learning model files: detects code execution in pickle, GGUF, ONNX, Keras and other checkpoints"
 readme = "README.md"
 license = { file = "LICENSE" }
