@@ -22,6 +22,10 @@ CRITICAL MFV-PICKLE-001  checkpoints/model.pt
 1 finding(s): 1 critical
 ```
 
+Or [try it in your browser](https://huggingface.co/spaces/hedgerow-dev/hayward).
+Same scanner, compiled to WebAssembly. Drop a checkpoint on the page and it
+stays on your machine.
+
 ## The problem
 
 `torch.load`, `joblib.load` and `numpy.load(allow_pickle=True)` execute code
