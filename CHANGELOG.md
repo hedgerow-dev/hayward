@@ -4,6 +4,17 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- `scan_file` no longer returns an empty result for a path whose extension is
+  not on the supported list. A file named directly is identified by its
+  content, so a malicious pickle renamed `danger.dat`, or carrying no
+  extension at all, is now reported exactly as the same bytes named
+  `danger.pkl` were. `scan_directory` still discovers candidates by
+  extension, and [coverage](docs/coverage.md) states that limit.
+
 ## 1.0.0 (2026-08-06)
 
 First release. The scanner was developed inside a larger static-analysis tool

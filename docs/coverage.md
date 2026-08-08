@@ -62,12 +62,23 @@ Stated rather than hidden, as of version 1.0.0.
 the whole file into memory. ZIP containers are streamed member by member, and
 HDF5 is streamed to its `model_config` attribute, so oversized PyTorch and
 Keras models are both scanned. Anything else over the cap reports
-`MFV-SKIP-001`.
+`MFV-SKIP-001`, including a named file whose extension is not recognised:
+padding a payload past the cap and renaming it is an evasion, so the gap is
+reported rather than passed over.
 
 This limit used to be absolute, and it cost real detections: two 553 MB Keras
 models in the MalHug corpus carry genuine malicious Lambda layers and were
 never read. Both are now found by streaming to the config, holding a bounded
 window in memory rather than the whole file.
+
+**Directory scans find candidates by extension.** A file handed to
+`scan_file` directly, on the command line or through the API, is identified by
+its content whatever it is called, including with no extension at all. A
+directory walk cannot do the same without reading every file in the tree, so
+`scan_directory` globs the 24 supported extensions plus `.bin` and `.zip`. A
+malicious pickle named `payload.dat` is reported when named, and not found by
+a scan of the directory holding it. Unpack an archive of unknown provenance
+and scan the members by name if this matters to you.
 
 **`.7z` archives** need a system `7zz` or `7z` on `PATH`. py7zr is LGPL-2.1
 and is not bundled. With an extractor present the archive is unpacked to a
