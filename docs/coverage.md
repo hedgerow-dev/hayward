@@ -96,12 +96,17 @@ are actually pickles: roughly one buffer in fifty that happens to open with a
 `PROTO` marker decodes all the way to the end and is reported as truncated.
 
 Reaching that on a real file needs two coincidences at once, a segment
-boundary landing on those two bytes and the content past it decoding cleanly,
-and the cost is a `LOW` coverage finding rather than a detection, so it does
-not fail a build at the default threshold. The alternative, demanding more
-evidence before reporting, was measured and it lost genuine truncations. For
-a rule whose entire job is to speak up when the file was not read, a false
-alarm is the cheaper error.
+boundary landing on those two bytes and the content past it decoding cleanly.
+It has not been observed: **zero of 286 real Hub models and zero of 395 files
+across the picklescan, MalHug and PickleCloak corpora produce this finding.**
+The same measurement says the rule is unexercised by those corpora, so the
+only evidence it works is the test suite.
+
+The cost is a `LOW` coverage finding rather than a detection, so it does not
+fail a build at the default threshold. Demanding more evidence before
+reporting was tried and it lost genuine truncations. For a rule whose entire
+job is to speak up when the file was not read, a false alarm is the cheaper
+error.
 
 **`MFV-PICKLE-004` is the unknown bucket**, structurally the same tier as
 picklescan's `suspicious` and ModelAudit's `warning`. It is INFO by design,
