@@ -15,6 +15,17 @@ within a major version.
   `danger.pkl` were. `scan_directory` still discovers candidates by
   extension, and [coverage](docs/coverage.md) states that limit.
 
+- A pickle stream that ends before its `STOP` opcode now reports
+  `MFV-SKIP-003`. It previously produced nothing at all, so a payload placed
+  past the cut was invisible and a partially downloaded checkpoint was
+  indistinguishable from one that had been read and found clean.
+
+- Duplicate member names in an `.npz` are compared on the raw stored name.
+  `zipfile` rewrites a backslash to a forward slash while reading the central
+  directory, so on Windows two members differing only by separator arrived
+  identical and `MFV-NPZ-001` never fired. The same archive was flagged
+  correctly on Linux and macOS.
+
 ## 1.0.0 (2026-08-06)
 
 First release. The scanner was developed inside a larger static-analysis tool
