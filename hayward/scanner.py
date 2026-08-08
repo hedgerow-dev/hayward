@@ -640,6 +640,57 @@ def _next_pickle_offset(data: bytes, at: int) -> int | None:
     return best
 
 
+def _pickle_stream_truncated(data: bytes) -> bool:
+    """True when `data` runs out in the middle of a pickle stream.
+
+    A pickle ends at its STOP opcode. Bytes that stop arriving before that one
+    is read are not a stream that was examined and found clean, they are a
+    stream nobody finished reading, and whatever sat past the cut was never
+    seen. That is the "Art of Hide and Seek" shape (arXiv 2508.19774) reached
+    without any craft at all: a partial download or a corrupt checkpoint puts
+    the payload past the end. It is also what makes scanning a remote
+    checkpoint through HTTP range requests safe, since a prefix can only be
+    trusted once every pickle in it has terminated.
+
+    Judged only on segments opening with a PROTO opcode, and only when the
+    parse consumed every remaining byte. Both conditions keep this quiet on
+    files that are whole:
+
+    - torch's legacy layout follows its four pickles with raw tensor storage.
+      Storage does not open with PROTO, so the walk ends at the boundary
+      instead of calling the tensors a truncated stream.
+    - joblib splices raw array bytes *into* its stream, so the parse dies with
+      bytes still to spare. That is unparseable content rather than a short
+      file, and it stays silent for the reasons `_scan_pickle` documents.
+    """
+    # One buffer, seeked between pickles, rather than a fresh slice each time:
+    # this walks attacker-sized files, and re-slicing the remainder per pickle
+    # turns a file of many small streams quadratic.
+    stream = io.BytesIO(data)
+    total = len(data)
+    pos = 0
+    while pos < total:
+        if data[pos:pos + 2] not in _PICKLE_RESYNC_MARKERS:
+            return False
+        stream.seek(pos)
+        end_of_pickle: int | None = None
+        # The exception is the signal here, not a failure to report: where the
+        # walk gave up is exactly what separates a short file from an
+        # unreadable one, and `stream` still holds that position.
+        with contextlib.suppress(Exception):
+            for op, _arg, offset in pickletools.genops(stream):
+                if op.name == "STOP" and offset is not None:
+                    end_of_pickle = offset + 1
+                    break
+        if end_of_pickle is None:
+            # No STOP. Truncated only if the parse ran off the end of the
+            # data; stopping short of it means an opcode it could not read,
+            # which is a different (and deliberately unreported) condition.
+            return stream.tell() >= total
+        pos = end_of_pickle
+    return False
+
+
 def _resolve_pickle_globals(
     data: bytes,
 ) -> tuple[list[str], list[PickleResolvedCall], PickleMemoProfile]:
@@ -3560,6 +3611,18 @@ class ModelFileScanner:
         state_dict the same CRITICAL verdict as actual malware).
         """
         findings: list[Finding] = []
+
+        if _pickle_stream_truncated(data):
+            # Reported before anything else, and independently of what the
+            # walk below does or does not resolve: a stream that never
+            # terminated was not read to the end, whether or not the part
+            # that did arrive happened to contain something.
+            findings.append(_skip_unverified_finding(
+                file_path,
+                "Pickle stream ends before its STOP opcode, so the file is "
+                "truncated and anything past the cut was never read.",
+                {"skipped_reason": "pickle_truncated", "file_size": len(data)},
+            ))
 
         embedded = _embedded_pickle_denied_globals(data)
         if embedded:
