@@ -5412,7 +5412,12 @@ class ModelFileScanner:
         problems: list[str] = []
         seen_names: dict[str, str] = {}
         for info in zf.infolist():
-            name = info.filename
+            # orig_filename, not filename: ZipInfo.__init__ rewrites os.sep to
+            # "/" while reading the central directory, so on Windows a
+            # backslash member arrives already laundered into a plain path and
+            # the checks below cannot see it. orig_filename is the raw name as
+            # the archive stores it, on every platform.
+            name = info.orig_filename
             segments = name.replace("\\", "/").split("/")
             normalized = "/".join(s for s in segments if s not in ("", "."))
             if (
