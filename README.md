@@ -68,8 +68,10 @@ extensions, no network. Python 3.10 and up.
 | **Graph formats** | ONNX, TensorFlow SavedModel, Keras (H5 and `.keras`), PMML |
 
 24 extensions in total. **Format comes from magic bytes**, so a payload
-renamed `weights.safetensors` does not walk past on the strength of its
-extension.
+renamed `weights.safetensors`, or `weights.dat`, or given no extension at
+all, does not walk past on the strength of its name. A directory scan still
+finds its candidates by extension first, since sniffing a whole tree means
+reading it: [coverage](docs/coverage.md) states that limit.
 
 ## Three ways to run it
 

