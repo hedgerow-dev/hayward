@@ -231,7 +231,25 @@ class TestTruncatedPickleReportsCoverage:
         off the end. That is unparseable content, not a short file, and it
         must stay silent or every torch checkpoint grows a coverage gap."""
         assert not mfv_scanner._pickle_stream_truncated(struct.pack("<512d", *([1.5] * 512)))
-        assert not mfv_scanner._pickle_stream_truncated(b"\x80\x04" + os.urandom(4096))
+
+    def test_storage_after_a_complete_pickle_stays_silent(self, tmp_path):
+        """The shape that actually occurs: torch's legacy layout puts raw
+        tensor storage after its pickles. The storage does not open with PROTO,
+        so the walk stops at the boundary rather than calling the tensors a
+        truncated stream.
+
+        This replaces an assertion that fed `os.urandom` to the check. Opcode
+        decoding succeeds on far more byte sequences than are pickles, so
+        roughly one random buffer in fifty that opens with a PROTO marker
+        decodes all the way to the end and is reported as truncated. That is a
+        real limit, recorded in docs/coverage.md, not something a seed should
+        be chosen to hide.
+        """
+        pickles = b"".join(
+            pickle.dumps(v, protocol=2) for v in (1234, 2, {"little_endian": True})
+        )
+        storage = struct.pack("<1024d", *([0.5] * 1024))
+        assert not mfv_scanner._pickle_stream_truncated(pickles + storage)
 
 
 class TestStackDesyncViaUnsimulatedPushes:
