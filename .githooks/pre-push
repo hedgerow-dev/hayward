@@ -1,0 +1,21 @@
+#!/bin/sh
+# Pre-push: the CI gates that are instant on a laptop.
+#
+# Mirrors the lint step in ci.yml so a red push is caught before it costs a
+# billable runner. The full test matrix is not run here; run `pytest` yourself.
+#
+# Enable:      git config core.hooksPath .githooks
+# Bypass once: git push --no-verify
+
+set -e
+
+check() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "pre-push: $1 not on PATH, skipping (activate the venv for this check)"
+        return 0
+    fi
+    echo "pre-push: $*"
+    "$@"
+}
+
+check ruff check .
