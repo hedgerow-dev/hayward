@@ -4,7 +4,7 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
-## Unreleased (1.1.0)
+## 1.1.0 (2026-08-27)
 
 A hardening and feature release built from the in-depth review of 2026-08-23.
 The scanner's entire input surface is adversarial, so the largest part of this
