@@ -9,10 +9,11 @@ currently be reproduced by a reader. Until it is, treat every figure below as
 a vendor claim, which is exactly the standard this page applies to everyone
 else's numbers.
 
-What ships here that you *can* check today: the 391 tests, which build their
-own fixtures and need no network, and the scanner itself.
+What ships here that you *can* check today: the test suite, which builds its
+own fixtures and needs no network, and the scanner itself.
 
-Measured 2026-08-06 at version 1.0.0.
+The figures below were measured 2026-08-06 at version 1.0.0 and have not been
+re-run since, so they describe that release rather than the current one.
 
 ## False positives
 
@@ -109,7 +110,7 @@ and never stored, so nothing malicious ships in either repository.
 What you can run now:
 
 ```bash
-pip install -e ".[dev]" && pytest      # 391 tests, no network
+pip install -e ".[dev]" && pytest      # the full suite, no network
 hayward scan ./your-own-models         # your files, your numbers
 ```
 

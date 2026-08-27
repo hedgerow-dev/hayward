@@ -74,6 +74,13 @@ of the thing that opens it.
 
 ## Format-specific checks
 
+- **HuggingFace config JSON**: `auto_map` and `trust_remote_code` in a
+  `config.json`, and a `chat_template` reaching Python's object surface in a
+  `tokenizer_config.json`. transformers imports and runs the named repo code,
+  and renders the template, when the model loads, so both execute on load.
+- **PyTorch archives**: executable Python *source* carried inside a `.pt` /
+  `.ptl` / TorchScript / torch.package zip (`code/*.py`, a `.data/` package
+  layout), which `torch.jit` and `PackageImporter` run when the model loads.
 - **ONNX**: custom ops with documented execution behaviour (`PyOp`,
   `PythonOp`), `external_data` entries carrying keys beyond the four the
   format defines (CVE-2026-34445), and locations that are absolute or

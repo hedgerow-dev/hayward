@@ -57,7 +57,7 @@ hayward scan ./models -f json | jq '.coverage_gaps'
 
 ## Known limits
 
-Stated rather than hidden, as of version 1.0.0.
+Stated rather than hidden, current as of version 1.1.0.
 
 **Files over 500 MB** are read only when the format allows it without loading
 the whole file into memory. ZIP containers are streamed member by member, and

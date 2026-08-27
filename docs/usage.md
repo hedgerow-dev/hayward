@@ -80,7 +80,7 @@ window is byte-identical to one written from the command line.
 {
   "schema_version": 1,
   "tool": "hayward",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "root": "/srv/models",
   "findings": [
     {
