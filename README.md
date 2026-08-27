@@ -5,7 +5,7 @@ checkpoint will run code on your machine, before you load it.
 
 ![License MIT](https://img.shields.io/badge/license-MIT-013D5A?style=flat-square&labelColor=013D5A)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-013D5A?style=flat-square&labelColor=013D5A)
-![Rules 42](https://img.shields.io/badge/rules-42-013D5A?style=flat-square&labelColor=013D5A)
+![Rules 47](https://img.shields.io/badge/rules-47-013D5A?style=flat-square&labelColor=013D5A)
 ![Dependencies 1](https://img.shields.io/badge/dependencies-1-708C69?style=flat-square&labelColor=013D5A)
 ![No outbound calls](https://img.shields.io/badge/outbound_calls-none-F4A25B?style=flat-square&labelColor=013D5A)
 
@@ -43,12 +43,11 @@ allowed to leave the network.
 
 ## What makes it different
 
-**It stays quiet.** Zero findings above INFO across 215 real models from the
-HuggingFace Hub, and five findings at INFO, the tier for content it could not
-verify. A gate that cries wolf gets switched off. That figure is
-**self-measured and not yet reproducible**: the corpus and harness are not
-published. [Accuracy](docs/accuracy.md) sets out what it does and does not
-support.
+**It stays quiet.** A gate that cries wolf gets switched off, so it is built to
+report real models cleanly and reserve the INFO tier for content it could not
+verify. Any figures we quote are **self-measured and not independently
+reproducible**; [Accuracy](docs/accuracy.md) sets out what it does and does not
+support, and the harness runs it against your own corpus.
 
 **It tells you when it could not look.** A file it cannot parse produces an
 explicit finding, never silence. Attackers hide payloads behind deliberate
@@ -67,11 +66,12 @@ extensions, no network. Python 3.10 and up.
 
 | | Formats |
 |---|---|
-| **Pickle, and everything that wraps it** | PyTorch (zip and legacy), joblib, NumPy `.npy` / `.npz`, TorchServe `.mar`, NVIDIA NeMo, skops |
+| **Pickle, and everything that wraps it** | PyTorch (zip, legacy and `.ptl` mobile), joblib, NumPy `.npy` / `.npz`, TorchServe `.mar`, NVIDIA NeMo, skops |
 | **Tensor containers** | SafeTensors, GGUF, TFLite |
 | **Graph formats** | ONNX, TensorFlow SavedModel, Keras (H5 and `.keras`), PMML |
+| **Repo config** | HuggingFace `config.json` / `tokenizer_config.json` (`auto_map`, `trust_remote_code`, and Jinja `chat_template` injection) |
 
-24 extensions in total. **Format comes from magic bytes**, so a payload
+26 extensions in total. **Format comes from magic bytes**, so a payload
 renamed `weights.safetensors`, or `weights.dat`, or given no extension at
 all, does not walk past on the strength of its name. A directory scan still
 finds its candidates by extension first, since sniffing a whole tree means
@@ -100,9 +100,11 @@ could not get into.
 ## Documentation
 
 - [Usage](docs/usage.md): CLI reference, exit codes, CI, the GUI, the Python API
-- [Rules](docs/rules.md): all 42 rules with severities and CWE mappings
+- [Rules](docs/rules.md): all 47 rules with severities and CWE mappings
 - [Coverage](docs/coverage.md): what it does when it cannot read a file, and why that is a finding
 - [How it works](docs/how-it-works.md): how it reads pickle without running it, and how unknown callables are judged by their arguments
+- [GitHub Action](docs/github-action.md): run the scan in CI and upload SARIF to code scanning
+- [Reproducible builds](docs/reproducible-builds.md): the Docker image and the browser-demo build pipeline
 - [Accuracy](docs/accuracy.md): measured results, the caveats, and where it loses
 
 ## Contributing

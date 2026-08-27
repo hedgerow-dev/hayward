@@ -1,0 +1,32 @@
+# Keep the build context minimal and deterministic: only what hatchling needs
+# to build and install the package. Everything below is either rebuildable,
+# machine-local, or irrelevant to the image.
+
+# Version control and local worktrees
+.git
+.gitignore
+worktrees/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build and packaging artifacts (the image builds its own)
+dist/
+build/
+*.egg-info/
+
+# Tests are not shipped in the runtime image
+tests/
+
+# Caches and coverage
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Scratch and OS cruft
+scratch/
+.DS_Store

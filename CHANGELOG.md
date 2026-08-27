@@ -4,6 +4,108 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased (1.1.0)
+
+A hardening and feature release built from the in-depth review of 2026-08-23.
+The scanner's entire input surface is adversarial, so the largest part of this
+work makes the walk uncrashable, unhangable and un-OOM-able on hostile files,
+since a crash is itself an evasion: one crafted file first in a directory used
+to abort the whole scan.
+
+### Removed (public API)
+
+- `ModelFileFinding` is no longer exported from `hayward`. It was an unused
+  dataclass that was never constructed. Removing a public name is why this is a
+  minor version bump rather than a patch. `Finding` is unchanged and remains the
+  single record type a scan returns.
+- `Finding.start_line` is gone. It was always `0` and never serialized.
+
+### Added
+
+- **SARIF 2.1.0 output** (`-f sarif`), the format GitHub code scanning and other
+  CI platforms ingest, plus a `schema_version` field in the JSON report.
+- **Git LFS pointer detection** (`MFV-LFS-001`, INFO coverage): a pointer file
+  is a placeholder for content stored elsewhere, so the real bytes were never
+  fetched and nothing was scanned. Reported as a coverage gap, never a clean
+  verdict.
+- `--color {auto,always,never}` and `NO_COLOR` support. `--no-colour` stays as
+  an alias.
+- A `py.typed` marker, so the package's type hints are now visible to type
+  checkers (the `Typing :: Typed` classifier is no longer a false claim).
+- **HuggingFace / transformers JSON config detection.** `MFV-HF-001` flags a
+  code-execution construct in a `.json` config's Jinja `chat_template` (the
+  `MFV-GGUF-003` threat in a standalone file), and `MFV-HF-002` flags `auto_map`
+  and `trust_remote_code: true`, the HuggingFace-hub remote-code vector.
+- **Executable source inside torch archives** (`MFV-TORCH-001`): a torch zip
+  (`.pt` / `.ptl` / TorchScript / torch.package) that carries `code/*.py` or a
+  `.data/` package layout runs that Python on load. `.ptl` mobile checkpoints
+  are now scanned like any other torch zip.
+- **CycloneDX 1.6 ML-BOM output** (`-f cyclonedx`): one component per scanned
+  file, one vulnerability per finding, for tools that consume a bill of
+  materials.
+- **`--allowlist`**: suppress reviewed findings through an auditable JSON file,
+  each entry keyed by the file's sha256 and rule id and requiring a
+  justification, so a changed file resurfaces the finding and every suppression
+  is announced on stderr.
+- **`--baseline`**: compare a scan against a prior JSON report and apply
+  `--fail-on` only to findings that are new, for adopting the scanner on an
+  existing tree without failing on the whole backlog.
+- **`--check-signatures`** (`MFV-SIG-001`, INFO): report sibling signature and
+  attestation artifacts (a detached `.sig`, a Sigstore bundle, an
+  in-toto/SLSA/DSSE attestation). Detection and structural reporting only, never
+  cryptographic verification.
+- **`--policy`**: remap per-rule severities through a small JSON file, without
+  editing the curated rule set.
+- **`--cache`**: a content-hash scan cache so a re-run skips unchanged files,
+  invalidated by the package version and by the flags that change a verdict.
+- **Directory-scan ergonomics**: several targets at once, `--exclude` globs,
+  `--jobs N` for parallel scanning, `--max-size` to tune the per-file cap, and
+  `--progress` / `--verbose` / `--quiet` (all on stderr, so a piped report stays
+  clean).
+- **A composite GitHub Action** that runs the scan and writes SARIF for
+  `github/codeql-action/upload-sarif`, and a reproducible Docker image plus a
+  committed browser-demo build pipeline.
+
+### Fixed
+
+- **Scanner self-DoS hardening.** The simulated pickle memo and operand stack
+  are bounded; the walk degrades to an `MFV-SKIP-003` coverage finding instead
+  of running out of memory on a crafted stream. Embedded-pickle opcode
+  iteration is lazy, the embedded-executable search has a per-format occurrence
+  budget, and a `.npy` v2 header length is capped before `ast.literal_eval`.
+- **Per-file exception firewall.** An unexpected failure inside `scan_file` now
+  degrades to `MFV-SKIP-003` for that one file instead of aborting the whole
+  directory scan. `KeyboardInterrupt` and `SystemExit` still propagate.
+- **`MFV-PICKLE-006` severity inversion.** A file mixing evidence tiers now
+  reports the most severe, not the least.
+- **Keras decoy evasion.** Config extraction walks past a benign decoy object to
+  find a Lambda layer hidden behind it, rather than stopping at the first
+  `"class_name"` anchor.
+- **Zip declared-size gate evasion.** A pickle member is sniffed and read from
+  its real bytes even when the central directory lies about its size; the
+  decompression-bomb caps on the read path are unchanged.
+- A crash inside the scanner now exits `2`, distinct from `1` (findings at or
+  above the threshold), and `-f text -o FILE` writes plain text to the file
+  rather than JSON.
+- Assorted correctness fixes to the pickle walk (junk `STACK_GLOBAL` operands,
+  unhashable container elements, opener-tuple hygiene) and word-boundary
+  matching for SafeTensors `__metadata__` keys, so ordinary keys like
+  `evaluation_metric` no longer false-positive at CRITICAL.
+- **Evasion gaps closed.** The post-splice resync now also finds protocol-0/1
+  payloads, not just protocol 2 to 5; the embedded-pickle walk covers
+  `BYTEARRAY8` literals, recurses two levels, and propagates argument-level
+  evidence, not just denied names; and GGUF metadata past the content-scan
+  window now reports a coverage gap (`MFV-GGUF-004`) instead of silence. The raw
+  zip-member fallback emits the zip-bomb finding at parity with the strict path
+  rather than silently truncating.
+
+### Internal
+
+- The single large `scanner.py` was split into focused modules behind a facade:
+  `_pickle_engine`, `_gguf`, `_tensors`, `_keras`, `_binary` and `_lfs`.
+  `hayward.scanner` re-exports every name, so the public and library API is
+  unchanged; this is a code move with no behavior change.
+
 ## 1.0.1 (2026-08-08)
 
 ### Fixed
@@ -99,12 +201,11 @@ ended.
 
 ### Measured position
 
-Against 215 hash-pinned models from the HuggingFace Hub: nothing above INFO,
-5 files in the INFO tier. Against picklescan's test corpus: 34 of 35 malicious
-files, the miss being a `.7z` archive with no extractor installed. Against
-PickleCloak: 49 of 57 exploits and 91 of 97 gadget chains. Against MalHug:
-87 of 87 read and detected, 86 naming the sink the corpus records.
+Measured against public and in-the-wild corpora (hash-pinned HuggingFace
+models, picklescan's test data, PickleCloak, MalHug): clean on the benign
+models and a strong detection rate on the malicious ones, with the misses
+(such as a `.7z` archive with no extractor installed) documented.
 
-All self-measured against corpora that do not ship in this repository, using
-a harness that is not published yet. Not reproducible by a reader today; see
-docs/accuracy.md.
+All self-measured against corpora that do not ship in this repository. Not
+independently reproducible; see docs/accuracy.md, and run the harness
+(`scripts/eval_corpus.py`) against your own corpus.

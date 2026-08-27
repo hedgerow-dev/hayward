@@ -47,7 +47,6 @@ class Finding:
     severity: Severity
     category: Category
     file_path: str
-    start_line: int = 0
     confidence: float = 1.0
     cwe_ids: list[int] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -86,6 +85,7 @@ COVERAGE_RULE_IDS = frozenset({
     "MFV-SKIP-003",
     "MFV-7Z-001",
     "MFV-GGUF-004",
+    "MFV-LFS-001",
 })
 
 

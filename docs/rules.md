@@ -49,10 +49,29 @@ derive theirs from the strength of the evidence found.
 | `MFV-GGUF-004` | INFO | - | Magic is valid but the KV section will not parse. **Not a clean verdict**, see coverage limits |
 | `MFV-GGUF-005` | HIGH | 787, 190 | Container arithmetic wraps or overruns the file (the `CVE-2025-53630` / `CVE-2026-27940` / `CVE-2026-33298` class), **or a tensor name carries a path** |
 
+## HuggingFace / transformers JSON config
+
+transformers loads these files straight from a model repo, so a malicious
+value executes on load. `MFV-HF-001` is the `MFV-GGUF-003` chat_template
+threat carried in the standalone JSON files (`tokenizer_config.json`,
+`chat_template.json`) instead of GGUF metadata, matched the same way: only a
+code-execution construct in Jinja **code position** fires it, never ordinary
+`{{ }}` substitution. `MFV-HF-002` is the HuggingFace-hub remote-code vector:
+`auto_map` names custom Python modules the loader imports and executes, and a
+config that ships `trust_remote_code: true` asserts its own code should be
+trusted. Both are surfaces, not proof of malice, so they are HIGH, not
+CRITICAL.
+
+| Rule | Severity | CWE | Fires when |
+|------|----------|-----|------------|
+| `MFV-HF-001` | CRITICAL | 94, 1336 | A `.json` config's `chat_template` contains a code-execution construct in Jinja2 code position (the `MFV-GGUF-003` threat in JSON) |
+| `MFV-HF-002` | HIGH | 94 | A `.json` config declares `auto_map` (custom modules the loader imports and runs) or ships `trust_remote_code: true` |
+
 ## Other formats
 
 | Rule | Severity | CWE | Fires when |
 |------|----------|-----|------------|
+| `MFV-TORCH-001` | HIGH | 94 | A torch zip (`.pt`/`.ptl`/TorchScript/torch.package) carries executable Python **source** members (`code/*.py` or a `.data/` package layout) that `torch.jit` or `PackageImporter` runs on load |
 | `MFV-KERAS-001` | HIGH | 502 | Lambda layer embedding a marshalled Python function |
 | `MFV-KERAS-002` | INFO | 502 | Layer class not on the known-builtin list |
 | `MFV-ONNX-001` | HIGH | 502, 94 | Custom op with documented code-execution behaviour (PyOp/PythonOp) |
@@ -80,12 +99,25 @@ derive theirs from the strength of the evidence found.
 | `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed |
 | `MFV-SKIP-003` | LOW | - | Content could not be verified |
 | `MFV-7Z-001` | INFO | - | A `.7z` archive is present and no extractor is available |
+| `MFV-LFS-001` | INFO | - | The file is a Git LFS pointer: a placeholder for content stored elsewhere, so the real bytes were never fetched and nothing was scanned |
+
+## Provenance (opt-in)
+
+Emitted only under `--check-signatures`. Detection and structural reporting
+only: this scanner does no network I/O and no cryptographic verification, so a
+present signature is reported, never trusted. Presence is not proof of
+authenticity.
+
+| Rule | Severity | CWE | Fires when |
+|------|----------|-----|------------|
+| `MFV-SIG-001` | INFO | - | A sibling signature or attestation artifact is present (a detached `.sig`, a Sigstore bundle, or an in-toto/SLSA/DSSE attestation). Reported with what it structurally claims, and explicitly **not verified** |
 
 ## Coverage limits, stated plainly
 
-**`MFV-SKIP-001/002/003`, `MFV-7Z-001` and `MFV-GGUF-004` are not clean
-verdicts.** Each means some or all of the file was never analysed. Treat them as
-"unknown", never as "safe", and do not count them as detections when scoring.
+**`MFV-SKIP-001/002/003`, `MFV-7Z-001`, `MFV-GGUF-004` and `MFV-LFS-001` are
+not clean verdicts.** Each means some or all of the file was never analysed.
+Treat them as "unknown", never as "safe", and do not count them as detections
+when scoring.
 
 Known blind spots as of 2026-08-05:
 
@@ -104,4 +136,24 @@ Known blind spots as of 2026-08-05:
 - **`MFV-PICKLE-004` is the unknown-global bucket**, structurally the same tier
   as picklescan's `suspicious` and ModelAudit's `warning`. It is INFO by design.
   Any published false-positive figure must state whether INFO was counted.
+
+## Formats deliberately out of scope
+
+These are recognised as real formats but carry no code-execution surface worth
+a rule in this pass. Stated here so the gap is explicit rather than silent:
+
+- **MLflow model directories** (`MLmodel` manifest) need no rule of their own.
+  The dangerous artifact an `MLmodel` names is a pickle or torch file
+  (`model.pkl`, `data/model.pth`), and `scan_directory` already discovers and
+  scans those by extension. Parsing the YAML manifest to re-point at them would
+  add a fragile hand-rolled parser for no coverage the extension walk does not
+  already provide.
+- **CoreML `.mlpackage`** is protobuf plus weight blobs and executes no pickle
+  on load, so it has no deserialization surface to model here.
+- **JAX / Flax `.msgpack`** checkpoints are msgpack, which executes no code;
+  msgpack ext-type abuse is theoretical and needs a vulnerable custom decoder
+  that a checkpoint does not carry.
+- **`shelve` / `dbm`** stores are platform-specific dbm backends wrapping
+  pickles, rare as a model-distribution format and high effort to read
+  portably. Out of scope until one shows up in the wild.
 
