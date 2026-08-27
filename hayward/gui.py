@@ -20,6 +20,7 @@ line does.
 
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
@@ -51,6 +52,15 @@ _EMPTY_BODY = (
     "Choose a model file or a folder to scan.\n"
     "Files are read as bytes. Nothing is loaded or executed."
 )
+
+
+def _common_root(paths: list[Path]) -> Path:
+    if len(paths) == 1:
+        return paths[0]
+    try:
+        return Path(os.path.commonpath(paths))
+    except ValueError:
+        return paths[0].parent
 
 
 class HaywardApp:
@@ -232,48 +242,56 @@ class HaywardApp:
         path = filedialog.askopenfilename(
             title="Choose a model file",
             filetypes=[
-                ("Model files", "*.pt *.pth *.pkl *.bin *.safetensors *.gguf "
-                                "*.h5 *.keras *.onnx *.pb *.npy *.npz *.joblib "
-                                "*.tflite *.skops *.pmml *.mar *.nemo *.7z"),
+                ("Model files", "*.pt *.pth *.pkl *.pickle *.ckpt *.th *.bin "
+                                "*.safetensors *.gguf *.h5 *.hdf5 *.keras *.onnx "
+                                "*.pb *.npy *.npz *.joblib *.tflite *.skops "
+                                "*.pmml *.mar *.nemo *.7z"),
                 ("All files", "*.*"),
             ],
         )
         if path:
-            self._start(Path(path))
+            self._start([Path(path)])
 
     def _pick_dir(self) -> None:
         path = filedialog.askdirectory(title="Choose a folder of models")
         if path:
-            self._start(Path(path))
+            self._start([Path(path)])
 
     def _on_drop(self, event: tk.Event) -> None:
         raw = self.root.tk.splitlist(event.data)  # type: ignore[attr-defined]
         if raw:
-            self._start(Path(raw[0]))
+            self._start([Path(r) for r in raw])
 
-    def _start(self, target: Path) -> None:
+    def _start(self, targets: list[Path]) -> None:
         if self.scanning:
             return
         self.scanning = True
-        self.target = target
+        self.target = _common_root(targets)
         self.findings = []
         self.tree.delete(*self.tree.get_children())
         self.detail_rule.set("")
         self.detail_text.set("")
-        self.summary.set(f"Scanning {target.name} ...")
+        label = self.target.name if len(targets) == 1 else f"{len(targets)} files"
+        self.summary.set(f"Scanning {label} ...")
         self._show_results()
-        threading.Thread(target=self._worker, args=(target,), daemon=True).start()
+        threading.Thread(target=self._worker, args=(targets,), daemon=True).start()
 
-    def _worker(self, target: Path) -> None:
+    def _worker(self, targets: list[Path]) -> None:
         scanner = ModelFileScanner()
+        findings: list[Finding] = []
         try:
-            findings = (
-                scanner.scan_file(target) if target.is_file()
-                else scanner.scan_directory(target)
-            )
-            self.queue.put(("done", findings))
+            for target in targets:
+                if target.is_file():
+                    findings.extend(scanner.scan_file(target))
+                else:
+                    findings.extend(scanner.scan_directory(target))
         except OSError as exc:
             self.queue.put(("error", str(exc)))
+            return
+        except Exception as exc:
+            self.queue.put(("error", f"scan crashed: {exc}"))
+            return
+        self.queue.put(("done", findings))
 
     # ── results ─────────────────────────────────────────────────────
 
@@ -325,12 +343,13 @@ class HaywardApp:
 
     def _display_path(self, finding: Finding) -> str:
         path = Path(finding.file_path)
-        if self.target and self.target.is_dir():
+        if self.target:
+            root = self.target if self.target.is_dir() else self.target.parent
             try:
-                return str(path.relative_to(self.target))
+                return str(path.relative_to(root))
             except ValueError:
                 pass
-        return path.name
+        return str(path)
 
     def _update_summary(self) -> None:
         if not self.findings:
@@ -386,7 +405,15 @@ class HaywardApp:
 
 
 def main() -> int:
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        print(
+            f"hayward-gui: could not open a window ({exc}). If there is no "
+            "display available, use the command line instead: hayward scan <target>",
+            file=sys.stderr,
+        )
+        return 1
     HaywardApp(root)
     root.mainloop()
     return 0

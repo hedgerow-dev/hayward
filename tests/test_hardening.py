@@ -350,7 +350,10 @@ class TestStackDesyncViaUnsimulatedPushes:
         ):
             handled |= set(getattr(scanner_module, attr))
 
-        source = Path(scanner_module.__file__).read_text(encoding="utf-8")
+        # The pickle VM lives in hayward._pickle_engine (HW-147); read the file
+        # that actually defines _walk_one_pickle rather than assuming scanner.py.
+        vm_file = scanner_module._walk_one_pickle.__code__.co_filename
+        source = Path(vm_file).read_text(encoding="utf-8")
         body = source[
             source.index("def _walk_one_pickle"):source.index("def _classify_pickle_global")
         ]
@@ -1015,7 +1018,8 @@ class TestOversizedKerasH5IsStillScanned:
     def test_anchor_straddling_a_stream_chunk_is_found(self, tmp_path, monkeypatch):
         """The anchor must survive landing on a read boundary, which is what
         the overlap in _read_keras_config_window exists for."""
-        monkeypatch.setattr(mfv_scanner, "_KERAS_STREAM_CHUNK", 64)
+        # Lives in hayward._keras after the HW-147 split; patch it there.
+        monkeypatch.setattr("hayward._keras._KERAS_STREAM_CHUNK", 64)
         scanner = ModelFileScanner()
         monkeypatch.setattr(scanner, "MAX_SCAN_BYTES", 100)
 

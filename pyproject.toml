@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hayward"
-version = "1.0.1"
+dynamic = ["version"]
 description = "Security scanner for machine-learning model files: detects code execution in pickle, GGUF, ONNX, Keras and other checkpoints"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -36,7 +36,7 @@ classifiers = [
 dependencies = ["defusedxml>=0.7,<1.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0,<9.0", "ruff>=0.4,<1.0"]
+dev = ["pytest>=8.0,<9.0", "pytest-cov>=5.0,<8.0", "ruff>=0.4,<1.0"]
 
 [project.urls]
 Homepage = "https://github.com/hedgerow-dev/hayward"
@@ -48,6 +48,10 @@ hayward = "hayward.cli:main"
 
 [project.gui-scripts]
 hayward-gui = "hayward.gui:main"
+
+# Single source of truth for the version: `__version__` in hayward/__init__.py.
+[tool.hatch.version]
+path = "hayward/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hayward"]
@@ -70,3 +74,7 @@ ignore = ["S301", "S403", "E501"]
 [tool.ruff.lint.per-file-ignores]
 # Tests construct deliberately unsafe fixtures. That is the fixture, not a bug.
 "tests/*" = ["S", "B011"]
+# Build/eval scripts run known subprocesses (the wheel build) with a fixed
+# argv list and sys.executable, never shell or untrusted input. S603/S607 flag
+# the subprocess call itself, which is the point of a build script.
+"scripts/*" = ["S603", "S607"]

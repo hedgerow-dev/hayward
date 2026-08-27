@@ -1,0 +1,86 @@
+name: Hayward model scan
+description: >-
+  Scan machine-learning model files for code execution and unsafe content, then
+  write a SARIF report for GitHub code scanning.
+author: Hedgerow
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  path:
+    description: File or directory of model files to scan.
+    required: true
+  fail-on:
+    description: >-
+      Lowest severity that fails the build. One of critical, high, medium, low,
+      info, or never.
+    required: false
+    default: high
+  fail-on-coverage:
+    description: >-
+      Also fail when a file could not be fully read. Set to "true" to enable.
+    required: false
+    default: "false"
+  output:
+    description: Path for the SARIF report.
+    required: false
+    default: hayward.sarif
+  version:
+    description: >-
+      Version of the hayward package to install from PyPI. Leave empty to
+      install the copy bundled with this action (the checkout in this repo),
+      which is how the action dogfoods the code it ships with. A separately
+      published action would default to the current PyPI release instead. Set a
+      value to pin a specific version.
+    required: false
+    default: ""
+
+outputs:
+  sarif:
+    description: Path to the SARIF report written by the scan.
+    value: ${{ inputs.output }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      # Pinned to a commit SHA, matching this repo's CI (mutable tags are a
+      # supply-chain risk for a security tool's own action).
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      with:
+        python-version: "3.x"
+
+    # Inputs are passed through the environment, never interpolated straight
+    # into the run script. A ${{ inputs.x }} spliced into bash is GitHub Actions
+    # script injection: a crafted input value would run as shell. Read as "$VAR"
+    # inside the script, the value is data, not code.
+    - name: Install hayward
+      shell: bash
+      env:
+        HAYWARD_VERSION: ${{ inputs.version }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        if [ -n "$HAYWARD_VERSION" ]; then
+          python -m pip install "hayward==$HAYWARD_VERSION"
+        else
+          # This action lives in the hayward repo, so an empty version installs
+          # the local checkout to test the code in this repo. A released action
+          # would install "hayward" (pinned) from PyPI here instead.
+          python -m pip install "$ACTION_PATH"
+        fi
+
+    - name: Run scan
+      shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+        SCAN_OUTPUT: ${{ inputs.output }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        FAIL_ON_COVERAGE: ${{ inputs.fail-on-coverage }}
+      run: |
+        args=(scan "$SCAN_PATH" -f sarif -o "$SCAN_OUTPUT" --fail-on "$FAIL_ON")
+        if [ "$FAIL_ON_COVERAGE" = "true" ]; then
+          args+=(--fail-on-coverage)
+        fi
+        hayward "${args[@]}"

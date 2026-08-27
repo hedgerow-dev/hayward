@@ -39,6 +39,7 @@ ending is not proof the file ended.
 | `MFV-SKIP-003` | Content could not be verified |
 | `MFV-7Z-001` | A `.7z` archive with no extractor available |
 | `MFV-GGUF-004` | Valid GGUF magic, unparseable metadata section |
+| `MFV-LFS-001` | A Git LFS pointer: the bytes on disk are a placeholder for content stored elsewhere |
 
 **None of these is a clean verdict, and none is a detection.** Treat them as
 unknown, and count them in a column of their own when scoring.

@@ -20,15 +20,14 @@ from hayward.findings import (
     Severity,
     is_coverage_gap,
 )
-from hayward.scanner import ModelFileFinding, ModelFileScanner
+from hayward.scanner import ModelFileScanner
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 __all__ = [
     "COVERAGE_RULE_IDS",
     "Category",
     "Finding",
-    "ModelFileFinding",
     "ModelFileScanner",
     "Severity",
     "__version__",
