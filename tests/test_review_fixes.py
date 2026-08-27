@@ -497,6 +497,31 @@ class TestZipLiedDeclaredSizes:
             [(f.rule_id, f.message) for f in findings]
         )
 
+    def test_eoferror_from_strict_read_falls_back_to_raw(self, tmp_path, monkeypatch):
+        """An older Python 3.10/3.11 zipfile without the overlapped-entries
+        check reads a STORED member past EOF and raises EOFError rather than
+        BadZipFile. The strict-read fallback must catch it and drop to the raw
+        reader, or the payload is lost to an MFV-SKIP-003. Simulated by forcing
+        zipfile's own reader to raise EOFError, so this holds on every version.
+        """
+        raw = self._zip_with("data.txt", _os_system_pickle("echo pwned"),
+                             zipfile.ZIP_STORED)
+        p = tmp_path / "model.pt"
+        p.write_bytes(raw)
+
+        # Force the strict reader to fail the way an older zipfile does. The raw
+        # reader does not go through zipfile.ZipFile.open, so it stays working.
+        def eof_open(self, name, *args, **kwargs):
+            raise EOFError("simulated older-zipfile read past EOF")
+
+        monkeypatch.setattr(zipfile.ZipFile, "open", eof_open)
+
+        findings = ModelFileScanner().scan_file(p)
+
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings), (
+            [(f.rule_id, f.message) for f in findings]
+        )
+
 
 class TestPytorchZipFallbackCapped:
     """HW-116: when zipfile refuses a file scan_file still routed to

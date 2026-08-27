@@ -2148,11 +2148,13 @@ class ModelFileScanner:
             with zf.open(info) as handle:
                 head = handle.read(2)
         except (OSError, zipfile.BadZipFile, RuntimeError,
-                NotImplementedError, ValueError):
-            # Unreadable through the strict path (lied central-directory
-            # sizes raise BadZipFile *or* ValueError from zipfile's offset
-            # arithmetic). Sniff the stored bytes, for the same reason the
-            # read fallback exists below.
+                NotImplementedError, ValueError, EOFError):
+            # Unreadable through the strict path. Lied central-directory sizes
+            # raise BadZipFile or ValueError from zipfile's offset arithmetic on
+            # a recent Python, but an older 3.10/3.11 without the overlapped-
+            # entries check reads a STORED member past EOF and raises EOFError
+            # instead, so that is caught here too. Sniff the stored bytes, for
+            # the same reason the read fallback exists below.
             if source is None:
                 return False
             raw = self._read_zip_member_raw(source, info, head_only=True)
@@ -2385,7 +2387,7 @@ class ModelFileScanner:
                     return []
             blob = self._read_zip_member_capped(zf, info.filename, self.MAX_ZIP_MEMBER_BYTES)
         except (OSError, zipfile.BadZipFile, RuntimeError,
-                NotImplementedError, ValueError):
+                NotImplementedError, ValueError, EOFError):
             # Same lie the .pt walk already handles one level up: lied flag
             # bits or lied sizes make the strict reader refuse a plainly
             # readable member. The only caller opens `zf` on `file_path`
@@ -2423,7 +2425,7 @@ class ModelFileScanner:
                             inner_zf, inner.filename, self.MAX_ZIP_MEMBER_BYTES,
                         )
                     except (OSError, zipfile.BadZipFile, RuntimeError,
-                            NotImplementedError, ValueError):
+                            NotImplementedError, ValueError, EOFError):
                         # Same lied-metadata shape one level up: the strict
                         # reader refuses, the bytes are plainly there.
                         data = self._read_zip_member_raw(blob, inner)
@@ -2553,7 +2555,7 @@ class ModelFileScanner:
                     try:
                         inner = self._read_zip_member_capped(zf, name, self.MAX_ZIP_MEMBER_BYTES)
                     except (OSError, zipfile.BadZipFile, RuntimeError,
-                            NotImplementedError, ValueError):
+                            NotImplementedError, ValueError, EOFError):
                         # A member the strict reader refuses is NOT evidence of
                         # safety, and skipping it silently reported the file
                         # clean. The refusal is usually a lie: setting the
@@ -2712,7 +2714,7 @@ class ModelFileScanner:
                     raw = self._read_zip_member_capped(
                         zf, info.filename, self._SKOPS_MAX_SCHEMA_BYTES)
                 except (OSError, zipfile.BadZipFile, RuntimeError,
-                        NotImplementedError, ValueError):
+                        NotImplementedError, ValueError, EOFError):
                     # One unreadable member must not abort the whole archive
                     # walk: the pickle-member pass below still has to run.
                     raw = None
@@ -2746,7 +2748,7 @@ class ModelFileScanner:
                     inner = self._read_zip_member_capped(zf, info.filename,
                                                          self.MAX_ZIP_MEMBER_BYTES)
                 except (OSError, zipfile.BadZipFile, RuntimeError,
-                        NotImplementedError, ValueError):
+                        NotImplementedError, ValueError, EOFError):
                     # Lied metadata makes the strict reader refuse a plainly
                     # readable member; the bytes on disk are still readable.
                     inner = self._read_zip_member_raw(file_path, info)
@@ -3443,7 +3445,7 @@ class ModelFileScanner:
                             continue
                         try:
                             member_data = self._read_zip_member_capped(zf, name, self.MAX_ZIP_MEMBER_BYTES)
-                        except (OSError, zipfile.BadZipFile, RuntimeError, ValueError):
+                        except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, EOFError):
                             continue
                         if member_data is None:
                             continue
