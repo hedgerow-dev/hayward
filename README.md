@@ -90,6 +90,18 @@ from hayward import ModelFileScanner
 findings = ModelFileScanner().scan_directory(Path("models"))
 ```
 
+And in CI, as a GitHub Action that fails the build and uploads SARIF to code
+scanning:
+
+```yaml
+- uses: hedgerow-dev/hayward@v1
+  with:
+    path: models
+    fail-on: high
+```
+
+See the [GitHub Action guide](docs/github-action.md).
+
 ## What a clean result means
 
 That Hayward read the files and recognised nothing dangerous in them. Not that
