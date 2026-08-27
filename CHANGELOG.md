@@ -4,6 +4,26 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- `MFV-ARCHIVE-001` (MEDIUM, CWE-22): flags an archive member whose name is
+  unsafe as an extraction path, across the containers Hayward walks but never
+  extracts. A member named `../../x`, an absolute path, a Windows drive path, a
+  UNC path, or one carrying a NUL/newline escapes the target directory when a
+  loader or unpacker writes it to disk (zip slip). The check now runs on the
+  torch zip (`.pt`), the nested zip inside a TorchServe `.mar`, and the tar
+  based NVIDIA `.nemo`; numpy's `.npz` was already covered by `MFV-NPZ-001`. A
+  normal nested member such as `archive/data.pkl` does not fire.
+
+### Fixed
+
+- Deny `uuid._get_command_stdout` and `uuid._popen`, living-off-the-land
+  gadgets that shell out through subprocess (GHSA-g38g-8gr9-h9xp). They were
+  surfaced only at INFO before. The `uuid` module itself stays allowed, so an
+  ordinary pickled `uuid.UUID` is not flagged.
+
 ## 1.1.0 (2026-08-27)
 
 A hardening and feature release built from the in-depth review of 2026-08-23.

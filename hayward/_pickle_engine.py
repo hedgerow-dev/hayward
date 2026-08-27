@@ -83,6 +83,11 @@ PICKLE_DENIED_GLOBALS: frozenset[str] = frozenset({
     "imaplib.IMAP4_stream",
     "code.InteractiveInterpreter.runcode",
     "trace.Trace.run", "trace.Trace.runctx",
+    # uuid's MAC-address helpers shell out through subprocess. Denying the
+    # specific gadgets, not picklescan's `uuid: *` wildcard (which flags an
+    # ordinary pickled uuid.UUID), catches the GHSA-g38g-8gr9-h9xp payload
+    # without the false positives the wildcard would cost.
+    "uuid._get_command_stdout", "uuid._popen",
     # cloudpickle reconstructs live functions from marshalled code objects --
     # arbitrary code execution by construction, and no model's weights need it.
     #

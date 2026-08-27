@@ -1,19 +1,52 @@
 # Accuracy
 
-**Every number on this page is self-measured, and none of it ships in this
-repository.**
+**Every number on this page is self-measured.** One section, the reproducible
+1.1.0 detection below, can be re-run by anyone against a public corpus. The rest
+cannot yet.
 
-The corpora live in a separate harness, quickset, which scores five scanners
-against the same files. **That harness is not public yet**, so nothing here can
-currently be reproduced by a reader. Until it is, treat every figure below as
+Those other corpora live in a separate harness, quickset, which scores five
+scanners against the same files. **That harness is not public yet**, so those
+figures cannot currently be reproduced by a reader. Until it is, treat them as
 a vendor claim, which is exactly the standard this page applies to everyone
 else's numbers.
 
 What ships here that you *can* check today: the test suite, which builds its
 own fixtures and needs no network, and the scanner itself.
 
-The figures below were measured 2026-08-06 at version 1.0.0 and have not been
-re-run since, so they describe that release rather than the current one.
+The 1.1.0 detection figures in the next section **can** be re-run against a
+public corpus. The figures after that were measured 2026-08-06 at version 1.0.0,
+have not been re-run since, and describe that release rather than the current
+one.
+
+## Reproducible detection (1.1.0)
+
+Unlike the rest of this page, this you can re-run. Measured 2026-08-27 against
+`hayward 1.1.0` installed from PyPI, over the public picklescan test fixtures at
+a pinned commit (`f15d54da3dec9aa28a87ede82f87882bb80f1023`), with labels taken
+from picklescan's own test assertions.
+
+- **Malicious: 80 of 83 detected at HIGH or above** (all 80 as CRITICAL), and
+  **0 of 83 returned a clean verdict.**
+- The three not raised to HIGH each still produced a finding. `malicious1.7z` is
+  a coverage gap (no bundled `7z` extractor). Two are stdlib
+  living-off-the-land gadgets surfaced at INFO rather than convicted:
+  `sys_module_override_sploit.pkl` (attribute-override obfuscation) and one
+  `uuid._get_command_stdout` variant whose five siblings *are* caught at
+  CRITICAL. Both are genuine gaps, tracked for a later release.
+- **Benign: 14 of 14 picklescan benign fixtures clean**, including a real 244 KB
+  legacy-pickle torch `state_dict` and six numpy arrays.
+
+The benign result is a smoke check, not a false-positive rate: 14 files is far
+too few to state one. A real rate needs the larger corpus this page's other
+numbers hint at.
+
+Reproduce it:
+
+```bash
+pip install hayward==1.1.0
+git clone --depth 1 https://github.com/mmaitre314/picklescan
+hayward scan picklescan/tests/data --fail-on high
+```
 
 ## False positives
 
@@ -100,8 +133,10 @@ quantity. Not breadth, and not a longer list.
 
 ## Reproducing this
 
-**Not possible from this repository today.** The harness is not published, and
-saying so is more useful than a command that does not work.
+**The 1.1.0 detection section above is reproducible today** against the public
+picklescan corpus, with the exact commands it lists. The full false-positive
+and comparative figures are **not** yet: the quickset harness is not published,
+and saying so is more useful than a command that does not work.
 
 When it is published, the shape is: the benign corpus is fetched from the Hub
 and hash-pinned on first use, and malicious payloads are generated at run time

@@ -81,6 +81,7 @@ CRITICAL.
 | `MFV-TF-001` | HIGH | 502, 94 | SavedModel graph op that touches the filesystem or invokes embedded Python |
 | `MFV-TFLITE-001` | HIGH | 190, 125 | Tensor dimensions inconsistent with a 32-bit loader. `CVE-2026-42627` |
 | `MFV-NPZ-001` | MEDIUM | 22 | NPZ member violates zip-safety discipline (traversal, absolute path, duplicate name) |
+| `MFV-ARCHIVE-001` | MEDIUM | 22 | A zip/tar/mar member name is unsafe as an extraction path (a `..` segment, an absolute path, a Windows drive path, a UNC path, or an embedded NUL/newline). Covers the torch zip (`.pt`), the nested zip inside a `.mar`, and the tar-based `.nemo`; `.npz` has its own MFV-NPZ-001. A loader that extracts members to disk writes outside the target directory (zip slip) |
 | `MFV-PMML-001` | HIGH | 611, 918 | External entity declaration. XXE needs no code execution to read files or reach the network |
 | `MFV-PMML-002` | HIGH | 94 | Function name associated with code execution in `<Apply>` |
 | `MFV-SKOPS-001` | CRITICAL | 502 | skops schema references an execution-granting type |

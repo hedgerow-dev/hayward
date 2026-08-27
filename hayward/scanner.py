@@ -2253,9 +2253,11 @@ class ModelFileScanner:
         an ordinary pickle -- either flat or, for newer exports, itself a zip
         in torch's own format. Both shapes are handled.
 
-        Nothing is ever extracted to disk, so tar path-traversal ("zip slip")
-        is not reachable from here: members are only read into memory, under
-        the same per-member size cap the zip path uses.
+        Nothing is ever extracted to disk, so Hayward itself is not the
+        zip-slip sink: members are only read into memory, under the same
+        per-member size cap the zip path uses. The consumer that later unpacks
+        the same tar is the sink, so a traversing or absolute member name is
+        still reported (MFV-ARCHIVE-001) as a signal the archive is crafted.
         """
         findings: list[Finding] = []
         try:
@@ -2274,10 +2276,16 @@ class ModelFileScanner:
         try:
             with archive as tf:
                 hit_member_cap = False
+                member_names: list[str] = []
                 for index, member in enumerate(tf):
                     if index >= self.MAX_TAR_MEMBERS:
                         hit_member_cap = True
                         break
+                    # member.name is the raw stored name; tarfile does not strip
+                    # a "../" or leading "/" from it, so it is a direct zip-slip
+                    # sink on extraction. Collected before the isfile/size
+                    # filters so a traversing dir or symlink entry counts too.
+                    member_names.append(member.name)
                     if not member.isfile():
                         continue
                     if member.size < 2 or member.size > self.MAX_ZIP_MEMBER_BYTES:
@@ -2311,6 +2319,8 @@ class ModelFileScanner:
                 # rest vanish silently). The walk is only complete when what
                 # remains past the read offset is the format's own zero
                 # padding; a non-zero tail is unexamined content.
+                findings.extend(
+                    self._archive_member_name_finding(member_names, file_path))
                 if hit_member_cap:
                     findings.append(Finding(
                         rule_id="MFV-SKIP-002",
@@ -2414,6 +2424,12 @@ class ModelFileScanner:
         findings: list[Finding] = []
         try:
             with zipfile.ZipFile(io.BytesIO(blob)) as inner_zf:
+                # Raw inner names, not prefixed: joining a benign prefix onto
+                # an absolute inner name ("prefix//etc/x") would hide the leading
+                # slash from the absolute-path check.
+                findings.extend(self._archive_member_name_finding(
+                    [inner.orig_filename for inner in inner_zf.infolist()], file_path,
+                ))
                 for inner in inner_zf.infolist():
                     # The raw-bytes fallback gets the archive's own bytes:
                     # local-header offsets are relative to this in-memory
@@ -2510,6 +2526,52 @@ class ModelFileScanner:
             metadata={"source_members": sorted(source_members)[:20]},
         )
 
+    def _archive_member_name_finding(
+        self, names: list[str], file_path: Path,
+    ) -> list[Finding]:
+        """MFV-ARCHIVE-001: a zip/tar/mar member name is unsafe as a path.
+
+        The container walks read every member into memory and never extract to
+        disk, so Hayward itself is not the zip-slip sink. The consumer is: the
+        loader or unpacker that opens the same file writes each member to the
+        name the archive gives it, and a member named `../../x`, `/etc/x`, a
+        Windows drive path, a UNC path, or one carrying a NUL/newline escapes
+        the target directory on extraction (CWE-22). numpy's `.npz` gets this
+        via MFV-NPZ-001 already; the torch zip (`.pt`/`.mar`), the nested zip
+        inside a `.mar`, and the tar-based `.nemo` did not until this rule.
+
+        Conservative by construction: `_unsafe_name_reason` returns None for an
+        ordinary nested name like `archive/data.pkl`, so only the five hostile
+        shapes above ever fire. Raw stored names are passed in (zip's
+        `orig_filename`, tar's `member.name`), never the platform-laundered
+        `filename`, so a backslash or drive prefix is still visible off-Windows.
+        """
+        problems: list[str] = []
+        seen: set[str] = set()
+        for name in names:
+            if name in seen:
+                continue
+            reason = _unsafe_name_reason(name)
+            if reason is not None:
+                seen.add(name)
+                problems.append(f"{name!r} carries a {reason}")
+        if not problems:
+            return []
+        return [Finding(
+            rule_id="MFV-ARCHIVE-001",
+            message=f"Archive member name is unsafe as an extraction path: "
+                    f"{'; '.join(problems[:5])}. A loader or unpacker that writes "
+                    f"members to disk under these names writes outside the target "
+                    f"directory (CWE-22 zip slip); a normal nested member such as "
+                    f"'archive/data.pkl' never takes this shape.",
+            severity=Severity.MEDIUM,
+            category=Category.PATH_TRAVERSAL,
+            file_path=str(file_path),
+            confidence=0.6,
+            cwe_ids=[22],
+            metadata={"unsafe_members": problems[:20]},
+        )]
+
     def _scan_pytorch_zip(self, file_path: Path) -> list[Finding]:
         """Scan the pickle stream(s) inside a PyTorch (or other) zip checkpoint.
 
@@ -2547,6 +2609,8 @@ class ModelFileScanner:
                 source_finding = self._torch_source_finding(file_path, names)
                 if source_finding is not None:
                     findings.append(source_finding)
+                findings.extend(self._archive_member_name_finding(
+                    [info.orig_filename for info in zf.infolist()], file_path))
                 for info in zf.infolist():
                     name = info.filename
                     if not self._zip_member_may_be_pickle(zf, info, file_path):
