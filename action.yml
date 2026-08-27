@@ -29,11 +29,9 @@ inputs:
     default: hayward.sarif
   version:
     description: >-
-      Version of the hayward package to install from PyPI. Leave empty to
-      install the copy bundled with this action (the checkout in this repo),
-      which is how the action dogfoods the code it ships with. A separately
-      published action would default to the current PyPI release instead. Set a
-      value to pin a specific version.
+      Version of the hayward package to install from PyPI, e.g. "1.1.0". Leave
+      empty to install the latest release. Pinning a version is recommended so
+      a scan result cannot change under you between runs.
     required: false
     default: ""
 
@@ -60,15 +58,11 @@ runs:
       shell: bash
       env:
         HAYWARD_VERSION: ${{ inputs.version }}
-        ACTION_PATH: ${{ github.action_path }}
       run: |
         if [ -n "$HAYWARD_VERSION" ]; then
           python -m pip install "hayward==$HAYWARD_VERSION"
         else
-          # This action lives in the hayward repo, so an empty version installs
-          # the local checkout to test the code in this repo. A released action
-          # would install "hayward" (pinned) from PyPI here instead.
-          python -m pip install "$ACTION_PATH"
+          python -m pip install hayward
         fi
 
     - name: Run scan

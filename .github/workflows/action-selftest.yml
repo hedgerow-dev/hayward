@@ -1,0 +1,82 @@
+name: Action self-test
+
+# Exercises the composite action end to end in a real runner: a clean scan must
+# pass, and a malicious scan must fail the build AND write a SARIF report naming
+# the finding. Scoped to action changes so it does not run on every push.
+on:
+  push:
+    branches: [main]
+    paths:
+      - action.yml
+      - .github/workflows/action-selftest.yml
+  pull_request:
+    paths:
+      - action.yml
+      - .github/workflows/action-selftest.yml
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Build fixtures
+        run: |
+          mkdir -p fixtures/clean fixtures/bad
+          python - <<'PY'
+          import pickle, os, struct, pathlib
+          root = pathlib.Path("fixtures")
+          # A minimal valid, benign SafeTensors file (empty header).
+          (root / "clean" / "model.safetensors").write_bytes(struct.pack("<Q", 2) + b"{}")
+          # A pickle that calls os.system on load: the canonical malicious shape.
+          class Evil:
+              def __reduce__(self):
+                  return (os.system, ("echo pwned",))
+          (root / "bad" / "evil.pkl").write_bytes(pickle.dumps(Evil()))
+          PY
+
+      - name: Clean scan should pass
+        uses: ./
+        with:
+          path: fixtures/clean
+          fail-on: high
+          output: clean.sarif
+
+      - name: Clean SARIF is valid and empty
+        run: |
+          python - <<'PY'
+          import json
+          d = json.load(open("clean.sarif"))
+          assert d["version"] == "2.1.0", d.get("version")
+          assert d["runs"][0]["tool"]["driver"]["name"] == "hayward"
+          assert d["runs"][0]["results"] == [], d["runs"][0]["results"]
+          print("clean SARIF OK")
+          PY
+
+      - name: Malicious scan should fail the build
+        id: scan
+        continue-on-error: true
+        uses: ./
+        with:
+          path: fixtures/bad
+          fail-on: high
+          output: bad.sarif
+
+      - name: The action failed AND reported the finding
+        env:
+          OUTCOME: ${{ steps.scan.outcome }}
+        run: |
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "expected the action to fail the build on a malicious model, got: $OUTCOME"
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          d = json.load(open("bad.sarif"))
+          ids = [r["ruleId"] for r in d["runs"][0]["results"]]
+          assert "MFV-PICKLE-001" in ids, ids
+          print("malicious SARIF OK:", ids)
+          PY

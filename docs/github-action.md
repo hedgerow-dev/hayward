@@ -73,7 +73,11 @@ upload step on `if: always()` so the SARIF is published either way.
 
 ## Version
 
-An empty `version` installs the copy of Hayward bundled with the action (the
-checkout in this repository), so the action always tests the code it ships
-with. Set `version` to pin a released package, for example `1.0.1`, when you
-consume the action from another repository.
+The action installs the `hayward` package from PyPI. An empty `version`
+installs the latest release; set `version` to pin one, for example `1.1.0`.
+Pinning is recommended for a CI gate, so a result cannot change under you when a
+new release ships.
+
+The action is pinned to a major version by its tag: `hedgerow-dev/hayward@v1`
+tracks the latest `v1.x` of the action, or pin a full tag such as
+`hedgerow-dev/hayward@v1.1.0` for an exact, reproducible action.
