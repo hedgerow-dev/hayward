@@ -4,7 +4,11 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
-## Unreleased
+## 1.2.0 (2026-08-27)
+
+Archive-safety detections and a re-measurement. This release adds two rules for
+crafted containers and closes a deny-list gadget a reproducible measurement of
+1.1.0 surfaced.
 
 ### Added
 
