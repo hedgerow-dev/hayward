@@ -31,6 +31,7 @@ import logging
 import lzma
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import tarfile
@@ -2277,6 +2278,7 @@ class ModelFileScanner:
             with archive as tf:
                 hit_member_cap = False
                 member_names: list[str] = []
+                link_members: list[tuple[str, str]] = []
                 for index, member in enumerate(tf):
                     if index >= self.MAX_TAR_MEMBERS:
                         hit_member_cap = True
@@ -2286,6 +2288,12 @@ class ModelFileScanner:
                     # sink on extraction. Collected before the isfile/size
                     # filters so a traversing dir or symlink entry counts too.
                     member_names.append(member.name)
+                    # A symlink/hardlink member is itself the sink: its raw
+                    # linkname is where a later member written through it lands.
+                    # Links are not isfile(), so this is collected before the
+                    # filter that skips them below (MFV-ARCHIVE-002).
+                    if member.issym() or member.islnk():
+                        link_members.append((member.name, member.linkname))
                     if not member.isfile():
                         continue
                     if member.size < 2 or member.size > self.MAX_ZIP_MEMBER_BYTES:
@@ -2321,6 +2329,8 @@ class ModelFileScanner:
                 # padding; a non-zero tail is unexamined content.
                 findings.extend(
                     self._archive_member_name_finding(member_names, file_path))
+                findings.extend(
+                    self._archive_link_target_finding(link_members, file_path))
                 if hit_member_cap:
                     findings.append(Finding(
                         rule_id="MFV-SKIP-002",
@@ -2429,6 +2439,9 @@ class ModelFileScanner:
                 # slash from the absolute-path check.
                 findings.extend(self._archive_member_name_finding(
                     [inner.orig_filename for inner in inner_zf.infolist()], file_path,
+                ))
+                findings.extend(self._archive_link_target_finding(
+                    self._zip_symlink_targets(inner_zf, blob), file_path,
                 ))
                 for inner in inner_zf.infolist():
                     # The raw-bytes fallback gets the archive's own bytes:
@@ -2572,6 +2585,108 @@ class ModelFileScanner:
             metadata={"unsafe_members": problems[:20]},
         )]
 
+    # A symlink target is a path string a few dozen bytes long. Cap the read
+    # far below the member cap: a traversal (`../`) or absolute (`/`, drive,
+    # UNC) marker sits at the very start of the path, so reading only the head
+    # cannot be evaded by padding the tail, and no attacker-sized "target"
+    # blob is ever pulled into memory.
+    _ZIP_SYMLINK_TARGET_MAX_BYTES = 4096
+
+    def _read_zip_symlink_target(
+        self, zf: zipfile.ZipFile, info: zipfile.ZipInfo, source: Path | bytes | None,
+    ) -> str | None:
+        """The head of a zip symlink member's content: its link target.
+
+        A zip stores a unix symlink by putting the target *in the member body*.
+        Only the first few KB are read (see the cap above). Falls back to the
+        raw local-header read on a lied-flag-bit refusal, exactly as the pickle
+        read paths do, so a symlink hidden behind forged flag bits is still
+        seen. Never raises: this runs on attacker-controlled bytes.
+        """
+        cap = self._ZIP_SYMLINK_TARGET_MAX_BYTES
+        try:
+            with zf.open(info) as handle:
+                raw = handle.read(cap)
+        except (OSError, zipfile.BadZipFile, RuntimeError,
+                NotImplementedError, ValueError, EOFError):
+            if source is None:
+                return None
+            blob = self._read_zip_member_raw(source, info)
+            if not isinstance(blob, bytes):
+                return None
+            raw = blob[:cap]
+        # The target is a path. Decode leniently: the traversal and absolute
+        # markers are ASCII, so an undecodable tail never hides them, and a
+        # decode error must not turn a link check into a scan failure.
+        return raw.decode("utf-8", "surrogateescape")
+
+    def _zip_symlink_targets(
+        self, zf: zipfile.ZipFile, source: Path | bytes | None,
+    ) -> list[tuple[str, str]]:
+        """(member name, link target) for every zip member stored as a symlink.
+
+        A zip encodes a symlink by putting the unix mode in the high 16 bits of
+        external_attr; `stat.S_ISLNK` on that mode is the test. Raw
+        `orig_filename` is used so the member name is reported unlaundered.
+        """
+        links: list[tuple[str, str]] = []
+        for info in zf.infolist():
+            if not stat.S_ISLNK(info.external_attr >> 16):
+                continue
+            target = self._read_zip_symlink_target(zf, info, source)
+            if target is not None:
+                links.append((info.orig_filename, target))
+        return links
+
+    def _archive_link_target_finding(
+        self, links: list[tuple[str, str]], file_path: Path,
+    ) -> list[Finding]:
+        """MFV-ARCHIVE-002: an archive member is a symlink or hard link whose
+        target escapes the extraction directory (CWE-22, CWE-59).
+
+        Distinct from MFV-ARCHIVE-001, which flags an unsafe member *name*.
+        Here the member *is* a link. An extractor that unpacks the archive
+        first creates the link, then a later regular member written "through"
+        it lands wherever the link points -- the classic tar/zip symlink
+        extraction attack. Hayward never extracts, so it is not the sink; the
+        downstream loader/unpacker is, so a link whose target traverses, is
+        absolute, is a Windows drive or UNC path, or carries a NUL/newline is a
+        strong crafted-archive signal.
+
+        Conservative by construction, mirroring MFV-ARCHIVE-001: a non-link
+        member never reaches here, and `_unsafe_name_reason` returns None for a
+        safe in-tree relative target such as `weights/shard1`, so only a
+        hostile target fires. An absolute target with no `..` (`/etc/passwd`)
+        still fires, because `_unsafe_name_reason` flags a leading `/`.
+        """
+        problems: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for name, target in links:
+            key = (name, target)
+            if key in seen:
+                continue
+            reason = _unsafe_name_reason(target)
+            if reason is not None:
+                seen.add(key)
+                problems.append(f"{name!r} -> {target!r} ({reason})")
+        if not problems:
+            return []
+        return [Finding(
+            rule_id="MFV-ARCHIVE-002",
+            message=f"Archive member is a link whose target escapes the extraction "
+                    f"directory: {'; '.join(problems[:5])}. On extraction the loader "
+                    f"creates the link, then a later member written through it lands "
+                    f"outside the target directory (CWE-22 zip slip via CWE-59 link "
+                    f"following); a link to a safe in-tree target such as "
+                    f"'weights/shard1' never takes this shape.",
+            severity=Severity.MEDIUM,
+            category=Category.PATH_TRAVERSAL,
+            file_path=str(file_path),
+            confidence=0.6,
+            cwe_ids=[22, 59],
+            metadata={"unsafe_links": problems[:20]},
+        )]
+
     def _scan_pytorch_zip(self, file_path: Path) -> list[Finding]:
         """Scan the pickle stream(s) inside a PyTorch (or other) zip checkpoint.
 
@@ -2611,6 +2726,8 @@ class ModelFileScanner:
                     findings.append(source_finding)
                 findings.extend(self._archive_member_name_finding(
                     [info.orig_filename for info in zf.infolist()], file_path))
+                findings.extend(self._archive_link_target_finding(
+                    self._zip_symlink_targets(zf, file_path), file_path))
                 for info in zf.infolist():
                     name = info.filename
                     if not self._zip_member_may_be_pickle(zf, info, file_path):

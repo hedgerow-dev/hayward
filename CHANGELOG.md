@@ -16,6 +16,15 @@ within a major version.
   torch zip (`.pt`), the nested zip inside a TorchServe `.mar`, and the tar
   based NVIDIA `.nemo`; numpy's `.npz` was already covered by `MFV-NPZ-001`. A
   normal nested member such as `archive/data.pkl` does not fire.
+- `MFV-ARCHIVE-002` (MEDIUM, CWE-22/59): flags an archive member that is a
+  symlink or hard link whose target escapes the extraction directory. Distinct
+  from `MFV-ARCHIVE-001`, which flags an unsafe member name: here the member is
+  the link. On extraction the loader creates the link, then a later member
+  written through it lands wherever the link points (the classic tar/zip
+  symlink attack, the CVE-2007-4559 family). Covers the tar-based `.nemo` (tar
+  sym/hard links) and the zip containers `.pt`/`.mar` (a member with the
+  `S_IFLNK` unix mode, its body the link target). A link to a safe in-tree
+  target such as `weights/shard1` does not fire.
 
 ### Fixed
 
