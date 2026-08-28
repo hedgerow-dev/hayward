@@ -1,8 +1,7 @@
 name: Hayward model scan
 description: >-
-  Catch code execution hidden in ML model files (pickle, PyTorch, SafeTensors,
-  GGUF, ONNX, Keras and more) before they load. Fails the build on a finding
-  and writes SARIF for GitHub code scanning. No network, no model framework.
+  Scan ML model files (pickle, SafeTensors, GGUF, ONNX, Keras) for code
+  execution. Fails the build and writes SARIF.
 author: Hedgerow
 
 branding:
