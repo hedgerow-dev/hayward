@@ -4,6 +4,30 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## 1.2.3 (2026-08-28)
+
+A scaled comparative benchmark (128 real public models, seven formats) surfaced
+two issues; both are fixed here.
+
+### Fixed
+
+- Big-endian GGUF no longer false-positives. The `GGUF` magic is byte-order
+  independent, but the version and every count after it are stored big-endian on
+  big-endian builds (llama.cpp ships these for s390x). Read little-endian, the
+  u64 counts looked like wrapped arithmetic and reported `MFV-GGUF-005` at HIGH
+  on a valid public model. Big-endian is now recognised and reported as a
+  coverage gap (`MFV-GGUF-004`, INFO), not a verdict, the same as v1 and GGML.
+
+### Added
+
+- Plain `.tar` archives are now scanned with the same tar walker that backs
+  `.nemo`, so a traversing member name (`MFV-ARCHIVE-001`) or a traversing
+  symlink (`MFV-ARCHIVE-002`) is reported instead of passing silently. A `.tar`
+  that is not actually a tar (a renamed pickle, say) still falls through to the
+  usual content sniff, so the rename trick stays caught. Compressed tars
+  (`.tgz`, `.tar.gz`) are deliberately not routed yet: that needs a
+  decompression budget on the member walk first.
+
 ## 1.2.2 (2026-08-28)
 
 ### Fixed

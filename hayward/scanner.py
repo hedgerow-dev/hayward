@@ -324,6 +324,7 @@ class ModelFormat(str, Enum):
     TF_SAVEDMODEL = "tf_savedmodel"
     KERAS_METADATA = "keras_metadata"
     NEMO = "nemo"
+    TAR = "tar"
     NUMPY = "numpy"
     JOBLIB = "joblib"
     SKOPS = "skops"
@@ -598,6 +599,13 @@ class ModelFileScanner:
             # stay compatible with its own config objects, so PyTorch 2.6's
             # safe-load default does not protect it.
             ".nemo": ModelFormat.NEMO,
+            # A plain (uncompressed) tar is a free rename target and reaches the
+            # same zip-slip and symlink-traversal sinks a `.nemo` does on
+            # extraction, and the tar scanner already reports both. Only `.tar`
+            # is routed here: the compressed forms (`.tgz`, `.tar.gz`) would add
+            # a decompression-bomb surface to the member walk that wants its own
+            # budget first, while an uncompressed tar has no such amplification.
+            ".tar": ModelFormat.TAR,
             ".safetensors": ModelFormat.SAFETENSORS,
             ".gguf": ModelFormat.GGUF,
             ".h5": ModelFormat.KERAS,
@@ -716,6 +724,22 @@ class ModelFileScanner:
             # checkpoints run to hundreds of megabytes, so gating them on
             # total file size would skip the common case.
             return self._scan_tar_pickles(file_path)
+
+        if fmt == ModelFormat.TAR:
+            # A `.tar` is a free rename target, so route it to the tar scanner
+            # only when the bytes really are a tar; otherwise fall through to
+            # the content sniff every unclaimed extension gets, so a pickle
+            # renamed `.tar` is still caught (the danger.dat principle below)
+            # rather than dismissed as an unopenable container. is_tarfile reads
+            # only the leading header, preserving the no-whole-file-read path a
+            # real (possibly huge) tar relies on.
+            try:
+                looks_like_tar = tarfile.is_tarfile(file_path)
+            except (tarfile.TarError, OSError, EOFError, ValueError):
+                looks_like_tar = False
+            if looks_like_tar:
+                return self._scan_tar_pickles(file_path)
+            fmt = ModelFormat.UNKNOWN
 
         if fmt == ModelFormat.SKOPS:
             # Same reasoning as NEMO: zipfile reads members lazily, so the
@@ -1735,6 +1759,31 @@ class ModelFileScanner:
                 metadata={"skipped_reason": "gguf_v1_unparsed", "gguf_version": 1},
             )]
 
+        # Big-endian GGUF: the magic is byte-order independent, but the version
+        # and every count/length after it are stored big-endian on big-endian
+        # builds (llama.cpp ships these for s390x). Read as little-endian, the
+        # version decodes to a huge byte-swapped value and the u64 counts below
+        # look like wrapped arithmetic, which the layout check would report as a
+        # parser exploit: a false positive at HIGH on a valid model. A version
+        # that is not 2 or 3 little-endian but is 2 or 3 when read big-endian is
+        # a big-endian file; treat it as a recognised layout this scanner does
+        # not verify, a coverage gap rather than a verdict.
+        be_version = struct.unpack_from(">I", data, 4)[0]
+        if version not in (2, 3) and be_version in (2, 3):
+            return [Finding(
+                rule_id="MFV-GGUF-004",
+                message=f"GGUF header is big-endian (version {be_version}), a byte "
+                        f"order this scanner does not parse (it verifies little-endian "
+                        f"version 2 and 3). The content was not checked. NOT a clean "
+                        f"verdict.",
+                severity=Severity.INFO,
+                category=Category.AI_ML,
+                file_path=str(file_path),
+                confidence=0.3,
+                metadata={"skipped_reason": "gguf_big_endian",
+                          "gguf_version": be_version},
+            )]
+
         layout_problems = _check_gguf_layout(data)
         if layout_problems:
             findings.append(Finding(
@@ -2286,13 +2335,14 @@ class ModelFileScanner:
         try:
             archive = tarfile.open(file_path, "r:*")
         except (tarfile.TarError, OSError, EOFError):
-            # A .nemo that does not open as a tar is corrupt or extension-
-            # spoofed. scan_file's early return for NEMO bypasses the
-            # extension-confusion check, so nothing else owns this case:
-            # silence would be a clean verdict on a file never analysed.
+            # A tar-routed file (.nemo, .tar and friends) that does not open as
+            # a tar is corrupt or extension-spoofed. scan_file's early return
+            # for these bypasses the extension-confusion check, so nothing else
+            # owns this case: silence would be a clean verdict on a file never
+            # analysed.
             return [_skip_unverified_finding(
                 file_path,
-                "The .nemo container does not open as a tar archive.",
+                "The file did not open as a tar archive.",
                 metadata={"skipped_reason": "container_open_failed"},
             )]
 
