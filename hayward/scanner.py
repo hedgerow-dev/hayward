@@ -1713,6 +1713,28 @@ class ModelFileScanner:
                 confidence=0.95,
             )]
 
+        # GGUF version 1 stores its counts and string/array lengths as 32-bit
+        # fields; version 2 and 3 (which this parser targets) use 64-bit. Read
+        # as v2/v3, a v1 header's fields decode into absurd values, and the
+        # layout check below would report those as wrapped-arithmetic overflow:
+        # a false positive at HIGH on a valid old model. v1 is superseded (v2
+        # landed in 2023), so it is treated as a recognised layout this scanner
+        # does not fully verify, a coverage gap rather than a verdict, the same
+        # way the GGML predecessor is handled above.
+        version = struct.unpack_from("<I", data, 4)[0]
+        if version == 1:
+            return [Finding(
+                rule_id="MFV-GGUF-004",
+                message="GGUF version 1 uses 32-bit header fields, an older layout "
+                        "this scanner does not parse (it verifies version 2 and 3). "
+                        "The content was not checked. NOT a clean verdict.",
+                severity=Severity.INFO,
+                category=Category.AI_ML,
+                file_path=str(file_path),
+                confidence=0.3,
+                metadata={"skipped_reason": "gguf_v1_unparsed", "gguf_version": 1},
+            )]
+
         layout_problems = _check_gguf_layout(data)
         if layout_problems:
             findings.append(Finding(
