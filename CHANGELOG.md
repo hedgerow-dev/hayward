@@ -4,6 +4,17 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## 1.2.2 (2026-08-28)
+
+### Fixed
+
+- GGUF version 1 no longer false-positives. v1 stores its header counts and
+  lengths as 32-bit fields, while v2 and v3 use 64-bit, so reading a valid v1
+  model with the v2/v3 layout decoded the counts into absurd values and
+  reported `MFV-GGUF-005` at HIGH. v1 is now recognised and reported as a
+  coverage gap (`MFV-GGUF-004`, INFO), not a verdict. Surfaced by a comparative
+  benchmark against a real public model.
+
 ## 1.2.1 (2026-08-27)
 
 ### Fixed
