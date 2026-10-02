@@ -21,9 +21,10 @@ SEVENZ_MAGIC = b"7z\xbc\xaf\x27\x1c"
 
 
 def _install_7z_stub(tmp_path: Path, monkeypatch, listing: str, payload_size: int = 1,
-                     listing_exit: int = 0) -> Path:
-    """Fake `7zz` that logs every call. `l` prints `listing`; `x` emits a
-    payload of `payload_size` bytes, to stdout with `-so`, else into `-o<dir>`."""
+                     listing_exit: int = 0, extra_files: int = 0, stderr_bytes: int = 0) -> Path:
+    """Fake `7zz` that logs every call. `l` prints `listing`; `x` writes a
+    `payload_size`-byte x.pkl into `-o<dir>`, plus `extra_files` empty files,
+    after writing `stderr_bytes` of noise to stderr."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     log = tmp_path / "calls.log"
@@ -35,12 +36,12 @@ def _install_7z_stub(tmp_path: Path, monkeypatch, listing: str, payload_size: in
         f"    sys.stdout.write({listing!r})\n"
         f"    sys.exit({listing_exit})\n"
         "if args and args[0] == 'x':\n"
-        f"    data = b'0' * {payload_size}\n"
-        "    if '-so' in args:\n"
-        "        sys.stdout.buffer.write(data)\n"
-        "    else:\n"
-        "        outdir = next(a[2:] for a in args if a.startswith('-o'))\n"
-        "        (pathlib.Path(outdir) / 'x.pkl').write_bytes(data)\n"
+        f"    sys.stderr.write('e' * {stderr_bytes})\n"
+        "    sys.stderr.flush()\n"
+        "    outdir = pathlib.Path(next(a[2:] for a in args if a.startswith('-o')))\n"
+        f"    (outdir / 'x.pkl').write_bytes(b'0' * {payload_size})\n"
+        f"    for i in range({extra_files}):\n"
+        "        (outdir / f'f{i}').write_bytes(b'')\n"
         "    sys.exit(0)\n"
         "sys.exit(1)\n"
     )
@@ -100,6 +101,30 @@ class TestSevenZipFailsClosed:
         scanner.MAX_ZIP_MEMBER_BYTES = 1_000_000
         findings = scanner.scan_file(archive)
         assert findings[0].metadata["skipped_reason"] == "extraction_quota"
+
+
+class TestSevenZipExtractionBounds:
+    def test_many_tiny_files_hit_the_member_cap(self, tmp_path, monkeypatch):
+        # The listing claims one member; extraction writes 50 empty files.
+        _install_7z_stub(tmp_path, monkeypatch, "Path = a.7z\nPath = x.pkl\nSize = 1\n",
+                         extra_files=50)
+        archive = tmp_path / "many.7z"
+        archive.write_bytes(SEVENZ_MAGIC + b"x")
+        scanner = ModelFileScanner()
+        scanner._SEVENZ_MAX_MEMBERS = 10
+        findings = scanner.scan_file(archive)
+        assert findings[0].metadata["skipped_reason"] == "extraction_quota"
+
+    def test_noisy_extractor_does_not_stall(self, tmp_path, monkeypatch):
+        # More stderr than a pipe buffer holds must not block extraction.
+        _install_7z_stub(tmp_path, monkeypatch, "Path = a.7z\nPath = x.pkl\nSize = 1\n",
+                         stderr_bytes=1_000_000)
+        archive = tmp_path / "noisy.7z"
+        archive.write_bytes(SEVENZ_MAGIC + b"x")
+        t0 = time.monotonic()
+        findings = ModelFileScanner().scan_file(archive)
+        assert time.monotonic() - t0 < 30
+        assert not any(f.metadata.get("skipped_reason") == "extract_failed" for f in findings)
 
 
 def _make_npy(header_dict_str: str, payload: bytes) -> bytes:

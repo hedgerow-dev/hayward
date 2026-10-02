@@ -3430,17 +3430,18 @@ class ModelFileScanner:
         return returncode, bytes(captured[:max_bytes]), overflow
 
     @staticmethod
-    def _tree_bytes(root: str) -> tuple[int, int]:
-        """(total, largest) size of the regular files under root, links not followed."""
-        total = largest = 0
+    def _tree_bytes(root: str) -> tuple[int, int, int]:
+        """(total, largest, count) of the entries under root, links not followed."""
+        total = largest = count = 0
         for dirpath, _dirs, files in os.walk(root):
             for name in files:
+                count += 1
                 with contextlib.suppress(OSError):
                     st = os.lstat(os.path.join(dirpath, name))
                     if stat.S_ISREG(st.st_mode):
                         total += st.st_size
                         largest = max(largest, st.st_size)
-        return total, largest
+        return total, largest, count
 
     # 7z is the one container that re-enters scan_file on what it extracts, so
     # an archive containing an archive recurses. Measured with a stub extractor
@@ -3568,15 +3569,22 @@ class ModelFileScanner:
             # The tree is measured every 50ms and again after exit, so on a
             # fast disk it can overshoot by one interval's writes.
             def _over_quota() -> bool:
-                written, largest = self._tree_bytes(tmp)
-                return written > self._SEVENZ_MAX_TOTAL_BYTES or largest > self.MAX_ZIP_MEMBER_BYTES
+                written, largest, count = self._tree_bytes(tmp)
+                return (written > self._SEVENZ_MAX_TOTAL_BYTES
+                        or largest > self.MAX_ZIP_MEMBER_BYTES
+                        or count > self._SEVENZ_MAX_MEMBERS)
 
+            # stderr goes to a file, not a pipe: nothing reads a pipe while
+            # the loop below polls, so a chatty extractor would block on a
+            # full pipe buffer until the timeout.
+            err_log = tempfile.TemporaryFile()  # noqa: SIM115 - closed below
             try:
                 proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell, "--" guards the path
                     [extractor, "x", "-y", f"-o{tmp}", "--", str(file_path)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=err_log,
                 )
             except OSError as exc:
+                err_log.close()
                 return [_skip_unverified_finding(
                     file_path,
                     f"7z extraction failed ({type(exc).__name__}).",
@@ -3591,6 +3599,7 @@ class ModelFileScanner:
                 if time.monotonic() > deadline:
                     proc.kill()
                     proc.wait()
+                    err_log.close()
                     return [_skip_unverified_finding(
                         file_path,
                         "7z extraction failed (TimeoutExpired).",
@@ -3600,13 +3609,16 @@ class ModelFileScanner:
             if quota_hit or _over_quota():
                 proc.kill()
                 proc.wait()
+                err_log.close()
                 return [_skip_unverified_finding(
                     file_path,
-                    "7z extraction wrote more than the size limit, so it was stopped "
+                    "7z extraction wrote more than the size or file-count limit, so it was stopped "
                     "and the archive was not scanned.",
                     metadata={"skipped_reason": "extraction_quota"},
                 )]
-            stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            err_log.seek(0)
+            stderr = err_log.read(200).decode("utf-8", errors="replace")
+            err_log.close()
             if proc.returncode != 0:
                 return [_skip_unverified_finding(
                     file_path,
