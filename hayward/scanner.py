@@ -3507,7 +3507,9 @@ class ModelFileScanner:
                 metadata={"skipped_reason": "no_extractor"},
             )]
 
-        with tempfile.TemporaryDirectory() as tmp:
+        # On Windows a killed extractor (or its child) can still hold files
+        # for a moment, and a failed cleanup must not replace the verdict.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             # The listing is attacker-shaped output, so it fails closed: a
             # listing that errors, overflows, or carries a non-numeric size is
             # a reason not to extract, never a reason to assume zero bytes.
