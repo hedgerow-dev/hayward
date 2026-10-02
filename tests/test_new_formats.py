@@ -1471,13 +1471,15 @@ class TestExceptionOrientedEvasion:
         assert [f.rule_id for f in findings] == ["MFV-SKIP-003"]
 
     def test_keras_zip_config_read_failure_is_not_clean(self, tmp_path, monkeypatch):
+        """config.json is read via _read_zip_member_capped, which opens the
+        member rather than calling ZipFile.read() directly."""
         p = tmp_path / "model.keras"
         with zipfile.ZipFile(p, "w") as zf:
             zf.writestr("config.json", b"{}")
 
         def boom(self, *args, **kwargs):
             raise OSError("crafted")
-        monkeypatch.setattr("zipfile.ZipFile.read", boom)
+        monkeypatch.setattr("zipfile.ZipFile.open", boom)
 
         findings = ModelFileScanner().scan_file(p)
         assert [f.rule_id for f in findings] == ["MFV-SKIP-003"]

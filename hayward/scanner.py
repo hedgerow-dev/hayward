@@ -2077,7 +2077,11 @@ class ModelFileScanner:
             with zipfile.ZipFile(file_path, "r") as zf:
                 if "config.json" not in zf.namelist():
                     return []
-                raw = zf.read("config.json")
+                # Every other zip-member read here goes through
+                # _read_zip_member_capped rather than trusting the declared
+                # size: a 408KB deflated config.json expanding to 400MB of
+                # zeros drove peak RSS to 1.4GB in 0.6s.
+                raw = self._read_zip_member_capped(zf, "config.json", self.MAX_ZIP_MEMBER_BYTES)
         except zipfile.BadZipFile:
             # Not a zip at all: the extension-confusion check in scan_file
             # owns that case (it re-scans the bytes against every known magic).
@@ -2088,6 +2092,15 @@ class ModelFileScanner:
                 "The archive's config.json could not be read, so the layer "
                 "graph was never checked.",
                 metadata={"skipped_reason": "unreadable_member"},
+            )]
+
+        if raw is None:
+            return [_skip_unverified_finding(
+                file_path,
+                f"The archive's config.json exceeds the "
+                f"{self.MAX_ZIP_MEMBER_BYTES // 1_000_000}MB decompressed size limit "
+                "(possible zip bomb), so the layer graph was never checked.",
+                metadata={"skipped_reason": "oversized"},
             )]
 
         try:
