@@ -4,6 +4,32 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## 1.2.4 (2026-10-02)
+
+Resource and fail-closed hardening, ported from the model scanner that Rowan
+carried before it switched to depending on Hayward. No rule changes.
+
+### Fixed
+
+- **7z archives are bounded by what extraction actually writes.** A listing's
+  sizes are claims; extraction is now watched and stopped once a member passes
+  `MAX_ZIP_MEMBER_BYTES`, the total passes 500MB, or it writes more than 1,000
+  files (`MFV-SKIP-003`, `skipped_reason: extraction_quota`). The tree is
+  measured every 50ms and after exit, so a fast disk can overshoot by one
+  interval's writes. Extractor stderr no longer goes to an unread pipe, which
+  let a noisy archive stall the scan for the full 300-second timeout.
+- **7z archives fail closed on a bad listing.** An archive over 500MB is never
+  handed to the extractor, and a listing that fails, overflows 2MB, names more
+  than 1,000 members or claims an oversized member is reported as not scanned
+  instead of being extracted. A non-numeric `Size =` line still counts as zero;
+  the quota above now bounds it.
+- **`.keras` `config.json` reads are capped.** The member was decompressed in
+  full: a 408KB archive expanding to 400MB drove memory to 1.4GB. Oversized
+  configs are reported as `MFV-SKIP-003` (`skipped_reason: oversized`).
+- **TFLite layout checks are bounded.** Aliased subgraph offsets could replay
+  one inflated tensor table thousands of times: a 64KB file took 14 seconds. The
+  replay now stops at a file-wide budget and reports `MFV-TFLITE-001`.
+
 ## 1.2.3 (2026-08-28)
 
 A scaled comparative benchmark (128 real public models, seven formats) surfaced

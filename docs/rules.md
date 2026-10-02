@@ -132,7 +132,9 @@ Known blind spots as of 2026-08-05:
   cannot be bundled. With an extractor present the archive is unpacked to a
   temporary directory and every member scanned; without one, `MFV-7Z-001`
   reports the gap. One malicious sample in picklescan's own suite is
-  missed on a machine with no extractor.
+  missed on a machine with no extractor. An archive over 500MB, a failed
+  listing, or an extraction that writes past the size limit is reported as
+  `MFV-SKIP-003` rather than scanned.
 - **Nested archives are scanned to a depth of 4.** Beyond that `MFV-SKIP-003`
   reports the gap rather than recursing.
 - **`MFV-PICKLE-004` is the unknown-global bucket**, structurally the same tier

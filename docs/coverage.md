@@ -85,7 +85,9 @@ and scan the members by name if this matters to you.
 and is not bundled. With an extractor present the archive is unpacked to a
 temporary directory and every member scanned. Without one, `MFV-7Z-001`
 reports the gap, and one malicious sample in picklescan's test corpus is
-missed.
+missed. An archive over 500MB, or one whose listing fails, is not extracted;
+extraction is stopped once it writes more than the member or total size limit.
+Each of these is reported as `MFV-SKIP-003`, never as clean.
 
 **Nested archives** are followed to a depth of four. Deeper nesting reports
 `MFV-SKIP-003` rather than recursing.
