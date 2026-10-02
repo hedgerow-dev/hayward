@@ -29,6 +29,7 @@ import io
 import json
 import logging
 import lzma
+import os
 import re
 import shutil
 import stat
@@ -36,6 +37,8 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 import zipfile
 import zlib
 from collections.abc import Callable
@@ -3385,6 +3388,59 @@ class ModelFileScanner:
 
     _SEVENZ_MAGIC = b"7z\xBC\xAF\x27\x1C"
     _SEVENZ_MAX_TOTAL_BYTES = 500_000_000
+    _SEVENZ_MAX_ARCHIVE_BYTES = 500_000_000
+    _SEVENZ_MAX_MEMBERS = 1000
+    _SEVENZ_MAX_LISTING_BYTES = 2_000_000
+
+    @staticmethod
+    def _run_capped_output(argv: list[str], timeout: int, max_bytes: int):
+        """Run a command, killing it as soon as its output exceeds max_bytes.
+
+        Returns (returncode, output, overflowed)."""
+        proc = subprocess.Popen(  # noqa: S603 - callers pass a fixed argv with "--"
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        captured = bytearray()
+        overflow = False
+
+        def _drain() -> None:
+            nonlocal overflow
+            if proc.stdout is None:
+                return
+            while chunk := proc.stdout.read(64 * 1024):
+                room = max_bytes + 1 - len(captured)
+                if room > 0:
+                    captured.extend(chunk[:room])
+                if len(captured) > max_bytes or len(chunk) > room:
+                    overflow = True
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    break
+
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            reader.join()
+            raise
+        reader.join()
+        return returncode, bytes(captured[:max_bytes]), overflow
+
+    @staticmethod
+    def _tree_bytes(root: str) -> tuple[int, int]:
+        """(total, largest) size of the regular files under root, links not followed."""
+        total = largest = 0
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                with contextlib.suppress(OSError):
+                    st = os.lstat(os.path.join(dirpath, name))
+                    if stat.S_ISREG(st.st_mode):
+                        total += st.st_size
+                        largest = max(largest, st.st_size)
+        return total, largest
 
     # 7z is the one container that re-enters scan_file on what it extracts, so
     # an archive containing an archive recurses. Measured with a stub extractor
@@ -3415,6 +3471,16 @@ class ModelFileScanner:
             )]
         if head != self._SEVENZ_MAGIC:
             return []
+        try:
+            archive_bytes = file_path.stat().st_size
+        except OSError:
+            archive_bytes = self._SEVENZ_MAX_ARCHIVE_BYTES + 1
+        if archive_bytes > self._SEVENZ_MAX_ARCHIVE_BYTES:
+            return [_skip_unverified_finding(
+                file_path,
+                "The 7z archive exceeds the input size limit, so it was not extracted.",
+                metadata={"skipped_reason": "oversized_archive"},
+            )]
 
         if self._archive_depth >= self.MAX_ARCHIVE_DEPTH:
             return [_skip_unverified_finding(
@@ -3441,27 +3507,49 @@ class ModelFileScanner:
             )]
 
         with tempfile.TemporaryDirectory() as tmp:
+            # The listing is attacker-shaped output, so it fails closed: a
+            # listing that errors, overflows, or carries a non-numeric size is
+            # a reason not to extract, never a reason to assume zero bytes.
             try:
-                listing = subprocess.run(  # noqa: S603 - fixed argv, no shell, "--" guards the path
+                code, raw_listing, overflow = self._run_capped_output(
                     # `--` stops switch parsing: a scanned file named
                     # "-o/tmp/x.7z" would otherwise reach 7-Zip as a flag.
                     [extractor, "l", "-slt", "--", str(file_path)],
-                    capture_output=True, text=True, timeout=60, check=False,
+                    60, self._SEVENZ_MAX_LISTING_BYTES,
                 )
             except (OSError, subprocess.TimeoutExpired):
-                listing = None
-            if listing is not None and listing.returncode == 0:
-                total = 0
-                for line in listing.stdout.splitlines():
-                    if not line.startswith("Size ="):
-                        continue
+                code, raw_listing, overflow = -1, b"", False
+            if overflow:
+                return [_skip_unverified_finding(
+                    file_path, "The 7z listing exceeds the output limit, so the archive was not extracted.",
+                    metadata={"skipped_reason": "excessive_listing"},
+                )]
+            if code != 0:
+                return [_skip_unverified_finding(
+                    file_path, "The 7z listing failed, so the archive was not extracted.",
+                    metadata={"skipped_reason": "listing_failed"},
+                )]
+            text = raw_listing.decode("utf-8", errors="replace")
+            members = [line for line in text.splitlines() if line.startswith("Path =")][1:]
+            if len(members) > self._SEVENZ_MAX_MEMBERS:
+                return [_skip_unverified_finding(
+                    file_path, "The 7z archive has too many members, so it was not extracted.",
+                    metadata={"skipped_reason": "excessive_members", "members": len(members)},
+                )]
+            sizes: list[int] = []
+            for line in text.splitlines():
+                if line.startswith("Size ="):
                     # A non-numeric Size= line (attacker-chosen extractor
-                    # output shape) raises ValueError; it counts as zero
-                    # rather than aborting the scan.
+                    # output shape) counts as zero rather than aborting the
+                    # scan; the extraction quota below bounds what it writes.
                     with contextlib.suppress(ValueError):
-                        total += int(line.split("=", 1)[1].strip() or 0)
-            else:
-                total = 0
+                        sizes.append(int(line.split("=", 1)[1].strip() or 0))
+            if any(size > self.MAX_ZIP_MEMBER_BYTES for size in sizes):
+                return [_skip_unverified_finding(
+                    file_path, "The 7z archive contains an oversized member, so it was not extracted.",
+                    metadata={"skipped_reason": "oversized_member"},
+                )]
+            total = sum(sizes)
             if total > self._SEVENZ_MAX_TOTAL_BYTES:
                 return [Finding(
                     rule_id="MFV-7Z-001",
@@ -3474,23 +3562,57 @@ class ModelFileScanner:
                     confidence=0.5,
                     metadata={"skipped_reason": "oversized", "claimed_total": total},
                 )]
+
+            # The listing's sizes are claims. Watch what extraction actually
+            # writes and kill it once a member or the total passes the cap.
+            # The tree is measured every 50ms and again after exit, so on a
+            # fast disk it can overshoot by one interval's writes.
+            def _over_quota() -> bool:
+                written, largest = self._tree_bytes(tmp)
+                return written > self._SEVENZ_MAX_TOTAL_BYTES or largest > self.MAX_ZIP_MEMBER_BYTES
+
             try:
-                proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, "--" guards the path
+                proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell, "--" guards the path
                     [extractor, "x", "-y", f"-o{tmp}", "--", str(file_path)],
-                    capture_output=True, text=True, timeout=300, check=False,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
-            except (OSError, subprocess.TimeoutExpired) as exc:
+            except OSError as exc:
                 return [_skip_unverified_finding(
                     file_path,
                     f"7z extraction failed ({type(exc).__name__}).",
                     metadata={"skipped_reason": "extract_failed"},
                 )]
+            deadline = time.monotonic() + 300
+            quota_hit = False
+            while proc.poll() is None:
+                if _over_quota():
+                    quota_hit = True
+                    break
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    proc.wait()
+                    return [_skip_unverified_finding(
+                        file_path,
+                        "7z extraction failed (TimeoutExpired).",
+                        metadata={"skipped_reason": "extract_failed"},
+                    )]
+                time.sleep(0.05)
+            if quota_hit or _over_quota():
+                proc.kill()
+                proc.wait()
+                return [_skip_unverified_finding(
+                    file_path,
+                    "7z extraction wrote more than the size limit, so it was stopped "
+                    "and the archive was not scanned.",
+                    metadata={"skipped_reason": "extraction_quota"},
+                )]
+            stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
             if proc.returncode != 0:
                 return [_skip_unverified_finding(
                     file_path,
                     "7z extraction failed.",
                     metadata={"skipped_reason": "extract_failed",
-                              "stderr": proc.stderr[:200]},
+                              "stderr": stderr[:200]},
                 )]
 
             findings: list[Finding] = []

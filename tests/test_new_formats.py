@@ -217,6 +217,8 @@ class TestSevenZScanning:
         payload.write_bytes(b"\x80\x04cos\nsystem\nS'id'\n\x85R.")
         code = (
             "import shutil, sys, pathlib\n"
+            "if sys.argv[1:2] == ['l']:\n"
+            "    sys.exit(0)\n"
             "out = next(a[2:] for a in sys.argv[1:] if a.startswith('-o'))\n"
             f"shutil.copy({str(payload)!r}, str(pathlib.Path(out) / 'payload.pkl'))\n"
         )
