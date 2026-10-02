@@ -100,6 +100,10 @@ def _check_tflite_layout(data: bytes) -> list[str]:
     if n_subgraphs > 4096:
         problems.append(f"{n_subgraphs} subgraphs (implausible)")
         return problems
+    # Each tensor entry is a 4-byte slot, so a file without aliased tables
+    # cannot hold more entries than this across all subgraphs. The budget
+    # also bounds the replay when subgraph offsets alias one huge table.
+    slots_left = len(data) // 4
     for sg in range(n_subgraphs):
         subgraph = _fb_indirect(data, subgraphs_vec + 4 + 4 * sg)
         if subgraph is None:
@@ -108,9 +112,11 @@ def _check_tflite_layout(data: bytes) -> list[str]:
         if tensors_vec is None or tensors_vec + 4 > len(data):
             continue
         (n_tensors,) = struct.unpack_from("<I", data, tensors_vec)
-        if n_tensors > (len(data) // 4):
+        slots_left -= n_tensors
+        if slots_left < 0:
             problems.append(
-                f"subgraph {sg} claims {n_tensors} tensors in a {len(data)}-byte file"
+                f"subgraph {sg} brings the tensor count past what a "
+                f"{len(data)}-byte file can hold (aliased or inflated tables)"
             )
             return problems
         for t in range(n_tensors):
