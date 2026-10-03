@@ -4,6 +4,19 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+- Calibrate `MFV-TORCH-001` as a LOW source-presence signal. Distinguish
+  TorchScript graph representations from Python modules in torch.package;
+  unrelated `.py` files beside a checkpoint no longer establish either format.
+- Add `MFV-TORCH-002` for statically resolved execution operations in packaged
+  Python. Import aliases are supported; shadowed and unresolved calls are not
+  convicted. Source is parsed, never imported or executed. Reachability and
+  malicious intent are not claimed.
+- Bound Python source inspection by per-member, total-byte, and member-count
+  budgets. Unreadable, invalid, or over-budget source produces `MFV-SKIP-002`.
+  Existing pickle and archive-structure findings remain independent.
+
 ## 1.2.4 (2026-10-02)
 
 Resource and fail-closed hardening, ported from the model scanner that Rowan

@@ -201,6 +201,7 @@ from hayward._tensors import _string_string_entry as _string_string_entry
 from hayward._tensors import _unsafe_name_reason as _unsafe_name_reason
 from hayward.findings import Category, Finding, Severity
 from hayward.signatures import find_signature_artifacts, signature_findings
+from hayward.torch_source import classify_sources, package_source_findings, source_presence
 
 logger = logging.getLogger(__name__)
 
@@ -2575,58 +2576,6 @@ class ModelFileScanner:
             ))
         return findings
 
-    def _torch_source_finding(
-        self, file_path: Path, names: list[str],
-    ) -> Finding | None:
-        """MFV-TORCH-001: a torch zip carries executable Python source.
-
-        Conservative by construction, to avoid flagging an ordinary data
-        member: it fires only when the archive both (a) carries `*.py`
-        members and (b) looks like a torch container that would actually
-        execute them. Recognition markers are the two layouts that do:
-        torch.package's `.data/` directory and its `extern_modules` /
-        `python_version` manifest, and TorchScript's `code/` directory
-        alongside a `data.pkl` / `constants.pkl` pickle. A plain state_dict
-        checkpoint has no `.py` members at all, so it never reaches the
-        second condition.
-        """
-        source_members = [n for n in names if n.endswith(".py")]
-        if not source_members:
-            return None
-
-        # A torch container, not just any zip that happens to hold a .py.
-        # `.data/` (with a leading path segment or at the root) and a
-        # top-level `code/` are the package/TorchScript signatures; the
-        # pickle sidecars confirm it is a serialized model rather than a
-        # source tarball someone renamed.
-        def _is_torch_layout(n: str) -> bool:
-            segments = n.split("/")
-            last = segments[-1]
-            return (
-                ".data" in segments
-                or segments[0] == "code"
-                or last in ("data.pkl", "constants.pkl", "extern_modules")
-            )
-
-        if not any(_is_torch_layout(n) for n in names):
-            return None
-
-        shown = ", ".join(sorted(source_members)[:5])
-        return Finding(
-            rule_id="MFV-TORCH-001",
-            message=f"Torch archive carries executable Python source that runs "
-                    f"on load: {shown}. torch.package's PackageImporter imports "
-                    f"these modules and torch.jit compiles a TorchScript "
-                    f"`code/` directory, so loading the model executes the "
-                    f"packaged code, not just the weights.",
-            severity=Severity.HIGH,
-            category=Category.DESERIALIZATION,
-            file_path=str(file_path),
-            confidence=0.75,
-            cwe_ids=[94],
-            metadata={"source_members": sorted(source_members)[:20]},
-        )
-
     def _archive_member_name_finding(
         self, names: list[str], file_path: Path,
     ) -> list[Finding]:
@@ -2799,19 +2748,13 @@ class ModelFileScanner:
             return self._scan_pickle(file_path, data)
         try:
             with zf:
-                # Before the pickle walk: a torch zip can carry executable
-                # Python *source*, not just a pickle. torch.package archives
-                # ship a `.data/` layout with `*.py` modules that
-                # PackageImporter imports on load, and a TorchScript archive
-                # ships a `code/` directory of `.py` that torch.jit compiles
-                # and runs on load. Either way the source executes when the
-                # model is loaded, so it is a code-execution surface a pickle
-                # scan alone would miss. Reported separately from the pickle
-                # findings via MFV-TORCH-001.
                 names = [info.filename for info in zf.infolist()]
-                source_finding = self._torch_source_finding(file_path, names)
-                if source_finding is not None:
-                    findings.append(source_finding)
+                sources = classify_sources(names)
+                presence = source_presence(file_path, sources)
+                if presence is not None:
+                    findings.append(presence)
+                findings.extend(package_source_findings(
+                    zf, file_path, sources.get("torch_package", [])))
                 findings.extend(self._archive_member_name_finding(
                     [info.orig_filename for info in zf.infolist()], file_path))
                 findings.extend(self._archive_link_target_finding(
