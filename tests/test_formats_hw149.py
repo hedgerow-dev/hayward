@@ -4,9 +4,9 @@ Covers the high-value, low-risk subset of the format-breadth work:
 
 - `.ptl` (PyTorch Lite / mobile) is a zip wrapping a pickle exactly like
   `.pt`, so a malicious pickle inside it must be convicted the same way.
-- MFV-TORCH-001: a torch zip that carries executable Python *source*
-  (torch.package's `.data/` layout or a TorchScript `code/` directory) is a
-  code-execution surface a pickle scan alone misses.
+- MFV-TORCH-001 distinguishes TorchScript graph source from torch.package
+  Python modules. Source presence is a trust-boundary signal, not a HIGH
+  malicious-operation verdict.
 
 Fixtures are hand-built zips, the same builder pattern as
 test_new_formats.py, so this file stands alone.
@@ -68,20 +68,22 @@ class TestPtlMobileCheckpoint:
 class TestTorchSourceMembers:
     """MFV-TORCH-001 fires on packaged source, never on a plain state_dict."""
 
-    def test_torchscript_code_dir_is_flagged(self, tmp_path):
-        # A TorchScript / torch.package archive: a `code/` directory of .py
-        # that torch.jit compiles and runs on load, alongside the pickle.
+    def test_torchscript_code_dir_is_a_presence_signal(self, tmp_path):
         p = tmp_path / "scripted.pt"
         with zipfile.ZipFile(p, "w") as zf:
             zf.writestr("scripted/data.pkl", pickle.dumps({"w": [1.0]}, protocol=2))
-            zf.writestr("scripted/code/__torch__/foo.py", b"import os\nos.system('id')\n")
+            zf.writestr("scripted/code/__torch__/foo.py", b"class Unit(Module):\n"
+                         b"    def forward(self, x: Tensor) -> Tensor:\n"
+                         b"        return torch.relu(x)\n")
         findings = _scan(p)
         torch001 = [f for f in findings if f.rule_id == "MFV-TORCH-001"]
         assert torch001, [(f.rule_id, f.message) for f in findings]
-        assert torch001[0].severity == Severity.HIGH
+        assert torch001[0].severity == Severity.LOW
+        assert torch001[0].metadata["archive_kinds"] == ["torchscript"]
+        assert torch001[0].metadata["rule_class"] == "presence"
         assert any(m.endswith("foo.py") for m in torch001[0].metadata["source_members"])
 
-    def test_torch_package_data_layout_is_flagged(self, tmp_path):
+    def test_benign_torch_package_data_layout_is_a_presence_signal(self, tmp_path):
         # torch.package's `.data/` layout with a python module the
         # PackageImporter imports on load.
         p = tmp_path / "packaged.pt"
@@ -93,6 +95,7 @@ class TestTorchSourceMembers:
         assert any(f.rule_id == "MFV-TORCH-001" for f in findings), (
             [(f.rule_id, f.message) for f in findings]
         )
+        assert not any(f.severity in {Severity.HIGH, Severity.CRITICAL} for f in findings)
 
     def test_plain_state_dict_is_not_flagged(self, tmp_path):
         # The common case: a state_dict checkpoint has no `.py` members, so
