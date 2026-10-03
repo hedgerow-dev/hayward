@@ -4,7 +4,7 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
-## Unreleased
+## 1.2.5 (2026-10-03)
 
 - Calibrate `MFV-TORCH-001` as a LOW source-presence signal. Distinguish
   TorchScript graph representations from Python modules in torch.package;
