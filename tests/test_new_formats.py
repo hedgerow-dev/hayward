@@ -1508,12 +1508,12 @@ class TestExceptionOrientedEvasion:
         real = ModelFileScanner._scan_pickle
         calls = 0
 
-        def flaky(self, file_path, data):
+        def flaky(self, file_path, data, **kwargs):
             nonlocal calls
             calls += 1
             if calls == 2:
                 raise zipfile.BadZipFile("crafted")
-            return real(self, file_path, data)
+            return real(self, file_path, data, **kwargs)
         monkeypatch.setattr(ModelFileScanner, "_scan_pickle", flaky)
 
         findings = ModelFileScanner().scan_file(p)

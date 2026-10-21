@@ -57,6 +57,8 @@ EVAL = _call_pickle("builtins", "eval", "40+2")
 # An unfamiliar global is INFO, below the default threshold.
 UNKNOWN = _call_pickle("hayward_no_such_pkg.mod", "Thing", "x")
 BENIGN = {"weights": [1.0, 2.0]}
+# The same eval in protocol 0, which opens with GLOBAL rather than PROTO.
+EVAL_P0 = b"cbuiltins\neval\n(S'40+2'\ntR."
 
 
 def _scan_spy(monkeypatch) -> list[int]:
@@ -64,9 +66,9 @@ def _scan_spy(monkeypatch) -> list[int]:
     modes: list[int] = []
     real = ModelFileScanner.scan_file
 
-    def spy(self, path):
+    def spy(self, path, **kwargs):
         modes.append(stat.S_IMODE(os.stat(path).st_mode))
-        return real(self, path)
+        return real(self, path, **kwargs)
 
     monkeypatch.setattr(ModelFileScanner, "scan_file", spy)
     return modes
@@ -219,6 +221,22 @@ class TestPickle:
         guard.uninstall()
         assert pickle.load is ORIGINAL_LOAD
 
+    @pytest.mark.parametrize("protocol", range(6))
+    def test_every_protocol_loads_from_a_file(self, tmp_path, protocol):
+        p = tmp_path / "model.pkl"
+        p.write_bytes(pickle.dumps(BENIGN, protocol=protocol))
+        guard.install()
+        with open(p, "rb") as f:
+            assert pickle.load(f) == BENIGN
+
+    def test_unparseable_stream_is_refused(self):
+        # The scanner cannot read it, and pickle runs it next: not a clean
+        # verdict, whatever pickle would make of it.
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError) as exc:
+            _load(b"\xff\xfe")
+        assert exc.value.rule_ids == ["MFV-SKIP-003"]
+
     def test_reinstall_replaces_settings_without_double_wrapping(self):
         guard.install()
         guard.install(mode="warn")
@@ -361,10 +379,174 @@ class TestTorch:
         with pytest.raises(guard.UnsafeModelError):
             self.torch.load(io.BytesIO(EVAL), weights_only=False)
 
-    def test_benign_checkpoint_loads(self, tmp_path):
+    @pytest.mark.parametrize("zipped", [True, False])
+    def test_benign_checkpoint_loads(self, tmp_path, zipped):
         p = tmp_path / "model.pt"
-        self.torch.save({"w": self.torch.ones(2)}, p)
+        self.torch.save({"w": self.torch.ones(2)}, p, _use_new_zipfile_serialization=zipped)
         guard.install()
-        assert self.torch.load(p)["w"].tolist() == [1.0, 1.0]
+        for weights_only in (True, False):
+            assert self.torch.load(p, weights_only=weights_only)["w"].tolist() == [1.0, 1.0]
+            with open(p, "rb") as f:
+                assert self.torch.load(f, weights_only=weights_only)["w"].tolist() == [1.0, 1.0]
+
+    def test_protocol0_pth_is_blocked(self, tmp_path):
+        p = tmp_path / "model.pth"
+        p.write_bytes(EVAL_P0)
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError):
+            self.torch.load(p, weights_only=False)
+
+    def test_legacy_tar_checkpoint_is_blocked(self, tmp_path):
+        import tarfile
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:", format=tarfile.PAX_FORMAT) as tf:
+            info = tarfile.TarInfo("storages")
+            info.size = len(EVAL)
+            tf.addfile(info, io.BytesIO(EVAL))
+        p = tmp_path / "legacy.pt"
+        p.write_bytes(buf.getvalue())
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError):
+            self.torch.load(p, weights_only=False)
+
+
+class TestNestedLoads:
+    """A load inside a load is skipped only when it rereads the source the
+    outer call scanned."""
+
+    @pytest.fixture(autouse=True)
+    def _libs(self):
+        self.np = pytest.importorskip("numpy")
+        self.joblib = pytest.importorskip("joblib")
+
+    def test_joblib_side_file_is_scanned(self, tmp_path):
+        # joblib's pre-0.10 NDArrayWrapper makes joblib.load call
+        # numpy.load(<file named in the pickle>, allow_pickle=True).
+        from joblib.numpy_pickle_compat import NDArrayWrapper
+
+        side = tmp_path / "side.npy"
+        side.write_bytes(EVAL)
+        model = tmp_path / "model.joblib"
+        model.write_bytes(pickle.dumps(NDArrayWrapper("side.npy", self.np.ndarray), protocol=2))
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError) as exc:
+            self.joblib.load(model)
+        assert exc.value.file == str(side)
+        assert "MFV-PICKLE-001" in exc.value.rule_ids
+
+    def test_rereading_the_scanned_file_is_not_rescanned(self, tmp_path, monkeypatch):
+        # numpy.load hands a pickle file to pickle.load on the handle it opened.
+        p = tmp_path / "model.pkl"
+        p.write_bytes(pickle.dumps(BENIGN))
+        modes = _scan_spy(monkeypatch)
+        guard.install()
+        assert self.np.load(p, allow_pickle=True) == BENIGN
+        assert len(modes) == 1
+
+    def test_compressed_joblib_object_arrays_are_not_rescanned(self, tmp_path, monkeypatch):
+        # joblib unpickles an object array from its own decompressing wrapper
+        # around the file it opened, which is still the scanned source.
+        p = tmp_path / "model.joblib"
+        self.joblib.dump({"o": self.np.array(["a", "b"], dtype=object)}, p, compress=("gzip", 3))
+        modes = _scan_spy(monkeypatch)
+        guard.install()
+        assert self.joblib.load(p)["o"].tolist() == ["a", "b"]
+        assert len(modes) == 1
+
+
+class TestLoaderFormat:
+    """A path is scanned as the format of the loader reading it, not its name."""
+
+    @pytest.fixture(autouse=True)
+    def _libs(self):
+        self.np = pytest.importorskip("numpy")
+        self.joblib = pytest.importorskip("joblib")
+
+    @pytest.mark.parametrize("name", ["model.pth", "model.onnx", "graph.pb", "weights.npz"])
+    def test_pickle_under_another_name_is_blocked(self, tmp_path, name):
+        p = tmp_path / name
+        p.write_bytes(EVAL_P0)
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError):
+            self.np.load(p, allow_pickle=True)
+        with pytest.raises(guard.UnsafeModelError):
+            self.joblib.load(p)
+
+    def test_gzip_pickle_named_pkl_is_blocked(self, tmp_path):
+        import gzip
+
+        p = tmp_path / "model.pkl"
+        p.write_bytes(gzip.compress(EVAL))
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError):
+            self.joblib.load(p)
+
+    @pytest.mark.parametrize("name", ["junk.dat", "junk.json", "junk.pkl"])
+    def test_content_the_scanner_cannot_read_is_refused(self, tmp_path, name):
+        # Under an unclaimed name the scanner reports nothing for it; the
+        # loader would unpickle it anyway, so the guard does not run it.
+        p = tmp_path / name
+        p.write_bytes(b"\xff\xfe not a pickle")
+        guard.install()
+        for load in (lambda: self.np.load(p, allow_pickle=True), lambda: self.joblib.load(p)):
+            with pytest.raises(guard.UnsafeModelError) as exc:
+                load()
+            assert exc.value.rule_ids == ["MFV-SKIP-003"]
+
+    def test_object_npy_named_npz_is_blocked(self, tmp_path):
+        p = tmp_path / "arrays.npz"
+        p.write_bytes(_evil_npy())
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError):
+            self.np.load(p, allow_pickle=True)
+
+
+class TestBenignLoads:
+    """Files the libraries write themselves load under the guard."""
+
+    @pytest.fixture(autouse=True)
+    def _libs(self):
+        self.np = pytest.importorskip("numpy")
+        self.joblib = pytest.importorskip("joblib")
+
+    def _model(self):
+        np = self.np
+        return {"w": np.arange(6.0).reshape(2, 3), "labels": np.array(["a", "b"], dtype=object),
+                "meta": BENIGN}
+
+    @pytest.mark.parametrize("compress", [0, 3, ("gzip", 3), ("bz2", 3), ("lzma", 3), ("xz", 3)])
+    def test_joblib_dump(self, tmp_path, compress):
+        p = tmp_path / "model.joblib"
+        self.joblib.dump(self._model(), p, compress=compress)
+        guard.install()
+        assert self.joblib.load(p)["labels"].tolist() == ["a", "b"]
         with open(p, "rb") as f:
-            assert self.torch.load(f)["w"].tolist() == [1.0, 1.0]
+            assert self.joblib.load(f)["meta"] == BENIGN
+
+    def test_numpy_save_and_savez(self, tmp_path):
+        np = self.np
+        npy = tmp_path / "obj.npy"
+        np.save(npy, np.array([BENIGN], dtype=object), allow_pickle=True)
+        npz = tmp_path / "arrays.npz"
+        np.savez(npz, n=np.arange(3), o=np.array([BENIGN], dtype=object))
+        guard.install()
+        assert np.load(npy, allow_pickle=True)[0] == BENIGN
+        with np.load(npz, allow_pickle=True) as z:
+            assert z["n"].tolist() == [0, 1, 2]
+            assert z["o"][0] == BENIGN
+        with open(npz, "rb") as f, np.load(f, allow_pickle=True) as z:
+            assert z["o"][0] == BENIGN
+
+    @pytest.mark.parametrize("name", ["model.pkl", "model.npy", "model.onnx"])
+    def test_files_named_for_another_format_load(self, tmp_path, name):
+        # Scanned as the file's name says, each would be an extension
+        # mismatch; scanned as the loader reads it, it is what it is.
+        p = tmp_path / name
+        self.joblib.dump(self._model(), p, compress=3)
+        q = tmp_path / ("plain-" + name)
+        q.write_bytes(pickle.dumps(BENIGN))
+        guard.install()
+        assert self.joblib.load(p)["meta"] == BENIGN
+        assert self.joblib.load(q) == BENIGN
+        assert self.np.load(q, allow_pickle=True) == BENIGN

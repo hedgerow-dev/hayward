@@ -32,6 +32,33 @@ Three new ways to run the scanner. No rule changes.
 - The README states the coverage guarantee precisely: bytes that match no
   model format from the first byte report nothing.
 
+### Fixed (security)
+
+The loaders decide what a file is by its bytes. The scanner sometimes decided
+by its name, and passed content clean that a loader would run.
+
+- **Pickle-family files are scanned whatever they hold.** A protocol 0 or 1
+  pickle named `.pth` is scanned (path-configuration files still are not). A
+  gzip, bz2, xz or lzma pickle under any pickle extension is decompressed and
+  scanned, as zlib already was. lzma is detected on the same two bytes joblib
+  checks, and joblib's pre-0.10 `ZF` layout is read. An lz4 joblib file, or a
+  compressed stream that will not decompress, reports `MFV-SKIP-003`.
+- **Legacy tar checkpoints.** A `.pt` (or other pickle extension) that is an
+  uncompressed tar is walked as torch.load reads it, with `storages`,
+  `tensors`, `pickle` and `sys_info` scanned whatever byte they open with.
+- **Bytes in front of a zip.** A pickle followed by a zip archive is scanned
+  as a pickle too, since the loaders read it from byte 0.
+- **NumPy by content.** An object `.npy` named `.npz` is scanned, and so is
+  an `.npz` member that lacks the `.npy` suffix.
+- **Pickles under protobuf names.** A pickle, compressed pickle, zip or `.npy`
+  named `.onnx`, or any `.pb` other than `saved_model.pb`, is scanned.
+- **Load guard.** A load nested inside another is skipped only when it rereads
+  the file the outer call scanned; joblib's legacy side files are now scanned.
+  A path is scanned as the format of the loader reading it, so a compressed
+  joblib file named `.pkl` no longer trips an extension mismatch under
+  `joblib.load`. Bytes a loader would unpickle that the scanner cannot parse
+  are refused as a coverage gap.
+
 ## 1.2.5 (2026-10-03)
 
 - Calibrate `MFV-TORCH-001` as a LOW source-presence signal. Distinguish

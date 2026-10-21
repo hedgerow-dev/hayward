@@ -12,8 +12,14 @@ the original loaders, and `HAYWARD_GUARD=off` makes the import a no-op.
 
 Coverage findings (MFV-SKIP-* and the rest of COVERAGE_RULE_IDS) block too,
 unlike the CLI, where failing on them is opt-in: the guard runs the file after
-scanning it, so a file it could not fully scan is not loaded. Warn mode
-warns and loads.
+scanning it, so a file it could not fully scan is not loaded. That includes
+bytes the loader would unpickle that the scanner could not parse at all. Warn
+mode warns and loads.
+
+A file is scanned as the format of the loader reading it, not as its name
+says, since the loaders themselves decide by content: a pickle named `.pth`
+is scanned as a pickle by numpy.load, and a gzip file named `.pkl` as a
+compressed joblib file by joblib.load.
 
 Only the module attributes are patched. Code that bound a loader before the
 guard was installed (`from pickle import load`), direct `pickle.Unpickler`
@@ -38,12 +44,13 @@ from hayward.cli import _THRESHOLDS, _render_text
 from hayward.findings import Finding, is_coverage_gap
 from hayward.scanner import ModelFileScanner
 
-# module -> (attribute, name of the source parameter, suffix for a spooled
-# copy). The suffix tells the scanner which format the loader will read.
+# module -> (attribute, name of the source parameter, suffix to scan as). The
+# suffix tells the scanner which format the loader will read; numpy's depends
+# on the first bytes, see _numpy_suffix.
 _TARGETS = {
     "pickle": [("load", "file", ".pkl")],
     "joblib": [("load", "filename", ".joblib")],
-    "numpy": [("load", "file", ".npy")],
+    "numpy": [("load", "file", None)],
     "torch": [("load", "f", ".pt")],
 }
 
@@ -51,11 +58,15 @@ _limit = _THRESHOLDS["high"]
 _mode = "block"
 _max_size: int | None = None  # None keeps the scanner's own 500MB cap
 _patched: list[tuple[object, str, object]] = []
-# Per process, keyed on (path, size, mtime_ns), so a training loop that
-# reloads a checkpoint does not rescan it every time.
-_memo: dict[tuple[str, int, int], list[Finding]] = {}
-# numpy and torch call pickle.load themselves. The outer call already
-# scanned the whole file, so a nested guarded call on this thread is skipped.
+# Per process, keyed on (path, suffix, size, mtime_ns), so a training loop
+# that reloads a checkpoint does not rescan it every time.
+_memo: dict[tuple[str, str, int, int], list[Finding]] = {}
+# numpy, joblib and torch call pickle.load (and joblib numpy.load) themselves.
+# `_local.sources` is the stack of what the guarded calls running on this
+# thread scanned: resolved paths, and the stream objects handed to loaders.
+# A nested call is skipped only when it rereads one of those. joblib's
+# NDArrayWrapper names a second file inside the pickle, and that load is
+# scanned like any other.
 _local = threading.local()
 
 
@@ -76,23 +87,42 @@ def _scanner() -> ModelFileScanner:
     scanner = ModelFileScanner()
     if _max_size is not None:
         scanner.MAX_SCAN_BYTES = _max_size  # per instance, as `--max-size` does
+    # The loader runs next: bytes it would unpickle that the scanner could not
+    # parse are a coverage gap here, not the silence the CLI gives them.
+    scanner.report_unparsed_pickles = True
     return scanner
 
 
-def _scan_path(path: str | os.PathLike) -> list[Finding]:
-    path = os.path.abspath(os.fsdecode(path))
+def _numpy_suffix(head: bytes) -> str:
+    # numpy.load decides by the first bytes, not the name: a zip is an .npz,
+    # the .npy magic an array, and anything else goes to pickle.load.
+    if head.startswith((b"PK\x03\x04", b"PK\x05\x06")):
+        return ".npz"
+    if head.startswith(b"\x93NUMPY"):
+        return ".npy"
+    return ".pkl"
+
+
+def _scan_path(path: str, suffix: str | None) -> list[Finding]:
     try:
         st = os.stat(path)
+        if suffix is None:
+            with open(path, "rb") as f:
+                suffix = _numpy_suffix(f.read(6))
     except OSError:
         return []  # the loader raises its own error for a missing file
-    key = (path, st.st_size, st.st_mtime_ns)
+    key = (path, suffix, st.st_size, st.st_mtime_ns)
     if key not in _memo:
-        _memo[key] = _scanner().scan_file(Path(path))
+        _memo[key] = _scanner().scan_file(Path(path), _as_suffix=suffix)
     return _memo[key]
 
 
-def _scan_stream(stream, suffix: str, label: str) -> list[Finding]:
+def _scan_stream(stream, suffix: str | None, label: str) -> list[Finding]:
     """Copy the rest of `stream` to a private temp file and scan that."""
+    if suffix is None:
+        start = stream.tell()
+        suffix = _numpy_suffix(stream.read(6))
+        stream.seek(start)
     fd, tmp = tempfile.mkstemp(prefix="hayward-guard-", suffix=suffix)  # mode 0600
     try:
         with os.fdopen(fd, "wb") as out:
@@ -103,17 +133,47 @@ def _scan_stream(stream, suffix: str, label: str) -> list[Finding]:
     return [replace(f, file_path=label) for f in findings]
 
 
-def _check(source, suffix: str, takes_path: bool):
-    """Scan what a loader is about to read and return what it should read.
+def _resolve(path) -> str:
+    return os.path.realpath(os.fsdecode(path))
 
-    That is `source` itself, except for a non-seekable stream, which is read
-    into memory so the loader can be handed the bytes the scan saw.
+
+def _rereads_scanned_source(source, scanned: list) -> bool:
+    """Whether a nested load reads what an enclosing guarded call scanned.
+
+    That is the same path, the same stream object, or a stream whose name is
+    a path that was scanned. A stream is followed through the wrappers a
+    library puts around it (io.BufferedReader's `raw`, the `_fp` of joblib's
+    and the standard library's decompressing readers) back to the file it
+    reads, which is how joblib hands an object array to pickle.load.
+    """
+    paths = {s for s in scanned if isinstance(s, str)}
+    if isinstance(source, (str, bytes, os.PathLike)):
+        return _resolve(source) in paths
+    for _ in range(4):
+        if source is None:
+            return False
+        if any(source is s for s in scanned):
+            return True
+        name = getattr(source, "name", None)
+        if isinstance(name, (str, bytes, os.PathLike)) and _resolve(name) in paths:
+            return True
+        source = getattr(source, "raw", None) or getattr(source, "_fp", None)
+    return False
+
+
+def _check(source, suffix: str | None, takes_path: bool):
+    """Scan what a loader is about to read.
+
+    Returns what the loader should read, which is `source` itself except for
+    a non-seekable stream (read into memory so the loader gets the bytes the
+    scan saw), and what was scanned, for the nested-call check.
     """
     if takes_path and isinstance(source, (str, os.PathLike)):
-        _enforce(_scan_path(source), os.fspath(source))
-        return source
+        path = _resolve(source)
+        _enforce(_scan_path(path, suffix), os.fspath(source))
+        return source, path
     if not hasattr(source, "read"):
-        return source  # not a stream either: the loader raises its own error
+        return source, None  # not a stream either: the loader raises its own error
     label = str(getattr(source, "name", "<stream>"))
     seekable = getattr(source, "seekable", None)
     if seekable is None or not seekable():
@@ -127,7 +187,7 @@ def _check(source, suffix: str, takes_path: bool):
     finally:
         source.seek(start)
     _enforce(findings, label)
-    return source
+    return source, source
 
 
 def _enforce(findings: list[Finding], label: str) -> None:
@@ -150,27 +210,32 @@ def _enforce(findings: list[Finding], label: str) -> None:
     warnings.warn(message + "\nLoading it anyway (warn mode).", stacklevel=4)
 
 
-def _wrap(module_name: str, original, param: str, suffix: str):
+def _wrap(module_name: str, original, param: str, suffix: str | None):
     takes_path = module_name != "pickle"
 
     @functools.wraps(original)
     def guarded(*args, **kwargs):
-        if getattr(_local, "busy", False):
-            return original(*args, **kwargs)
         if module_name == "numpy":
             # numpy.load(file, mmap_mode, allow_pickle, ...): without
             # allow_pickle it refuses object arrays, so there is nothing to scan.
             if not kwargs.get("allow_pickle", args[2] if len(args) > 2 else False):
                 return original(*args, **kwargs)
-        _local.busy = True
+        if not args and param not in kwargs:
+            return original(*args, **kwargs)  # the loader raises its own error
+        scanned = _local.__dict__.setdefault("sources", [])
+        source = args[0] if args else kwargs[param]
+        if scanned and _rereads_scanned_source(source, scanned):
+            return original(*args, **kwargs)
+        source, key = _check(source, suffix, takes_path)
+        if args:
+            args = (source, *args[1:])
+        else:
+            kwargs[param] = source
+        scanned.append(key)
         try:
-            if args:
-                args = (_check(args[0], suffix, takes_path), *args[1:])
-            elif param in kwargs:
-                kwargs[param] = _check(kwargs[param], suffix, takes_path)
             return original(*args, **kwargs)
         finally:
-            _local.busy = False
+            scanned.pop()
 
     return guarded
 
