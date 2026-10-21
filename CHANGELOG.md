@@ -4,6 +4,33 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## 1.2.6 (2026-10-21)
+
+Three new ways to run the scanner. No rule changes.
+
+### Added
+
+- **Load guard.** `import hayward.guard` makes `pickle.load`, `joblib.load`,
+  `torch.load` and `numpy.load(allow_pickle=True)` scan each file first and
+  raise `UnsafeModelError` instead of loading anything flagged. A file it
+  could not fully scan is refused too, because the loader would run it next;
+  `install(mode="warn")` loads it anyway. `pickle.loads` is not patched.
+  `HAYWARD_GUARD=off` disables it.
+- **pre-commit hook.** `.pre-commit-hooks.yaml` with hook id `hayward`. Its
+  file pattern is generated from the scanner's own extension list, and a test
+  fails if the two drift.
+- **MCP server for coding agents.** `hayward mcp` runs a stdio server with one
+  read-only tool, `scan_path`, returning `blocked`, `clean` or `incomplete`.
+  Needs the new optional extra: `pip install "hayward[mcp]"`. The core
+  install still has one dependency.
+
+### Changed
+
+- The `dev` extra now includes numpy and joblib, so CI runs the guard's tests
+  for those loaders.
+- The README states the coverage guarantee precisely: bytes that match no
+  model format from the first byte report nothing.
+
 ## 1.2.5 (2026-10-03)
 
 - Calibrate `MFV-TORCH-001` as a LOW source-presence signal. Distinguish
