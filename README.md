@@ -49,9 +49,12 @@ verify. Any figures we quote are **self-measured and not independently
 reproducible**; [Accuracy](docs/accuracy.md) sets out what it does and does not
 support, and the harness runs it against your own corpus.
 
-**It tells you when it could not look.** A file it cannot parse produces an
-explicit finding, never silence. Attackers hide payloads behind deliberate
-parse errors, and a clean report should mean the file was read.
+**It tells you when it could not look.** A container it could not fully walk,
+or content it could not verify, gets an explicit coverage finding rather than
+a clean verdict, and a parse error never erases what was already found.
+Attackers hide payloads behind deliberate parse errors, so a payload followed
+by junk still scans as critical. One honest limit: bytes that match no model
+format at all, from the first byte, report nothing.
 
 **It catches gadgets nobody has listed.** Unknown callables are judged by the
 arguments they were handed, not by their name. A URL, a shell command, a host
