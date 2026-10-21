@@ -42,7 +42,9 @@ by its name, and passed content clean that a loader would run.
   gzip, bz2, xz or lzma pickle under any pickle extension is decompressed and
   scanned, as zlib already was. lzma is detected on the same two bytes joblib
   checks, and joblib's pre-0.10 `ZF` layout is read. An lz4 joblib file, or a
-  compressed stream that will not decompress, reports `MFV-SKIP-003`. A
+  compressed stream that will not decompress, reports `MFV-SKIP-003`.
+  Concatenated compressed streams are read through to the last one, as
+  joblib's bz2, xz and lzma readers do. A
   compressed pickle under a pickle extension (`joblib.dump` to `model.pkl`
   with `compress=`) is scanned as joblib and no longer reports
   `MFV-CONFUSE-001`.

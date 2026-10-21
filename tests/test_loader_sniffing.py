@@ -94,6 +94,19 @@ class TestCompressedPickles:
         # joblib.load decompresses any of these whatever the file is called.
         assert _critical(_scan(tmp_path, name, compress(EVAL)))
 
+    @pytest.mark.parametrize("compress", [
+        gzip.compress, bz2.compress, zlib.compress,
+        lambda d: lzma.compress(d, format=lzma.FORMAT_XZ),
+        lambda d: lzma.compress(d, format=lzma.FORMAT_ALONE),
+    ], ids=["gzip", "bz2", "zlib", "xz", "lzma"])
+    def test_pickle_split_across_concatenated_streams(self, tmp_path, compress):
+        # joblib reads bz2, xz and lzma through the standard library's
+        # readers, which carry on into a following stream. The first half
+        # resolves a harmless global, so it does not read as unparseable.
+        first, second = b"ccollections\nOrderedDict\n)R0", EVAL_P0
+        data = compress(first) + compress(second) + b"\x00" * 8
+        assert _critical(_scan(tmp_path, "model.joblib", data))
+
     def test_lzma_with_a_small_dictionary(self, tmp_path):
         # joblib detects lzma on two bytes (5d 00); a 4KB dictionary makes the
         # third byte non-zero.

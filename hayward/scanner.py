@@ -3993,18 +3993,38 @@ class ModelFileScanner:
         Same contract as the zlib-only version it generalises: chunked, and
         None once the output would exceed the cap, so a small archive cannot
         expand into a memory-exhausting payload.
+
+        Concatenated streams are read in sequence: joblib reads bz2, xz and
+        lzma through the standard library's readers, which carry on into a
+        following stream, so a pickle split across two streams is unpickled
+        whole. Bytes after a stream that do not decompress are ignored, as
+        those readers ignore them; an error in the first stream still raises.
         """
+        view = memoryview(data)
         decompressor = _new_decompressor(codec)
         out = bytearray()
         step = 1 << 20
-        for offset in range(0, len(data), step):
-            chunk = data[offset:offset + step]
-            produced = decompressor.decompress(chunk, max_bytes - len(out) + 1)
+        offset = stream_start = 0
+        first_stream = True
+        while offset < len(data):
+            chunk = view[offset:offset + step]
+            offset += len(chunk)
+            try:
+                produced = decompressor.decompress(chunk, max_bytes - len(out) + 1)
+            except (zlib.error, OSError, EOFError, lzma.LZMAError):
+                if first_stream:
+                    raise
+                break
             out.extend(produced)
             if len(out) > max_bytes:
                 return None
             if getattr(decompressor, "eof", False):
-                break
+                offset -= len(decompressor.unused_data)
+                if offset <= stream_start:
+                    break  # a stream that consumed nothing: stop, never spin
+                decompressor = _new_decompressor(codec)
+                stream_start = offset
+                first_stream = False
         return bytes(out)
 
     def _scan_joblib(self, file_path: Path, data: bytes) -> list[Finding]:
