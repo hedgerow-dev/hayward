@@ -221,65 +221,6 @@ for f in sorted(findings, key=lambda f: f.severity_order):
 Importing the package is cheap: one dependency, no model framework and no
 native extensions, so calling it per file in a loop is fine.
 
-## Load guard
-
-```python
-import hayward.guard  # one line, top of a notebook or script
-```
-
-From then on these loaders scan their input first and refuse to run a file
-with a finding at or above `high`:
-
-- `pickle.load`
-- `joblib.load`
-- `numpy.load`, only when `allow_pickle=True`
-- `torch.load`, whatever `weights_only` is set to
-
-A refused load raises `hayward.guard.UnsafeModelError`, a subclass of
-`pickle.UnpicklingError`, so an existing `except` around a load still
-catches it. The message is the CLI's text for the findings; `.file` and
-`.rule_ids` carry the same detail.
-
-```python
-import hayward.guard
-
-hayward.guard.install(fail_on="critical")  # same scale as --fail-on
-hayward.guard.install(mode="warn")         # warnings.warn, then load anyway
-hayward.guard.install(max_size=2_000_000_000)  # raise the 500MB cap, in bytes
-hayward.guard.uninstall()                  # restore the original loaders
-```
-
-`HAYWARD_GUARD=off` makes the import a no-op, for CI that already scans.
-
-A file the scan could not fully read (a coverage finding, `MFV-SKIP-*`) is
-refused too, unlike the CLI: the guard runs the file straight after, so an
-unread file is not a pass. That holds at every threshold, `never` included.
-The common case is a non-zip file over the 500MB cap, such as a large joblib
-model: raise `max_size` to scan it rather than switching to warn mode, which
-loads it unread.
-
-`pickle.loads` is not patched. It is an in-memory IPC and cache path, and
-scanning it would cost every caller.
-
-A path is scanned in place and remembered for the life of the process by
-path, size and mtime, so reloading the same checkpoint does not rescan it.
-A file object is copied to a private temp file (mode 0600, deleted
-straight after), scanned, and rewound; a stream that cannot seek is read into
-memory and the loader gets the in-memory copy. joblib, NumPy and torch are
-patched when they are first imported, so the guard never imports them itself.
-
-The guard makes no network calls.
-
-Limits:
-
-- Not covered: a loader bound before the guard was installed
-  (`from pickle import load`), direct `pickle.Unpickler` use, `dill` and
-  `cloudpickle`.
-- A file object is copied to a temp file and rescanned on every call; only
-  paths are remembered.
-- The per-process memo is keyed on path, size and mtime, so a file rewritten
-  in place at the same size with its mtime reset is not rescanned.
-
 ## Excluding paths
 
 `--exclude` takes a glob pattern (Python `fnmatch`) and skips anything it

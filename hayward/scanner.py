@@ -625,8 +625,8 @@ class ModelFileScanner:
         # verification and claims none.
         self.check_signatures = False
         # Off for the CLI, where "the walk could not read a single opcode" is
-        # silence by measured design (see _scan_pickle). hayward.guard turns it
-        # on: it runs the loader next, and a walk stricter than the real
+        # silence by measured design (see _scan_pickle). A load-time caller turns
+        # it on: it runs the loader next, and a walk stricter than the real
         # unpickler is the one way left past it, so content a loader would
         # unpickle and the walk could not read is reported as a coverage gap.
         self.report_unparsed_pickles = False
@@ -706,7 +706,7 @@ class ModelFileScanner:
     def scan_file(self, file_path: Path, *, _as_suffix: str | None = None) -> list[Finding]:
         """Scan a single model file.
 
-        `_as_suffix` is internal, for hayward.guard: it scans the file as the
+        `_as_suffix` is internal, for a load-time caller: it scans the file as the
         format of the loader about to read it, whatever the file is named.
 
         Never raises on input problems: any failure degrades to an
@@ -999,7 +999,7 @@ class ModelFileScanner:
             # with anything in front of it, and a tar's first member name sits
             # at byte 0. pickle.load and joblib.load read from byte 0, and so
             # does torch.load once a file is neither zip nor tar: to them
-            # these bytes are a pickle. Under the guard `.pt` is torch.load,
+            # these bytes are a pickle. Scanned as `.pt` it is torch.load,
             # which reads a tar as a tar, so there it is not a gap.
             findings.extend(self._scan_pickle(
                 file_path, data, loader_unpickles=not (is_tar_pickle and ext == ".pt")))

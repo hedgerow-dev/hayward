@@ -93,14 +93,6 @@ from hayward import ModelFileScanner
 findings = ModelFileScanner().scan_directory(Path("models"))
 ```
 
-Or as a load guard: one import, and `pickle.load`, `joblib.load`,
-`numpy.load(allow_pickle=True)` and `torch.load` scan each file first and
-refuse to load anything flagged. See [usage](docs/usage.md#load-guard).
-
-```python
-import hayward.guard
-```
-
 Or as a [pre-commit hook](docs/usage.md#pre-commit), or as an
 [MCP server](docs/usage.md#coding-agents-mcp) a coding agent calls before it
 loads a model.
@@ -126,7 +118,7 @@ could not get into.
 
 ## Documentation
 
-- [Usage](docs/usage.md): CLI reference, exit codes, CI, pre-commit, the GUI, the MCP server, the Python API, the load guard
+- [Usage](docs/usage.md): CLI reference, exit codes, CI, pre-commit, the GUI, the MCP server, the Python API
 - [Rules](docs/rules.md): all 47 rules with severities and CWE mappings
 - [Coverage](docs/coverage.md): what it does when it cannot read a file, and why that is a finding
 - [How it works](docs/how-it-works.md): how it reads pickle without running it, and how unknown callables are judged by their arguments

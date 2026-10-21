@@ -212,7 +212,7 @@ class TestOtherExtensions:
 
 
 class TestUnparsedPickleIsNotClean:
-    """`report_unparsed_pickles` (set by hayward.guard): bytes a loader would
+    """`report_unparsed_pickles` (set by a load-time caller): bytes a loader would
     unpickle that the walk cannot read are a coverage gap. Off by default, so
     the CLI keeps its measured silence on them."""
 

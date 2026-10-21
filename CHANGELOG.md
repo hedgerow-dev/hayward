@@ -6,17 +6,11 @@ within a major version.
 
 ## 1.2.6 (2026-10-21)
 
-Three new ways to run the scanner. No rule changes.
+Two new ways to run the scanner, and scanner fixes for files the loaders
+read differently from their names. No rule changes.
 
 ### Added
 
-- **Load guard.** `import hayward.guard` makes `pickle.load`, `joblib.load`,
-  `torch.load` and `numpy.load(allow_pickle=True)` scan each file first and
-  raise `UnsafeModelError` instead of loading anything flagged. A file it
-  could not fully scan is refused too, because the loader would run it next;
-  `install(max_size=...)` raises the scan cap for large non-zip files, and
-  `install(mode="warn")` loads anyway. `pickle.loads` is not patched.
-  `HAYWARD_GUARD=off` disables it.
 - **pre-commit hook.** `.pre-commit-hooks.yaml` with hook id `hayward`. Its
   file pattern is generated from the scanner's own extension list, and a test
   fails if the two drift.
@@ -27,8 +21,6 @@ Three new ways to run the scanner. No rule changes.
 
 ### Changed
 
-- The `dev` extra now includes numpy and joblib, so CI runs the guard's tests
-  for those loaders.
 - The README states the coverage guarantee precisely: bytes that match no
   model format from the first byte report nothing.
 
@@ -62,12 +54,6 @@ by its name, and passed content clean that a loader would run.
 - **Pickles under protobuf names.** A pickle, compressed pickle, zip or `.npy`
   named `.onnx`, or any `.pb` other than `saved_model.pb`, is scanned. A zip
   named `.pb` is scanned past the size cap too.
-- **Load guard.** A load nested inside another is skipped only when it rereads
-  the file the outer call scanned; joblib's legacy side files are now scanned.
-  A path is scanned as the format of the loader reading it, and a path given
-  as bytes is scanned too. Bytes a loader would unpickle that the scanner
-  cannot parse are refused as a coverage gap.
-
 ## 1.2.5 (2026-10-03)
 
 - Calibrate `MFV-TORCH-001` as a LOW source-presence signal. Distinguish
