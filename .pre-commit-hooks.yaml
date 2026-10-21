@@ -1,0 +1,10 @@
+# files: is generated from the scanner's extension list and checked by
+# tests/test_precommit_hook.py; update both together.
+- id: hayward
+  name: hayward
+  description: Scan ML model files for unsafe content before they are committed
+  entry: hayward scan --fail-on high
+  language: python
+  pass_filenames: true
+  types: [file]
+  files: '(?i)\.(7z|bin|ckpt|gguf|h5|hdf5|joblib|json|keras|mar|nemo|npy|npz|onnx|pb|pickle|pkl|pmml|pt|pth|ptl|safetensors|skops|tar|tflite|th|zip)$'

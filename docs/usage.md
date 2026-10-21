@@ -129,23 +129,19 @@ model-scan:
 
 ### Pre-commit
 
-`hayward scan` accepts several targets, but a hook that forwarded every staged
-filename would scan unrelated files. Scan your models directory instead and use
-`pass_filenames: false`; the `files` pattern then only controls *when* the
-hook runs (whenever a matching file is staged). Point the entry at whatever
-directory holds your model files.
+Add Hayward to `.pre-commit-config.yaml`:
 
 ```yaml
 repos:
-  - repo: local
+  - repo: https://github.com/hedgerow-dev/hayward
+    rev: v1.2.6
     hooks:
       - id: hayward
-        name: scan model files
-        entry: hayward scan ./models --fail-on high
-        language: system
-        pass_filenames: false
-        files: '\.(pt|pth|pkl|bin|safetensors|gguf|h5|keras|onnx|npy|npz|joblib)$'
 ```
+
+The hook scans each staged file whose extension Hayward reads and blocks the
+commit on any finding at `high` or above. To change the threshold, override
+`args`, for example `args: [--fail-on, critical]`.
 
 ## Desktop
 
