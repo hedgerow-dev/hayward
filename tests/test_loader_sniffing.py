@@ -113,12 +113,28 @@ class TestCompressedPickles:
         findings = _scan(tmp_path, "model.joblib", b"\x04\x22\x4d\x18" + b"\x00" * 32)
         assert any(is_coverage_gap(f) for f in findings)
 
-    def test_corrupt_compressed_stream_is_a_coverage_gap(self, tmp_path):
-        findings = _scan(tmp_path, "model.joblib", b"\x1f\x8b\x08\x00" + b"\xff" * 32)
-        assert any(is_coverage_gap(f) for f in findings)
+    @pytest.mark.parametrize("name", ["model.joblib", "model.pkl"])
+    def test_corrupt_or_lz4_stream_is_a_coverage_gap(self, tmp_path, name):
+        for data in (b"\x1f\x8b\x08\x00" + b"\xff" * 32, b"\x04\x22\x4d\x18" + b"\x00" * 32):
+            assert any(is_coverage_gap(f) for f in _scan(tmp_path, name, data))
+
+    def test_benign_compressed_pickle_named_pkl_is_not_a_mismatch(self, tmp_path):
+        # joblib.dump(..., "model.pkl", compress=...) is ordinary use.
+        for compress in (zlib.compress, gzip.compress, bz2.compress):
+            data = compress(pickle.dumps({"w": [1.0]}, protocol=4))
+            assert _scan(tmp_path, "model.pkl", data) == []
 
 
 class TestTarCheckpoints:
+    def test_tar_with_a_zip_appended(self, tmp_path):
+        # zipfile finds the trailing archive; torch.load sees no zip magic at
+        # byte 0 and opens the tar.
+        zbuf = io.BytesIO()
+        with zipfile.ZipFile(zbuf, "w") as zf:
+            zf.writestr("archive/data.pkl", pickle.dumps({"a": 1}, protocol=2))
+        data = _tar([("storages", EVAL)]) + zbuf.getvalue()
+        assert _critical(_scan(tmp_path, "legacy.pt", data))
+
     def test_legacy_torch_tar_pt(self, tmp_path):
         data = _tar([("storages", EVAL), ("tensors", b""), ("pickle", b"")])
         assert _critical(_scan(tmp_path, "legacy.pt", data))
@@ -160,6 +176,17 @@ class TestOtherExtensions:
     @pytest.mark.parametrize("name", ["model.onnx", "graph.pb"])
     def test_pickle_under_a_protobuf_extension(self, tmp_path, name):
         assert _flagged(_scan(tmp_path, name, EVAL))
+
+    @pytest.mark.parametrize("name", ["weights.npy", "weights.npz", "weights.pb"])
+    def test_torch_zip_under_another_name(self, tmp_path, name):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("archive/data.pkl", EVAL)
+        assert _critical(_scan(tmp_path, name, buf.getvalue()))
+        # Past the size cap too, where the zip is walked lazily.
+        scanner = ModelFileScanner()
+        scanner.MAX_SCAN_BYTES = 64
+        assert _critical(scanner.scan_file(tmp_path / name))
 
     def test_object_npy_named_npz(self, tmp_path):
         assert _critical(_scan(tmp_path, "arrays.npz", _npy_object(EVAL)))

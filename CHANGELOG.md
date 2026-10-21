@@ -42,22 +42,29 @@ by its name, and passed content clean that a loader would run.
   gzip, bz2, xz or lzma pickle under any pickle extension is decompressed and
   scanned, as zlib already was. lzma is detected on the same two bytes joblib
   checks, and joblib's pre-0.10 `ZF` layout is read. An lz4 joblib file, or a
-  compressed stream that will not decompress, reports `MFV-SKIP-003`.
+  compressed stream that will not decompress, reports `MFV-SKIP-003`. A
+  compressed pickle under a pickle extension (`joblib.dump` to `model.pkl`
+  with `compress=`) is scanned as joblib and no longer reports
+  `MFV-CONFUSE-001`.
 - **Legacy tar checkpoints.** A `.pt` (or other pickle extension) that is an
   uncompressed tar is walked as torch.load reads it, with `storages`,
-  `tensors`, `pickle` and `sys_info` scanned whatever byte they open with.
+  `tensors`, `pickle` and `sys_info` scanned whatever byte they open with,
+  including when a zip is appended to the tar.
 - **Bytes in front of a zip.** A pickle followed by a zip archive is scanned
-  as a pickle too, since the loaders read it from byte 0.
+  as a pickle too, since the loaders read it from byte 0. This holds past the
+  500MB cap.
 - **NumPy by content.** An object `.npy` named `.npz` is scanned, and so is
-  an `.npz` member that lacks the `.npy` suffix.
+  an `.npz` member that lacks the `.npy` suffix. A zip under a NumPy name that
+  is not all arrays, such as a torch checkpoint, reports `MFV-CONFUSE-001`
+  and is scanned as one.
 - **Pickles under protobuf names.** A pickle, compressed pickle, zip or `.npy`
-  named `.onnx`, or any `.pb` other than `saved_model.pb`, is scanned.
+  named `.onnx`, or any `.pb` other than `saved_model.pb`, is scanned. A zip
+  named `.pb` is scanned past the size cap too.
 - **Load guard.** A load nested inside another is skipped only when it rereads
   the file the outer call scanned; joblib's legacy side files are now scanned.
-  A path is scanned as the format of the loader reading it, so a compressed
-  joblib file named `.pkl` no longer trips an extension mismatch under
-  `joblib.load`. Bytes a loader would unpickle that the scanner cannot parse
-  are refused as a coverage gap.
+  A path is scanned as the format of the loader reading it, and a path given
+  as bytes is scanned too. Bytes a loader would unpickle that the scanner
+  cannot parse are refused as a coverage gap.
 
 ## 1.2.5 (2026-10-03)
 

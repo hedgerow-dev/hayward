@@ -396,6 +396,23 @@ class TestTorch:
         with pytest.raises(guard.UnsafeModelError):
             self.torch.load(p, weights_only=False)
 
+    def test_benign_legacy_tar_checkpoint_loads(self, tmp_path):
+        # The pre-1.6 tar layout, built by hand: no storages, no tensors.
+        import tarfile
+
+        members = [("storages", pickle.dumps(0) + pickle.dumps([])),
+                   ("tensors", pickle.dumps(0)), ("pickle", pickle.dumps(BENIGN))]
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:", format=tarfile.PAX_FORMAT) as tf:
+            for name, data in members:
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        p = tmp_path / "legacy.pt"
+        p.write_bytes(buf.getvalue())
+        guard.install()
+        assert self.torch.load(p, weights_only=False) == BENIGN
+
     def test_legacy_tar_checkpoint_is_blocked(self, tmp_path):
         import tarfile
 
@@ -472,6 +489,15 @@ class TestLoaderFormat:
             self.np.load(p, allow_pickle=True)
         with pytest.raises(guard.UnsafeModelError):
             self.joblib.load(p)
+
+    def test_bytes_path_is_scanned(self, tmp_path):
+        p = tmp_path / "evil.pkl"
+        p.write_bytes(EVAL)
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError):
+            self.joblib.load(os.fsencode(p))
+        with pytest.raises(guard.UnsafeModelError):
+            self.np.load(os.fsencode(p), allow_pickle=True)
 
     def test_gzip_pickle_named_pkl_is_blocked(self, tmp_path):
         import gzip

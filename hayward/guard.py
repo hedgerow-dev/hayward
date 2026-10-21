@@ -59,8 +59,9 @@ _mode = "block"
 _max_size: int | None = None  # None keeps the scanner's own 500MB cap
 _patched: list[tuple[object, str, object]] = []
 # Per process, keyed on (path, suffix, size, mtime_ns), so a training loop
-# that reloads a checkpoint does not rescan it every time.
-_memo: dict[tuple[str, str, int, int], list[Finding]] = {}
+# that reloads a checkpoint does not rescan it every time. numpy's suffix is
+# None here: it is read from the file on a miss.
+_memo: dict[tuple[str, str | None, int, int], list[Finding]] = {}
 # numpy, joblib and torch call pickle.load (and joblib numpy.load) themselves.
 # `_local.sources` is the stack of what the guarded calls running on this
 # thread scanned: resolved paths, and the stream objects handed to loaders.
@@ -106,14 +107,14 @@ def _numpy_suffix(head: bytes) -> str:
 def _scan_path(path: str, suffix: str | None) -> list[Finding]:
     try:
         st = os.stat(path)
-        if suffix is None:
-            with open(path, "rb") as f:
-                suffix = _numpy_suffix(f.read(6))
+        key = (path, suffix, st.st_size, st.st_mtime_ns)
+        if key not in _memo:
+            if suffix is None:
+                with open(path, "rb") as f:
+                    suffix = _numpy_suffix(f.read(6))
+            _memo[key] = _scanner().scan_file(Path(path), _as_suffix=suffix)
     except OSError:
         return []  # the loader raises its own error for a missing file
-    key = (path, suffix, st.st_size, st.st_mtime_ns)
-    if key not in _memo:
-        _memo[key] = _scanner().scan_file(Path(path), _as_suffix=suffix)
     return _memo[key]
 
 
@@ -168,9 +169,9 @@ def _check(source, suffix: str | None, takes_path: bool):
     a non-seekable stream (read into memory so the loader gets the bytes the
     scan saw), and what was scanned, for the nested-call check.
     """
-    if takes_path and isinstance(source, (str, os.PathLike)):
+    if takes_path and isinstance(source, (str, bytes, os.PathLike)):
         path = _resolve(source)
-        _enforce(_scan_path(path, suffix), os.fspath(source))
+        _enforce(_scan_path(path, suffix), os.fsdecode(source))
         return source, path
     if not hasattr(source, "read"):
         return source, None  # not a stream either: the loader raises its own error
