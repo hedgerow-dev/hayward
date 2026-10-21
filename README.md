@@ -90,7 +90,7 @@ from hayward import ModelFileScanner
 findings = ModelFileScanner().scan_directory(Path("models"))
 ```
 
-Or as a load guard: one import, and `pickle`, `joblib.load`,
+Or as a load guard: one import, and `pickle.load`, `joblib.load`,
 `numpy.load(allow_pickle=True)` and `torch.load` scan each file first and
 refuse to load anything flagged. See [usage](docs/usage.md#load-guard).
 

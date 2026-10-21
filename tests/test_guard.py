@@ -88,20 +88,28 @@ class _Pipe:
         return False
 
 
+def _load(data: bytes):
+    return pickle.load(io.BytesIO(data))
+
+
 class TestPickle:
-    @pytest.mark.parametrize("wrap", [bytes, bytearray, memoryview])
-    def test_loads_blocks_malicious(self, wrap):
+    def test_load_blocks_malicious_stream(self):
         guard.install()
         with pytest.raises(guard.UnsafeModelError) as exc:
-            pickle.loads(wrap(EVAL))
+            _load(EVAL)
         assert isinstance(exc.value, pickle.UnpicklingError)
         assert exc.value.rule_ids == ["MFV-PICKLE-001"]
         assert "MFV-PICKLE-001" in str(exc.value)
         assert "builtins.eval" in str(exc.value)
 
-    def test_loads_passes_benign(self):
+    def test_load_passes_benign(self):
         guard.install()
-        assert pickle.loads(pickle.dumps(BENIGN)) == BENIGN
+        assert _load(pickle.dumps(BENIGN)) == BENIGN
+
+    def test_loads_is_not_patched(self):
+        # An in-memory IPC and cache hot path, not a model-file load.
+        guard.install()
+        assert pickle.loads is ORIGINAL_LOADS
 
     def test_load_blocks_malicious_file(self, tmp_path):
         guard.install()
@@ -112,14 +120,14 @@ class TestPickle:
         assert exc.value.file == str(p)
         assert str(p) in str(exc.value)
 
-    def test_pickle_never_treats_a_str_as_a_path(self, tmp_path):
+    def test_pickle_never_treats_a_path_as_a_file(self, tmp_path):
         p = tmp_path / "evil.pkl"
         p.write_bytes(EVAL)
         guard.install()
         with pytest.raises(TypeError):
-            pickle.loads(str(p))
-        with pytest.raises(TypeError):
             pickle.load(p)
+        with pytest.raises(TypeError):
+            pickle.load(str(p))
 
     def test_load_rewinds_the_stream(self, tmp_path):
         guard.install()
@@ -142,9 +150,9 @@ class TestPickle:
         modes = _scan_spy(monkeypatch)
         guard.install()
 
-        assert pickle.loads(pickle.dumps(BENIGN)) == BENIGN
+        assert _load(pickle.dumps(BENIGN)) == BENIGN
         with pytest.raises(guard.UnsafeModelError):
-            pickle.loads(EVAL)
+            _load(EVAL)
 
         assert len(modes) == 2
         assert list(spool.iterdir()) == []
@@ -154,22 +162,33 @@ class TestPickle:
     def test_warn_mode_lets_the_load_run(self):
         guard.install(mode="warn")
         with pytest.warns(UserWarning, match="MFV-PICKLE-001"):
-            assert pickle.loads(EVAL) == 42
+            assert _load(EVAL) == 42
 
     def test_threshold(self):
         guard.install()
         # Below `high`: the guard lets it through and pickle fails on the import.
         with pytest.raises(ModuleNotFoundError):
-            pickle.loads(UNKNOWN)
+            _load(UNKNOWN)
         guard.install(fail_on="info")
         with pytest.raises(guard.UnsafeModelError):
-            pickle.loads(UNKNOWN)
+            _load(UNKNOWN)
 
-    def test_coverage_gap_warns_but_never_blocks(self, monkeypatch):
+    def test_coverage_gap_blocks(self, monkeypatch):
+        # The guard runs the file after scanning it, so a file it could not
+        # fully read is not loaded, whatever the threshold.
         monkeypatch.setattr(ModelFileScanner, "MAX_SCAN_BYTES", 8)
-        guard.install(fail_on="info")
+        guard.install(fail_on="never")
+        with pytest.raises(guard.UnsafeModelError) as exc:
+            _load(pickle.dumps(BENIGN))
+        assert exc.value.rule_ids == ["MFV-SKIP-001"]
+        assert "could not fully scan" in str(exc.value)
+        assert 'install(mode="warn")' in str(exc.value)
+
+    def test_coverage_gap_warns_and_loads_in_warn_mode(self, monkeypatch):
+        monkeypatch.setattr(ModelFileScanner, "MAX_SCAN_BYTES", 8)
+        guard.install(mode="warn")
         with pytest.warns(UserWarning, match="MFV-SKIP-001"):
-            assert pickle.loads(pickle.dumps(BENIGN)) == BENIGN
+            assert _load(pickle.dumps(BENIGN)) == BENIGN
 
     def test_bad_options_are_rejected(self):
         with pytest.raises(ValueError):
@@ -181,16 +200,14 @@ class TestPickle:
     def test_uninstall_restores_originals(self):
         guard.install()
         assert pickle.load is not ORIGINAL_LOAD
-        assert pickle.loads is not ORIGINAL_LOADS
         guard.uninstall()
         assert pickle.load is ORIGINAL_LOAD
-        assert pickle.loads is ORIGINAL_LOADS
 
     def test_reinstall_replaces_settings_without_double_wrapping(self):
         guard.install()
         guard.install(mode="warn")
         with pytest.warns(UserWarning):
-            assert pickle.loads(EVAL) == 42
+            assert _load(EVAL) == 42
         guard.uninstall()
         assert pickle.load is ORIGINAL_LOAD
 

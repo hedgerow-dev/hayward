@@ -2,14 +2,18 @@
 
     import hayward.guard  # one line, top of a notebook or script
 
-From then on `pickle.load`, `pickle.loads`, `joblib.load`, `torch.load` and
+From then on `pickle.load`, `joblib.load`, `torch.load` and
 `numpy.load(allow_pickle=True)` scan their input first and raise
 `UnsafeModelError` instead of loading anything at or above the threshold.
+`pickle.loads` is left alone: it is an in-memory IPC and cache hot path, not
+a model-file load.
 `install(fail_on=..., mode=...)` changes the settings, `uninstall()` restores
 the original loaders, and `HAYWARD_GUARD=off` makes the import a no-op.
 
-Coverage findings (MFV-SKIP-* and the rest of COVERAGE_RULE_IDS) warn but
-never block, matching the CLI, where failing on them is opt-in.
+Coverage findings (MFV-SKIP-* and the rest of COVERAGE_RULE_IDS) block too,
+unlike the CLI, where failing on them is opt-in: the guard runs the file after
+scanning it, so a file it could not fully scan is not loaded. Warn mode
+warns and loads.
 
 Only the module attributes are patched. Code that bound a loader before the
 guard was installed (`from pickle import load`), direct `pickle.Unpickler`
@@ -37,7 +41,7 @@ from hayward.scanner import ModelFileScanner
 # module -> (attribute, name of the source parameter, suffix for a spooled
 # copy). The suffix tells the scanner which format the loader will read.
 _TARGETS = {
-    "pickle": [("load", "file", ".pkl"), ("loads", "data", ".pkl")],
+    "pickle": [("load", "file", ".pkl")],
     "joblib": [("load", "filename", ".joblib")],
     "numpy": [("load", "file", ".npy")],
     "torch": [("load", "f", ".pt")],
@@ -97,14 +101,11 @@ def _check(source, suffix: str, takes_path: bool):
     That is `source` itself, except for a non-seekable stream, which is read
     into memory so the loader can be handed the bytes the scan saw.
     """
-    if isinstance(source, (str, os.PathLike)):
-        # pickle takes no paths: leave it to raise its own TypeError.
-        if takes_path:
-            _enforce(_scan_path(source), os.fspath(source))
+    if takes_path and isinstance(source, (str, os.PathLike)):
+        _enforce(_scan_path(source), os.fspath(source))
         return source
-    if isinstance(source, (bytes, bytearray, memoryview)):
-        _enforce(_scan_stream(io.BytesIO(source), suffix, "<bytes>"), "<bytes>")
-        return source
+    if not hasattr(source, "read"):
+        return source  # not a stream either: the loader raises its own error
     label = str(getattr(source, "name", "<stream>"))
     seekable = getattr(source, "seekable", None)
     if seekable is None or not seekable():
@@ -124,18 +125,20 @@ def _check(source, suffix: str, takes_path: bool):
 def _enforce(findings: list[Finding], label: str) -> None:
     gaps = [f for f in findings if is_coverage_gap(f)]
     hits = [f for f in findings if not is_coverage_gap(f) and f.severity_order <= _limit]
-    # stacklevel 4 points the warning at the caller of the patched loader.
+    parts = []
+    if hits:
+        parts.append(f"hayward flagged {label}:\n" + _render_text(hits, None, False))
     if gaps:
-        warnings.warn(
-            f"hayward could not fully scan {label}, loading it anyway:\n"
-            + _render_text(gaps, None, False),
-            stacklevel=4,
-        )
-    if not hits:
+        parts.append(f"hayward could not fully scan {label}:\n" + _render_text(gaps, None, False))
+    if not parts:
         return
-    message = f"hayward flagged {label}:\n" + _render_text(hits, None, False)
+    message = "\n\n".join(parts)
     if _mode == "block":
-        raise UnsafeModelError(label, sorted({f.rule_id for f in hits}), message)
+        message += "\nRefused to load it."
+        if gaps:
+            message += ' hayward.guard.install(mode="warn") loads it anyway.'
+        raise UnsafeModelError(label, sorted({f.rule_id for f in hits + gaps}), message)
+    # stacklevel 4 points the warning at the caller of the patched loader.
     warnings.warn(message + "\nLoading it anyway (warn mode).", stacklevel=4)
 
 

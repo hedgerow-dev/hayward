@@ -215,7 +215,7 @@ import hayward.guard  # one line, top of a notebook or script
 From then on these loaders scan their input first and refuse to run a file
 with a finding at or above `high`:
 
-- `pickle.load`, `pickle.loads`
+- `pickle.load`
 - `joblib.load`
 - `numpy.load`, only when `allow_pickle=True`
 - `torch.load`, whatever `weights_only` is set to
@@ -234,18 +234,32 @@ hayward.guard.uninstall()                  # restore the original loaders
 ```
 
 `HAYWARD_GUARD=off` makes the import a no-op, for CI that already scans.
-Coverage findings (`MFV-SKIP-*`) warn but never block.
+
+A file the scan could not fully read (a coverage finding, `MFV-SKIP-*`) is
+refused too, unlike the CLI: the guard runs the file straight after, so an
+unread file is not a pass. Warn mode warns and loads it.
+
+`pickle.loads` is not patched. It is an in-memory IPC and cache path, and
+scanning it would cost every caller.
 
 A path is scanned in place and remembered for the life of the process by
 path, size and mtime, so reloading the same checkpoint does not rescan it.
-A file object or bytes is copied to a private temp file (mode 0600, deleted
+A file object is copied to a private temp file (mode 0600, deleted
 straight after), scanned, and rewound; a stream that cannot seek is read into
 memory and the loader gets the in-memory copy. joblib, NumPy and torch are
 patched when they are first imported, so the guard never imports them itself.
 
-Not covered: a loader bound before the guard was installed
-(`from pickle import load`), direct `pickle.Unpickler` use, `dill` and
-`cloudpickle`. The guard makes no network calls.
+The guard makes no network calls.
+
+Limits:
+
+- Not covered: a loader bound before the guard was installed
+  (`from pickle import load`), direct `pickle.Unpickler` use, `dill` and
+  `cloudpickle`.
+- A file object is copied to a temp file and rescanned on every call; only
+  paths are remembered.
+- The per-process memo is keyed on path, size and mtime, so a file rewritten
+  in place at the same size with its mtime reset is not rescanned.
 
 ## Excluding paths
 
