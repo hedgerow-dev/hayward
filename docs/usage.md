@@ -245,6 +245,7 @@ import hayward.guard
 
 hayward.guard.install(fail_on="critical")  # same scale as --fail-on
 hayward.guard.install(mode="warn")         # warnings.warn, then load anyway
+hayward.guard.install(max_size=2_000_000_000)  # raise the 500MB cap, in bytes
 hayward.guard.uninstall()                  # restore the original loaders
 ```
 
@@ -252,7 +253,10 @@ hayward.guard.uninstall()                  # restore the original loaders
 
 A file the scan could not fully read (a coverage finding, `MFV-SKIP-*`) is
 refused too, unlike the CLI: the guard runs the file straight after, so an
-unread file is not a pass. Warn mode warns and loads it.
+unread file is not a pass. That holds at every threshold, `never` included.
+The common case is a non-zip file over the 500MB cap, such as a large joblib
+model: raise `max_size` to scan it rather than switching to warn mode, which
+loads it unread.
 
 `pickle.loads` is not patched. It is an in-memory IPC and cache path, and
 scanning it would cost every caller.

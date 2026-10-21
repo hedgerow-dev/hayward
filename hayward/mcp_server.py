@@ -25,13 +25,17 @@ def scan_path(path: str, fail_on: str = "high") -> dict[str, Any]:
     `blocked` means a finding at or above `fail_on`, the same gate as
     `hayward scan --fail-on`. `incomplete` means nothing reached the gate but
     some file was not fully read, so the result says nothing about it.
-    Raises ValueError for a missing path or an unknown threshold.
+    Raises ValueError for a missing path, a path that is neither a regular
+    file nor a directory, or an unknown threshold.
     """
     if fail_on not in _THRESHOLDS:
         raise ValueError(f"fail_on must be one of: {', '.join(_THRESHOLDS)}")
     target = Path(path)
     if not target.exists():
         raise ValueError(f"no such file or directory: {path}")
+    if not (target.is_file() or target.is_dir()):
+        # A FIFO or device would block the read, and with it the server.
+        raise ValueError(f"not a regular file or directory: {path}")
 
     scanner = ModelFileScanner()
     if target.is_dir():

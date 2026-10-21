@@ -56,6 +56,14 @@ def test_missing_path_raises_value_error(tmp_path):
         scan_path(str(tmp_path / "absent.pkl"))
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+def test_fifo_raises_value_error_instead_of_hanging(tmp_path):
+    fifo = tmp_path / "pipe.pkl"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="not a regular file"):
+        scan_path(str(fifo))
+
+
 def test_unknown_threshold_raises_value_error(tmp_path):
     with pytest.raises(ValueError, match="fail_on"):
         scan_path(str(_benign(tmp_path)), fail_on="severe")

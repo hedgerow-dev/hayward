@@ -14,7 +14,8 @@ Three new ways to run the scanner. No rule changes.
   `torch.load` and `numpy.load(allow_pickle=True)` scan each file first and
   raise `UnsafeModelError` instead of loading anything flagged. A file it
   could not fully scan is refused too, because the loader would run it next;
-  `install(mode="warn")` loads it anyway. `pickle.loads` is not patched.
+  `install(max_size=...)` raises the scan cap for large non-zip files, and
+  `install(mode="warn")` loads anyway. `pickle.loads` is not patched.
   `HAYWARD_GUARD=off` disables it.
 - **pre-commit hook.** `.pre-commit-hooks.yaml` with hook id `hayward`. Its
   file pattern is generated from the scanner's own extension list, and a test

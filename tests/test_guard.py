@@ -190,11 +190,27 @@ class TestPickle:
         with pytest.warns(UserWarning, match="MFV-SKIP-001"):
             assert _load(pickle.dumps(BENIGN)) == BENIGN
 
+    def test_max_size_lets_a_large_file_be_scanned(self, monkeypatch):
+        # Past the cap a non-zip file is a coverage gap and refused; raising
+        # the cap scans it instead, without turning blocking off.
+        monkeypatch.setattr(ModelFileScanner, "MAX_SCAN_BYTES", 8)
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError) as exc:
+            _load(pickle.dumps(BENIGN))
+        assert exc.value.rule_ids == ["MFV-SKIP-001"]
+        guard.install(max_size=1_000_000)
+        assert _load(pickle.dumps(BENIGN)) == BENIGN
+        with pytest.raises(guard.UnsafeModelError) as exc:
+            _load(EVAL)
+        assert exc.value.rule_ids == ["MFV-PICKLE-001"]
+
     def test_bad_options_are_rejected(self):
         with pytest.raises(ValueError):
             guard.install(fail_on="severe")
         with pytest.raises(ValueError):
             guard.install(mode="log")
+        with pytest.raises(ValueError):
+            guard.install(max_size=0)
         assert pickle.load is ORIGINAL_LOAD
 
     def test_uninstall_restores_originals(self):

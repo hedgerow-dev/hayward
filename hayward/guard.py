@@ -49,6 +49,7 @@ _TARGETS = {
 
 _limit = _THRESHOLDS["high"]
 _mode = "block"
+_max_size: int | None = None  # None keeps the scanner's own 500MB cap
 _patched: list[tuple[object, str, object]] = []
 # Per process, keyed on (path, size, mtime_ns), so a training loop that
 # reloads a checkpoint does not rescan it every time.
@@ -71,6 +72,13 @@ class UnsafeModelError(pickle.UnpicklingError):
         self.rule_ids = rule_ids
 
 
+def _scanner() -> ModelFileScanner:
+    scanner = ModelFileScanner()
+    if _max_size is not None:
+        scanner.MAX_SCAN_BYTES = _max_size  # per instance, as `--max-size` does
+    return scanner
+
+
 def _scan_path(path: str | os.PathLike) -> list[Finding]:
     path = os.path.abspath(os.fsdecode(path))
     try:
@@ -79,7 +87,7 @@ def _scan_path(path: str | os.PathLike) -> list[Finding]:
         return []  # the loader raises its own error for a missing file
     key = (path, st.st_size, st.st_mtime_ns)
     if key not in _memo:
-        _memo[key] = ModelFileScanner().scan_file(Path(path))
+        _memo[key] = _scanner().scan_file(Path(path))
     return _memo[key]
 
 
@@ -89,7 +97,7 @@ def _scan_stream(stream, suffix: str, label: str) -> list[Finding]:
     try:
         with os.fdopen(fd, "wb") as out:
             shutil.copyfileobj(stream, out)
-        findings = ModelFileScanner().scan_file(Path(tmp))
+        findings = _scanner().scan_file(Path(tmp))
     finally:
         os.unlink(tmp)
     return [replace(f, file_path=label) for f in findings]
@@ -207,19 +215,25 @@ class _ImportHook:
 _hook = _ImportHook()
 
 
-def install(fail_on: str = "high", mode: str = "block") -> None:
+def install(fail_on: str = "high", mode: str = "block", max_size: int | None = None) -> None:
     """Patch the supported loaders. Calling it again replaces the settings.
 
-    `fail_on` uses the CLI's `--fail-on` scale. `mode="warn"` reports through
-    `warnings.warn` and lets the load go ahead.
+    `fail_on` uses the CLI's `--fail-on` scale. Coverage gaps block at every
+    threshold, `never` included, because the loader runs the file next.
+    `mode="warn"` reports through `warnings.warn` and lets the load go ahead.
+    `max_size` raises the per-file scan cap in bytes, like `--max-size`, so a
+    large non-zip file can be scanned instead of refused as unread.
     """
-    global _limit, _mode
+    global _limit, _mode, _max_size
     if fail_on not in _THRESHOLDS:
         raise ValueError(f"fail_on must be one of {', '.join(_THRESHOLDS)}")
     if mode not in ("block", "warn"):
         raise ValueError("mode must be 'block' or 'warn'")
+    if max_size is not None and max_size <= 0:
+        raise ValueError("max_size must be a positive byte count")
     uninstall()
-    _limit, _mode = _THRESHOLDS[fail_on], mode
+    _limit, _mode, _max_size = _THRESHOLDS[fail_on], mode, max_size
+    _memo.clear()  # a different cap can change a file's findings
     for name in _TARGETS:
         if name in sys.modules:
             _patch(sys.modules[name])

@@ -80,7 +80,7 @@ all, does not walk past on the strength of its name. A directory scan still
 finds its candidates by extension first, since sniffing a whole tree means
 reading it: [coverage](docs/coverage.md) states that limit.
 
-## Four ways to run it
+## Ways to run it
 
 ```bash
 hayward scan ./models                          # command line
@@ -100,6 +100,10 @@ refuse to load anything flagged. See [usage](docs/usage.md#load-guard).
 ```python
 import hayward.guard
 ```
+
+Or as a [pre-commit hook](docs/usage.md#pre-commit), or as an
+[MCP server](docs/usage.md#coding-agents-mcp) a coding agent calls before it
+loads a model.
 
 And in CI, as a GitHub Action that fails the build and uploads SARIF to code
 scanning:
@@ -122,7 +126,7 @@ could not get into.
 
 ## Documentation
 
-- [Usage](docs/usage.md): CLI reference, exit codes, CI, the GUI, the Python API
+- [Usage](docs/usage.md): CLI reference, exit codes, CI, pre-commit, the GUI, the MCP server, the Python API, the load guard
 - [Rules](docs/rules.md): all 47 rules with severities and CWE mappings
 - [Coverage](docs/coverage.md): what it does when it cannot read a file, and why that is a finding
 - [How it works](docs/how-it-works.md): how it reads pickle without running it, and how unknown callables are judged by their arguments
