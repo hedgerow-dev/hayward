@@ -367,7 +367,22 @@ def main(argv: list[str] | None = None) -> int:
         help="suppress progress and informational lines on stderr",
     )
 
+    sub.add_parser("mcp", help="run a stdio MCP server for coding agents")
+
     args = parser.parse_args(argv)
+
+    if args.command == "mcp":
+        # The SDK is an optional extra, so it is imported here and nowhere
+        # else: every other command must work without it.
+        try:
+            import mcp  # noqa: F401
+        except ImportError:
+            print('hayward: the MCP server needs: pip install "hayward[mcp]"', file=sys.stderr)
+            return 2
+        from hayward.mcp_server import serve
+
+        serve()
+        return 0
 
     targets: list[Path] = args.target
     for target in targets:
