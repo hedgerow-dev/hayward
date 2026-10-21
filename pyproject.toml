@@ -37,6 +37,9 @@ dependencies = ["defusedxml>=0.7,<1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0,<9.0", "pytest-cov>=5.0,<8.0", "ruff>=0.4,<1.0"]
+# `hayward mcp`: the official MCP Python SDK (MIT). Optional, so the core
+# install keeps its single dependency.
+mcp = ["mcp>=2.3,<3"]
 
 [project.urls]
 Homepage = "https://github.com/hedgerow-dev/hayward"
