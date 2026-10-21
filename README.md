@@ -77,7 +77,7 @@ all, does not walk past on the strength of its name. A directory scan still
 finds its candidates by extension first, since sniffing a whole tree means
 reading it: [coverage](docs/coverage.md) states that limit.
 
-## Three ways to run it
+## Four ways to run it
 
 ```bash
 hayward scan ./models                          # command line
@@ -88,6 +88,14 @@ hayward-gui                                    # desktop window
 ```python
 from hayward import ModelFileScanner
 findings = ModelFileScanner().scan_directory(Path("models"))
+```
+
+Or as a load guard: one import, and `pickle`, `joblib.load`,
+`numpy.load(allow_pickle=True)` and `torch.load` scan each file first and
+refuse to load anything flagged. See [usage](docs/usage.md#load-guard).
+
+```python
+import hayward.guard
 ```
 
 And in CI, as a GitHub Action that fails the build and uploads SARIF to code

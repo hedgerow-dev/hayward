@@ -206,6 +206,47 @@ for f in sorted(findings, key=lambda f: f.severity_order):
 Importing the package is cheap: one dependency, no model framework and no
 native extensions, so calling it per file in a loop is fine.
 
+## Load guard
+
+```python
+import hayward.guard  # one line, top of a notebook or script
+```
+
+From then on these loaders scan their input first and refuse to run a file
+with a finding at or above `high`:
+
+- `pickle.load`, `pickle.loads`
+- `joblib.load`
+- `numpy.load`, only when `allow_pickle=True`
+- `torch.load`, whatever `weights_only` is set to
+
+A refused load raises `hayward.guard.UnsafeModelError`, a subclass of
+`pickle.UnpicklingError`, so an existing `except` around a load still
+catches it. The message is the CLI's text for the findings; `.file` and
+`.rule_ids` carry the same detail.
+
+```python
+import hayward.guard
+
+hayward.guard.install(fail_on="critical")  # same scale as --fail-on
+hayward.guard.install(mode="warn")         # warnings.warn, then load anyway
+hayward.guard.uninstall()                  # restore the original loaders
+```
+
+`HAYWARD_GUARD=off` makes the import a no-op, for CI that already scans.
+Coverage findings (`MFV-SKIP-*`) warn but never block.
+
+A path is scanned in place and remembered for the life of the process by
+path, size and mtime, so reloading the same checkpoint does not rescan it.
+A file object or bytes is copied to a private temp file (mode 0600, deleted
+straight after), scanned, and rewound; a stream that cannot seek is read into
+memory and the loader gets the in-memory copy. joblib, NumPy and torch are
+patched when they are first imported, so the guard never imports them itself.
+
+Not covered: a loader bound before the guard was installed
+(`from pickle import load`), direct `pickle.Unpickler` use, `dill` and
+`cloudpickle`. The guard makes no network calls.
+
 ## Excluding paths
 
 `--exclude` takes a glob pattern (Python `fnmatch`) and skips anything it
