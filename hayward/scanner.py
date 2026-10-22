@@ -358,13 +358,14 @@ def _npy_descr_has_object(descr: Any) -> bool:
     (name, descr) or (name, descr, shape).
 
     A dtype string counts as object when it names one anywhere ('O', 'object',
-    'object_', or a field of either in a comma-separated spec), a superset of
-    the strings numpy.dtype accepts. A descr whose shape this walk cannot
+    'object_', numpy 2's StringDType 'T', or a field of any of them in a
+    comma-separated spec), a superset of the object dtype strings numpy.dtype
+    accepts. A descr whose shape this walk cannot
     follow counts as object too: the data is then read as a pickle, which is
     harmless when it is not one.
     """
     if isinstance(descr, str):
-        return "O" in descr or "object" in descr
+        return "O" in descr or "T" in descr or "object" in descr
     try:
         if isinstance(descr, tuple):
             return _npy_descr_has_object(descr[0])

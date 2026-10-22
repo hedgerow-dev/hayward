@@ -367,7 +367,7 @@ def _npy(header: bytes, payload: bytes) -> bytes:
 class TestNpyHeaderParity:
     """The .npy header is read the way numpy's _read_array_header reads it."""
 
-    @pytest.mark.parametrize("descr", ["object", "object_", "<f8,object", "(2,)O"])
+    @pytest.mark.parametrize("descr", ["object", "object_", "<f8,object", "(2,)O", "T"])
     def test_object_dtype_spellings(self, tmp_path, descr):
         header = b"{'descr': '%s', 'fortran_order': False, 'shape': (1,), }" % descr.encode()
         assert _critical(_scan(tmp_path, "arr.npy", _npy(header, EVAL)))
