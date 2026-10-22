@@ -155,6 +155,21 @@ PICKLE_ALLOWED_GLOBALS: frozenset[str] = frozenset({
     "builtins.slice",
     "__builtin__.set", "__builtin__.frozenset",
     "copyreg._reconstructor", "copyreg.__newobj__", "copyreg.__newobj_ex__",
+    # Protocols 0 and 1 write Python 2 spellings: every plain class instance
+    # rebuilds as copy_reg._reconstructor(cls, __builtin__.object, state).
+    "__builtin__.dict", "__builtin__.list", "__builtin__.tuple",
+    "__builtin__.bytearray", "__builtin__.complex", "__builtin__.slice",
+    "builtins.object", "__builtin__.object", "copy_reg._reconstructor",
+    # Standard-library value types that ordinary model metadata carries
+    # (timestamps, run ids, prices, config paths). Each constructor builds a
+    # value from its arguments and does no I/O; a pure or concrete path object
+    # is only a name until a method is called on it, and calling one needs a
+    # global this list does not allow.
+    "datetime.datetime", "datetime.date", "datetime.time",
+    "datetime.timedelta", "datetime.timezone",
+    "decimal.Decimal", "uuid.UUID", "fractions.Fraction",
+    "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
+    "pathlib.PosixPath", "pathlib.WindowsPath",
     "_codecs.encode",
     "numpy.core.multiarray._reconstruct", "numpy.core.multiarray.scalar",
     "numpy._core.multiarray._reconstruct", "numpy._core.multiarray.scalar",
@@ -164,6 +179,14 @@ PICKLE_ALLOWED_GLOBALS: frozenset[str] = frozenset({
     "torch._utils._rebuild_meta_tensor_no_storage",
     "torch.Size",
     "torch.serialization._get_layout",
+})
+
+# Path classes take a path by design, so the weak "handed a filesystem path"
+# signal says nothing about them. Shell, URL and chained-call evidence still
+# applies.
+_PICKLE_PATH_CONSTRUCTORS: frozenset[str] = frozenset({
+    "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
+    "pathlib.PosixPath", "pathlib.WindowsPath",
 })
 
 # Modules whose dtype-specific storage/tensor classes are treated as allowed
@@ -1693,6 +1716,12 @@ _PICKLE_ALLOWED_STRING_ARG_OK: frozenset[str] = frozenset({
     # sklearn StandardScaler from the quickset benign corpus.
     "numpy.core.multiarray.scalar",
     "numpy._core.multiarray.scalar",
+    # Text is these constructors' legitimate input: Decimal('1.5'), a UUID's
+    # hex form, a timezone's name, and path segments, absolute ones included.
+    "decimal.Decimal", "uuid.UUID",
+    "datetime.timezone",
+    "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
+    "pathlib.PosixPath", "pathlib.WindowsPath",
 })
 
 
@@ -2169,7 +2198,8 @@ def _triage_unknown_pickle_call(
             )
 
     for text in texts:
-        if _PICKLE_ARG_PATH_RE.search(text) and not is_code_builder:
+        if (_PICKLE_ARG_PATH_RE.search(text) and not is_code_builder
+                and call.ref not in _PICKLE_PATH_CONSTRUCTORS):
             # Weak on its own -- `pathlib.PurePosixPath('/home/u/model.bin')`
             # looks identical to `linecache.getline('/etc/passwd', 1)` at the
             # opcode level, and a file read is not code execution either way.

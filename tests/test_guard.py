@@ -949,21 +949,28 @@ class TestLoadTimeCheck:
             pickle.load(io.BytesIO(data))
         assert exc.value.rule_ids == ["MFV-PICKLE-005"]
 
-    @pytest.mark.parametrize("strict", [
-        pytest.param(False, marks=pytest.mark.xfail(
-            strict=True, reason="known limit of the default mode: a pickle built from "
-                                "unknown globals can reach the guard's own state")),
-        True,
-    ], ids=["default", "strict"])
-    def test_pickle_cannot_switch_the_check_off(self, strict):
-        pytest.importorskip("joblib")
-        guard.install(prescan=False, strict=strict)
-        data = (b"\x80\x04" + _short_binunicode("builtins") + _short_binunicode("getattr") + b"\x93"
-                + _short_binunicode("joblib") + _short_binunicode("load") + b"\x93"
-                + _short_binunicode("__globals__") + b"\x86R(" + _short_binunicode("_hook_on")
-                + b"\x89u0" + EVAL[2:])
+    @pytest.mark.parametrize("protocol", [0, 2, 5])
+    def test_strict_loads_stdlib_value_types(self, protocol):
+        import datetime
+        import decimal
+        import pathlib
+        import uuid
+        meta = {"saved": datetime.datetime(2026, 10, 22, tzinfo=datetime.timezone.utc),
+                "price": decimal.Decimal("1.5"), "run": uuid.UUID(int=7),
+                "path": pathlib.PurePosixPath("/opt/models/a.bin")}
+        guard.install(strict=True)
+        assert _load(pickle.dumps(meta, protocol=protocol)) == meta
+
+    def test_strict_refuses_an_unknown_global_before_it_runs(self):
+        # Default mode lets unknown globals load, so a pickle built from them
+        # can reach the guard's own state (a documented limit). Strict mode
+        # refuses any global off the known-safe list before it is called.
+        data = b"cbuiltins\ngetattr\n(cbuiltins\nstr\nVupper\ntR(Vx\ntR."
+        guard.install(prescan=False)
+        assert pickle.load(io.BytesIO(data)) == "X"
+        guard.install(prescan=False, strict=True)
         with pytest.raises(guard.UnsafeModelError):
-            _load(data)
+            pickle.load(io.BytesIO(data))
 
     @pytest.mark.parametrize("strict", [False, True])
     def test_multiprocessing_works(self, tmp_path, strict):
@@ -1060,13 +1067,13 @@ class TestStrict:
         assert exc.value.rule_ids == ["MFV-PICKLE-004"]
         assert "hayward_no_such_pkg.mod.Thing" in str(exc.value)
 
-    def test_ordinary_stdlib_values_are_refused(self):
-        import datetime
+    def test_values_off_the_known_safe_list_are_refused(self):
+        import ipaddress
 
         guard.install(strict=True, prescan=False)
         with pytest.raises(guard.UnsafeModelError) as exc:
-            _load(pickle.dumps(datetime.date(2026, 1, 1)))
-        assert "datetime.date" in str(exc.value)
+            _load(pickle.dumps(ipaddress.ip_address("10.0.0.1")))
+        assert "ipaddress.IPv4Address" in str(exc.value)
 
     def test_fail_on_does_not_relax_it(self):
         guard.install(strict=True, fail_on="never", prescan=False)

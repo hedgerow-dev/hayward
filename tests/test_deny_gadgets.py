@@ -49,7 +49,8 @@ def test_uuid_gadget_pickle_is_convicted(tmp_path):
 def test_ordinary_uuid_is_not_flagged(tmp_path):
     # The whole uuid module is NOT denied: a benign pickled uuid.UUID must stay
     # clean, which is why the wildcard was rejected in favour of named gadgets.
-    assert _classify_pickle_global("uuid.UUID") == "unknown"
+    # The class itself is on the known-safe list.
+    assert _classify_pickle_global("uuid.UUID") == "allowed"
     p = tmp_path / "id.pkl"
     p.write_bytes(_reduce_pickle("uuid", "UUID", "12345678123456781234567812345678"))
     findings = ModelFileScanner().scan_file(p)

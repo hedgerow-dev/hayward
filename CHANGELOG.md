@@ -21,6 +21,14 @@ within a major version.
 - The `dev` extra includes numpy and joblib again, so CI runs the guard's
   tests for those loaders.
 
+### Changed
+
+- The known-safe list now includes standard-library value types that model
+  metadata carries: `datetime` dates, times and timezones, `decimal.Decimal`,
+  `uuid.UUID`, `fractions.Fraction` and `pathlib` path classes, plus the
+  Python 2 spellings protocols 0 and 1 write for plain instances. Path
+  classes no longer count a filesystem path argument as evidence.
+
 ### Fixed (security)
 
 - **Legacy tar members read through links.** A `pickle`, `storages`,
