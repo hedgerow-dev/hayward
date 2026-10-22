@@ -4,7 +4,7 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
-## Unreleased
+## 1.3.0 (2026-10-22)
 
 ### Added
 
@@ -31,6 +31,8 @@ within a major version.
 - transformers objects are on the known-safe list by exact name only:
   `TrainingArguments` and the four `trainer_utils` enums Trainer pickles.
   Other class-shaped transformers names are no longer trusted by shape.
+
+## 1.2.7 (2026-10-22)
 
 ### Fixed (security)
 
