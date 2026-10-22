@@ -303,6 +303,11 @@ class TestTorchTarMemberResolution:
         assert _critical(findings)
         assert any(is_coverage_gap(f) for f in findings)
 
+    @pytest.mark.parametrize("name", ["pytorch_model.bin", "model.dat"])
+    def test_legacy_tar_under_an_unmapped_name(self, tmp_path, name):
+        data = _torch_tar([("pickle", EVAL_BARE, tarfile.REGTYPE, "")])
+        assert _critical(_scan(tmp_path, name, data))
+
     def test_benign_legacy_tar_is_clean(self, tmp_path):
         data = _torch_tar([("pickle", pickle.dumps({"w": 1}, protocol=2), tarfile.REGTYPE, "")])
         assert _scan(tmp_path, "legacy.pt", data) == []
@@ -324,7 +329,10 @@ class TestOversizedTar:
         p.write_bytes(data)
         scanner = ModelFileScanner()
         scanner.MAX_SCAN_BYTES = 64
-        assert _critical(scanner.scan_file(p))
+        findings = scanner.scan_file(p)
+        assert _critical(findings)
+        # Read from byte 0 as a pickle, the file is still past the cap.
+        assert any(f.rule_id == "MFV-SKIP-001" for f in findings)
 
 
 class TestMixedLzmaStreams:

@@ -906,6 +906,22 @@ class ModelFileScanner:
                         prefix = handle.read(self.MAX_SCAN_BYTES)
                     findings.extend(self._scan_pickle(
                         file_path, prefix, loader_unpickles=ext != ".pt"))
+                    # Read as a flat pickle, the file is still past the cap:
+                    # an opcode can carry the stream beyond the prefix.
+                    findings.append(Finding(
+                        rule_id="MFV-SKIP-001",
+                        message=f"Model file exceeds {self.MAX_SCAN_BYTES // 1_000_000}MB scan "
+                                f"limit ({file_size // 1_000_000}MB). Its tar members were "
+                                f"walked, but as a flat pickle (how pickle.load and "
+                                f"joblib.load read it) only the first "
+                                f"{self.MAX_SCAN_BYTES // 1_000_000}MB were analysed. NOT a "
+                                f"clean verdict for the rest.",
+                        severity=Severity.LOW,
+                        category=Category.AI_ML,
+                        file_path=str(file_path),
+                        confidence=0.50,
+                        metadata={"file_size": file_size, "skipped_reason": "oversized"},
+                    ))
                     return findings
             if zipfile.is_zipfile(file_path):
                 findings = self._scan_pytorch_zip(file_path)
@@ -1002,6 +1018,10 @@ class ModelFileScanner:
             # can't positively identify is skipped, since an unidentified file
             # with an unclaimed extension isn't evidence of a model at all.
             fmt = self._sniff_format(data) or ModelFormat.UNKNOWN
+            if fmt == ModelFormat.UNKNOWN and data[:4] != b"PK\x03\x04" and _is_plain_tar(data):
+                # torch.load reads a legacy tar checkpoint under any name
+                # (`pytorch_model.bin`), as the oversized branch above does.
+                fmt = ModelFormat.PICKLE
             if fmt == ModelFormat.UNKNOWN or (other_pb and not self._is_pickle_bearing(data, fmt)):
                 return []
 
