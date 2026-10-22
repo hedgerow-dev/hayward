@@ -256,8 +256,10 @@ hayward.guard.install(prescan=False)           # keep only the load-time check
 hayward.guard.uninstall()                      # restore the original loaders
 ```
 
-Each `install` call replaces the previous settings. `HAYWARD_GUARD=off`
-makes the import a no-op, for CI that already scans.
+Each `install` call replaces the previous settings. A denied callable is
+CRITICAL, so outside strict mode `fail_on="never"` lets it load, like warn
+mode without the warning. `HAYWARD_GUARD=off` makes the import a no-op, for
+CI that already scans.
 
 ### Default mode raises the bar; it is not a sandbox
 

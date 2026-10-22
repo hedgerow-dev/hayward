@@ -268,6 +268,21 @@ class TestImport:
         )
         assert out.strip() == "True"
 
+    def test_a_shared_loader_keeps_loading_other_modules(self, tmp_path):
+        # zipimport serves every module in the zip from one loader, which the
+        # guard wraps when it loads a target.
+        archive = tmp_path / "libs.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr("joblib/__init__.py", "def load(filename):\n    return 'loaded'\n")
+            z.writestr("other.py", "VALUE = 1\n")
+        code = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import hayward.guard, joblib, other\n"
+            "print(joblib.load(sys.argv[1] + '/missing'), other.VALUE)\n"
+        )
+        assert _run(code, str(archive)).split() == ["loaded", "1"]
+
     @pytest.mark.parametrize("module, call", [
         ("numpy", "numpy.load(sys.argv[1], allow_pickle=True)"),
         ("joblib", "joblib.load(sys.argv[1])"),
@@ -332,6 +347,15 @@ class TestNumpy:
         os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
         self.np.load(p, allow_pickle=True)
         assert len(modes) == 2
+        # Replaced in place with the size and mtime restored, as `cp -p`
+        # does: a different file all the same.
+        st = os.stat(p)
+        q = tmp_path / "copy.npy"
+        q.write_bytes(p.read_bytes())
+        os.replace(q, p)
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.np.load(p, allow_pickle=True)
+        assert len(modes) == 3
 
     def test_uninstall_restores(self):
         original = self.np.load

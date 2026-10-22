@@ -80,17 +80,19 @@ _STRICT_RULES = frozenset({"MFV-PICKLE-001", "MFV-PICKLE-004", "MFV-PICKLE-005"}
 _hook_on = False  # the audit hook stays registered once added; this turns it off
 _hook_added = False
 _patched: list[tuple[object, str, object]] = []
-# Per process, keyed on (path, suffix, size, mtime_ns), so a training loop
-# that reloads a checkpoint does not rescan it every time. numpy's suffix is
-# None here: it is read from the file on a miss.
-_memo: dict[tuple[str, str | None, int, int], list[Finding]] = {}
+# Per process, keyed on the path, suffix and the file's identity (size,
+# mtime, inode, ctime: a copy with its mtime restored still changes ctime),
+# so a training loop that reloads a checkpoint does not rescan it every time.
+# numpy's suffix is None here: it is read from the file on a miss.
+_memo: dict[tuple, list[Finding]] = {}
 # numpy, joblib and torch call pickle.load (and joblib numpy.load) themselves.
 # `_local.sources` is the stack of what the guarded calls running on this
 # thread scanned: resolved paths, and the stream objects handed to loaders.
 # A nested call is skipped only when it rereads one of those. joblib's
 # NDArrayWrapper names a second file inside the pickle, and that load is
 # scanned like any other. `_local.labels` is the matching stack of file names,
-# for the audit hook's error message.
+# for the audit hook's error message; the hook acts only while it is not
+# empty, that is while a guarded load runs on this thread.
 _local = threading.local()
 
 
@@ -130,15 +132,16 @@ def _numpy_suffix(head: bytes) -> str:
 def _scan_path(path: str, suffix: str | None) -> list[Finding]:
     try:
         st = os.stat(path)
-        key = (path, suffix, st.st_size, st.st_mtime_ns)
-        if key not in _memo:
+        key = (path, suffix, st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns)
+        findings = _memo.get(key)  # install() may clear the memo on another thread
+        if findings is None:
             if suffix is None:
                 with open(path, "rb") as f:
                     suffix = _numpy_suffix(f.read(6))
-            _memo[key] = _scanner().scan_file(Path(path), _as_suffix=suffix)
+            findings = _memo[key] = _scanner().scan_file(Path(path), _as_suffix=suffix)
     except OSError:
         return []  # the loader raises its own error for a missing file
-    return _memo[key]
+    return findings
 
 
 def _scan_stream(stream, suffix: str | None, label: str) -> list[Finding]:
@@ -185,7 +188,7 @@ def _rereads_scanned_source(source, scanned: list) -> bool:
     return False
 
 
-def _check(source, suffix: str | None, takes_path: bool):
+def _check(source, suffix: str | None, takes_path: bool, label: str):
     """Scan what a loader is about to read, and return what was scanned, for
     the nested-call check.
 
@@ -195,12 +198,11 @@ def _check(source, suffix: str | None, takes_path: bool):
     """
     if takes_path and isinstance(source, (str, bytes, os.PathLike)):
         path = _resolve(source)
-        _enforce(_scan_path(path, suffix), os.fsdecode(source))
+        _enforce(_scan_path(path, suffix), label)
         return path
     seekable = getattr(source, "seekable", None)
     if not hasattr(source, "read") or seekable is None or not seekable():
         return None
-    label = str(getattr(source, "name", "<stream>"))
     start = source.tell()
     try:
         findings = _scan_stream(source, suffix, label)
@@ -356,7 +358,7 @@ def _wrap(module_name: str, original, param: str, suffix: str | None):
         if _prescan:
             if scanned and _rereads_scanned_source(source, scanned):
                 return original(*args, **kwargs)
-            key = _check(source, suffix, takes_path)
+            key = _check(source, suffix, takes_path, label)
         scanned.append(key)
         labels.append(label)
         try:
@@ -403,7 +405,9 @@ class _ImportHook:
 
         def exec_and_patch(module):
             exec_module(module)
-            if _hook in sys.meta_path:  # still installed, e.g. on a later reload
+            # One loader can serve many modules (zipimport, frozen apps), so
+            # this runs for whatever it loads next too.
+            if module.__name__ in _TARGETS and _hook in sys.meta_path:
                 _patch(module)
 
         loader.exec_module = exec_and_patch
