@@ -26,6 +26,29 @@ Or [try it in your browser](https://huggingface.co/spaces/hedgerow-dev/hayward).
 Same scanner, compiled to WebAssembly. Drop a checkpoint on the page and it
 stays on your machine.
 
+## Guard the load itself
+
+A scan checks a file before you load it. The guard checks it while you do:
+
+```python
+import hayward.guard  # pickle.load, joblib.load, numpy.load and torch.load now refuse dangerous calls
+```
+
+Each load is scanned first, then every function the file asks for is checked
+before it runs. The default mode raises the bar but is not a sandbox. For
+files you do not trust, `hayward.guard.install(strict=True)` refuses anything
+not on the known-safe list. The [usage guide](docs/usage.md#load-guard) lists
+what it does not cover.
+
+## Let your coding agent check first
+
+```bash
+pip install "hayward[mcp]"
+claude mcp add hayward -- hayward mcp
+```
+
+![Claude Code calls Hayward over MCP, refuses a booby-trapped checkpoint and clears a normal one](https://raw.githubusercontent.com/hedgerow-dev/hayward/main/docs/media/mcp-demo.gif)
+
 ## The problem
 
 `torch.load`, `joblib.load` and `numpy.load(allow_pickle=True)` execute code
@@ -93,20 +116,10 @@ from hayward import ModelFileScanner
 findings = ModelFileScanner().scan_directory(Path("models"))
 ```
 
-Or as a load guard: one import, and `pickle.load`, `joblib.load`,
-`numpy.load(allow_pickle=True)` and `torch.load` refuse a flagged file.
-The default mode raises the bar but is not a sandbox; for files you do not
-trust, `hayward.guard.install(strict=True)` refuses anything not on the
-known-safe list. See [load guard](docs/usage.md#load-guard) for what it does
-not cover.
-
-```python
-import hayward.guard
-```
-
-Or as a [pre-commit hook](docs/usage.md#pre-commit), or as an
-[MCP server](docs/usage.md#coding-agents-mcp) a coding agent calls before it
-loads a model.
+Or as the [load guard](#guard-the-load-itself), a
+[pre-commit hook](docs/usage.md#pre-commit), or an
+[MCP server](#let-your-coding-agent-check-first) a coding agent calls before
+it loads a model.
 
 And in CI, as a GitHub Action that fails the build and uploads SARIF to code
 scanning:
