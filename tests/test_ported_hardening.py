@@ -15,6 +15,7 @@ import zipfile
 from pathlib import Path
 
 from hayward._tensors import _check_tflite_layout
+from hayward.findings import is_coverage_gap
 from hayward.scanner import ModelFileScanner
 
 SEVENZ_MAGIC = b"7z\xbc\xaf\x27\x1c"
@@ -144,7 +145,8 @@ def test_oversized_npy_header_is_rejected_before_parsing(tmp_path):
     t0 = time.monotonic()
     findings = ModelFileScanner().scan_file(p)
     assert time.monotonic() - t0 < 1.0
-    assert not [f for f in findings if f.severity.value != "info"]
+    # An unparseable header is reported as unread, never as a verdict.
+    assert not [f for f in findings if f.severity.value != "info" and not is_coverage_gap(f)]
 
 
 def test_keras_zip_config_oversized_is_not_clean(tmp_path):

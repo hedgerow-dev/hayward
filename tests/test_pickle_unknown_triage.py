@@ -431,7 +431,8 @@ class TestUnknownGlobalEscalation:
         triaged = _triaged(findings)
         assert triaged, f"chain stayed at INFO: {[(f.rule_id, f.severity) for f in findings]}"
         assert triaged[0].severity == Severity.MEDIUM
-        assert "__builtin__.getattr" in triaged[0].message
+        # A protocol-0 `__builtin__` resolves to `builtins` (_compat_pickle).
+        assert "builtins.getattr" in triaged[0].message
         assert "eval" in triaged[0].message
 
     def test_partial_call_is_rendered_as_partial(self, tmp_path):
@@ -444,11 +445,11 @@ class TestUnknownGlobalEscalation:
             b"S'eval'\n" b"t" b"R" b"."
         )
         _globals_found, calls, _memo = _resolve_pickle_globals(chain)
-        partial = [c for c in calls if c.ref == "__builtin__.getattr"]
+        partial = [c for c in calls if c.ref == "builtins.getattr"]
         assert partial, "the chained call was not recorded at all"
 
         rendered = partial[0].format()
-        assert rendered == "__builtin__.getattr(... 'eval' ...)", rendered
+        assert rendered == "builtins.getattr(... 'eval' ...)", rendered
         # args must stay empty: nothing about the opaque argument is known.
         assert partial[0].args == ()
         assert partial[0].partial_texts == ("eval",)

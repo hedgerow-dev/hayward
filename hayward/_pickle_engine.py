@@ -13,10 +13,12 @@ The two operand/memo budget caps that the test suite tunes
 
 from __future__ import annotations
 
+import _compat_pickle
 import ast
 import contextlib
 import dataclasses
 import io
+import math
 import pickletools
 import re
 import reprlib
@@ -360,11 +362,17 @@ class PickleMemoProfile:
     already the walk's per-file metadata channel: it is True when the walk
     terminated early on _PICKLE_STACK_MAX_DEPTH and some of the stream was
     never read.
+
+    `joblib_array_unread` rides the same channel: True when a pickle that
+    builds joblib's NumpyArrayWrapper stopped parsing in the joblib reading
+    (see `_resolve_pickle_globals`), so the stream past that point was not
+    read the way joblib.load reads it.
     """
     slots: int
     max_index: int
     out_of_band: tuple[int, ...]
     walk_budget_exceeded: bool = False
+    joblib_array_unread: bool = False
 
 
 def _profile_memo_indices(indices: set[int]) -> PickleMemoProfile:
@@ -463,6 +471,181 @@ class _PickleGlobalRef(str):
     is an object, not text; this marker keeps the two apart without changing
     how the ref resolves, prints, or compares."""
     __slots__ = ()
+
+
+def _record_global(globals_found: list[str], module: str, name: str, proto: int) -> str:
+    """Record a GLOBAL/STACK_GLOBAL/INST reference and return the ref it
+    resolves to.
+
+    Below protocol 3, find_class first maps Python 2 names to their Python 3
+    homes (pickle's _compat_pickle; fix_imports is on in every loader here),
+    so `cPickle.loads` runs as `pickle.loads`. The name as written is recorded
+    too, since it is what the deny list has always been matched against.
+    """
+    written = f"{module}.{name}"
+    if proto < 3:
+        if (module, name) in _compat_pickle.NAME_MAPPING:
+            module, name = _compat_pickle.NAME_MAPPING[(module, name)]
+        elif module in _compat_pickle.IMPORT_MAPPING:
+            module = _compat_pickle.IMPORT_MAPPING[module]
+    ref = f"{module}.{name}"
+    if ref != written:
+        globals_found.append(written)
+    globals_found.append(ref)
+    if (laundered := _laundered_denied_ref(name)) is not None:
+        globals_found.append(laundered)
+    return ref
+
+
+# ── joblib inline arrays ──────────────────────────────────────────────
+#
+# joblib.dump replaces each numpy array with a NumpyArrayWrapper and writes
+# the array's raw bytes straight after that wrapper's BUILD, inside the same
+# pickle. joblib.load's unpickler reads them off the file at that BUILD
+# (NumpyArrayWrapper.read_array) and carries on with the pickle, so a walk
+# that wants to see what follows has to skip exactly those bytes.
+
+_JOBLIB_ARRAY_WRAPPER = "joblib.numpy_pickle.NumpyArrayWrapper"
+# copyreg's reconstructors build an instance of their first argument.
+_COPYREG_CONSTRUCTORS = frozenset({
+    "copyreg._reconstructor", "copyreg.__newobj__", "copyreg.__newobj_ex__",
+})
+# numpy pickles a dtype as numpy.dtype(typestr, False, True) and a BUILD.
+# typestr is the kind character and the item size ('f8', 'U5', 'V16').
+_NUMPY_DTYPE_TYPESTR_RE = re.compile(r"[<>=|]?([biufcmMOSUV])(\d+)")
+_NUMPY_DTYPE_MAX_DEPTH = 16
+# numpy 2's StringDType pickles through a constructor of its own, and holds
+# objects (hasobject), so joblib pickles its arrays inline.
+_NUMPY_STRINGDTYPE_CTOR = "numpy._core._internal._convert_to_stringdtype_kwargs"
+
+
+class _PickleJoblibArrayUnsized(Exception):
+    """A NumpyArrayWrapper BUILD whose array this walk cannot size or place,
+    so it cannot tell where joblib.load resumes reading the pickle."""
+
+
+class _PickleNumpyDtype(_PickleCallResultType):
+    """The result of `numpy.dtype(...)`, keeping the arguments and the BUILD
+    state numpy restores it from, so a joblib array's size can be derived."""
+    __slots__ = ("args", "state")
+
+    def __init__(self, ref: str, args: Any) -> None:
+        super().__init__(ref)
+        self.args = args
+        self.state: Any = None
+
+
+class _PickleJoblibArrayWrapper(_PickleCallResultType):
+    """An instance of joblib's NumpyArrayWrapper. `attrs` collects what each
+    BUILD sets on it, as the instance __dict__ would."""
+    __slots__ = ("attrs",)
+
+    def __init__(self, ref: str) -> None:
+        super().__init__(ref)
+        self.attrs: dict[Any, Any] = {}
+
+
+def _call_result(callable_val: Any, args: Any = ()) -> Any:
+    """What the walk pushes for the value `callable_val(*args)` returns."""
+    if not isinstance(callable_val, str):
+        return _PICKLE_OPAQUE
+    built = callable_val
+    if callable_val in _COPYREG_CONSTRUCTORS and isinstance(args, tuple) and args:
+        built = args[0]
+    if built == _JOBLIB_ARRAY_WRAPPER:
+        return _PickleJoblibArrayWrapper(callable_val)
+    if callable_val in ("numpy.dtype", _NUMPY_STRINGDTYPE_CTOR):
+        return _PickleNumpyDtype(callable_val, args)
+    return _PickleCallResultType(callable_val)
+
+
+def _numpy_dtype_layout(dtype: Any, depth: int = 0) -> tuple[bool, int] | None:
+    """(holds_objects, itemsize) for a dtype the walk rebuilt, or None when
+    that cannot be told.
+
+    The state numpy's __setstate__ takes is (version, byteorder, subarray,
+    names, fields, elsize, alignment[, flags[, metadata]]). Measured on numpy
+    2.4: bit 0 of flags decides hasobject, elsize decides the item size of a
+    flexible (S, U, V) type, and the typestr that of every other type. A dtype
+    whose flags and structure disagree about holding objects is None too,
+    because which of the two wins is a numpy implementation detail.
+    """
+    if not isinstance(dtype, _PickleNumpyDtype) or depth > _NUMPY_DTYPE_MAX_DEPTH:
+        return None
+    if dtype.ref == _NUMPY_STRINGDTYPE_CTOR:
+        return True, 16
+    args = dtype.args
+    typestr = args[0] if isinstance(args, tuple) and args else None
+    match = _NUMPY_DTYPE_TYPESTR_RE.fullmatch(typestr) if isinstance(typestr, str) else None
+    if match is None:
+        return None
+    kind, size = match.group(1), int(match.group(2))
+    holds_objects = kind == "O"
+    itemsize = size * 4 if kind == "U" else size
+    state = dtype.state
+    if state is None:
+        return holds_objects, itemsize
+    if not isinstance(state, tuple) or len(state) < 7:
+        return None
+    subarray, fields, elsize = state[2], state[4], state[5]
+    nested = []
+    if subarray is not None:
+        if not isinstance(subarray, tuple) or not subarray:
+            return None
+        nested.append(subarray[0])
+    if fields is not None:
+        if not isinstance(fields, dict):
+            return None
+        for value in fields.values():
+            if not isinstance(value, tuple) or not value:
+                return None
+            nested.append(value[0])
+    for sub in nested:
+        layout = _numpy_dtype_layout(sub, depth + 1)
+        if layout is None:
+            return None
+        holds_objects = holds_objects or layout[0]
+    if kind in "SUV":
+        if not isinstance(elsize, int) or elsize <= 0:
+            return None
+        itemsize = elsize
+    if len(state) >= 8:
+        flags = state[7]
+        if not isinstance(flags, int) or bool(flags & 1) != holds_objects:
+            return None
+    return holds_objects, itemsize
+
+
+def _skip_joblib_array(
+    stream: io.BytesIO,
+    attrs: dict[Any, Any],
+    globals_found: list[str],
+    resolved_calls: list[PickleResolvedCall],
+) -> None:
+    """Move `stream` past the array data NumpyArrayWrapper.read_array reads
+    at this point: an object array is a nested pickle (walked, since
+    pickle.load runs it), any other array one optional padding-length byte,
+    that much padding, then prod(shape) * itemsize raw bytes."""
+    shape = attrs.get("shape")
+    layout = _numpy_dtype_layout(attrs.get("dtype"))
+    if (
+        layout is None or not isinstance(shape, (tuple, list))
+        or not all(isinstance(n, int) for n in shape)
+    ):
+        raise _PickleJoblibArrayUnsized
+    holds_objects, itemsize = layout
+    if holds_objects:
+        # A plain pickle.load, not joblib's unpickler: arrays inside it are
+        # not followed by raw bytes.
+        _walk_one_pickle(stream, globals_found, resolved_calls, set())
+        return
+    count = math.prod(shape)
+    if count < 0:
+        raise _PickleJoblibArrayUnsized
+    if attrs.get("numpy_array_alignment_bytes") is not None:
+        padding = stream.read(1)
+        stream.seek(int.from_bytes(padding, "little"), io.SEEK_CUR)
+    stream.seek(count * itemsize, io.SEEK_CUR)
 
 
 def _pop_to_mark(stack: list) -> list:
@@ -749,7 +932,45 @@ def _resolve_pickle_globals(
     What is returned is the first per-pickle profile that had out-of-band
     indices, or (when none did) the profile of whichever pickle used the most
     memo slots, so the caller sees the file's real memo shape either way.
+
+    A stream that builds joblib's NumpyArrayWrapper is read twice and the
+    results joined. pickle.load and torch.load read the bytes after the
+    wrapper's BUILD as opcodes; joblib.load reads them as the array and goes
+    on with the pickle after it (`_skip_joblib_array`). Either loader may be
+    pointed at the file, so neither reading alone is the file.
     """
+    globals_found, resolved_calls, profiles, budget_exceeded, _unread = _walk_pickles(
+        data, joblib_arrays=False)
+    array_unread = False
+    if _JOBLIB_ARRAY_WRAPPER in globals_found:
+        more_globals, more_calls, more_profiles, more_budget, array_unread = _walk_pickles(
+            data, joblib_arrays=True)
+        globals_found += more_globals
+        resolved_calls += more_calls
+        profiles += more_profiles
+        budget_exceeded = budget_exceeded or more_budget
+
+    flagged = [p for p in profiles if p.out_of_band]
+    if flagged:
+        memo_profile = flagged[0]
+    elif profiles:
+        memo_profile = max(profiles, key=lambda p: p.slots)
+    else:
+        memo_profile = _profile_memo_indices(set())
+    if budget_exceeded and not memo_profile.walk_budget_exceeded:
+        memo_profile = dataclasses.replace(memo_profile, walk_budget_exceeded=True)
+    if array_unread:
+        memo_profile = dataclasses.replace(memo_profile, joblib_array_unread=True)
+
+    return globals_found, resolved_calls, memo_profile
+
+
+def _walk_pickles(
+    data: bytes, joblib_arrays: bool,
+) -> tuple[list[str], list[PickleResolvedCall], list[PickleMemoProfile], bool, bool]:
+    """One reading of every pickle in `data` for `_resolve_pickle_globals`:
+    (globals, calls, per-pickle memo profiles, budget exceeded, joblib array
+    unread). `joblib_arrays` reads the stream the way joblib.load does."""
     globals_found: list[str] = []
     resolved_calls: list[PickleResolvedCall] = []
     profiles: list[PickleMemoProfile] = []
@@ -759,13 +980,16 @@ def _resolve_pickle_globals(
     is_first = True
     resyncs = 0
     budget_exceeded = False
+    array_unread = False
     while stream.tell() < total:
         start = stream.tell()
         calls_before = len(resolved_calls)
+        globals_before = len(globals_found)
         memo_indices: set[int] = set()
         stopped = False
         try:
-            _walk_one_pickle(stream, globals_found, resolved_calls, memo_indices)
+            _walk_one_pickle(stream, globals_found, resolved_calls, memo_indices,
+                             joblib_arrays=joblib_arrays)
         except _PickleWalkBudgetExceeded:
             # The simulated stack outgrew its bound. Keep everything resolved
             # so far (discarding it would make "payload first, stack bomb
@@ -796,6 +1020,10 @@ def _resolve_pickle_globals(
             # away and left real sklearn models analyzed by substring match
             # alone.
             stopped = True
+            # Read the joblib way, a pickle that builds a NumpyArrayWrapper
+            # parses to its STOP. One that stopped short lost its place.
+            if joblib_arrays and _JOBLIB_ARRAY_WRAPPER in globals_found[globals_before:]:
+                array_unread = True
         # Profiled even when this pickle stopped parsing partway: joblib
         # streams always do, and the indices read before the stop are as real
         # as any others.
@@ -825,17 +1053,7 @@ def _resolve_pickle_globals(
             break
         is_first = False
 
-    flagged = [p for p in profiles if p.out_of_band]
-    if flagged:
-        memo_profile = flagged[0]
-    elif profiles:
-        memo_profile = max(profiles, key=lambda p: p.slots)
-    else:
-        memo_profile = _profile_memo_indices(set())
-    if budget_exceeded and not memo_profile.walk_budget_exceeded:
-        memo_profile = dataclasses.replace(memo_profile, walk_budget_exceeded=True)
-
-    return globals_found, resolved_calls, memo_profile
+    return globals_found, resolved_calls, profiles, budget_exceeded, array_unread
 
 
 def _propagate_result_invoked(calls: list[PickleResolvedCall], start: int = 0) -> None:
@@ -873,6 +1091,7 @@ def _walk_one_pickle(
     globals_found: list[str],
     resolved_calls: list[PickleResolvedCall],
     memo_indices: set[int],
+    joblib_arrays: bool = False,
 ) -> None:
     """Walk exactly one pickle from `stream`, appending what it resolves.
 
@@ -880,6 +1099,9 @@ def _walk_one_pickle(
     for the out-of-band index check. It is filled in place rather than
     returned so the caller still has it after a stream that stops parsing
     partway.
+
+    `joblib_arrays` reads the stream as joblib.load does: the array data a
+    NumpyArrayWrapper's BUILD is followed by is skipped (`_skip_joblib_array`).
 
     Consumes through that pickle's STOP opcode and leaves `stream` positioned
     at the next byte, so the caller can walk any pickle that follows.
@@ -909,6 +1131,10 @@ def _walk_one_pickle(
     stack: list[Any] = []
     memo: dict[int, Any] = {}
     auto_memo_idx = 0
+    # The unpickler's protocol (find_class maps Python 2 names below 3) and
+    # where the current FRAME ends.
+    proto = 0
+    frame_end: int | None = None
 
     def _record_call(callable_val: Any, args: Any, kwargs: dict | None = None) -> None:
         if isinstance(callable_val, _PickleCallResultType):
@@ -978,6 +1204,10 @@ def _walk_one_pickle(
             stack.append(bytes(arg))
         elif name == "NONE":
             stack.append(None)
+        elif name == "PROTO" and isinstance(arg, int):
+            proto = arg
+        elif name == "FRAME" and isinstance(arg, int):
+            frame_end = stream.tell() + arg
         elif name == "NEWTRUE":
             stack.append(True)
         elif name == "NEWFALSE":
@@ -1115,10 +1345,7 @@ def _walk_one_pickle(
             # Protocol 0-2: arg is "module qualname" (space-separated).
             parts = arg.split(" ", 1)
             if len(parts) == 2:
-                ref = f"{parts[0]}.{parts[1]}"
-                globals_found.append(ref)
-                if (laundered := _laundered_denied_ref(parts[1])) is not None:
-                    globals_found.append(laundered)
+                ref = _record_global(globals_found, parts[0], parts[1], proto)
                 stack.append(_PickleGlobalRef(ref))
         elif name == "INST" and isinstance(arg, str):
             # Protocol 0's old-style-class instantiation opcode. Resolves a
@@ -1136,15 +1363,12 @@ def _walk_one_pickle(
             call_args = tuple(_pop_to_mark(stack))
             parts = arg.split(" ", 1)
             if len(parts) == 2:
-                ref = f"{parts[0]}.{parts[1]}"
-                globals_found.append(ref)
-                if (laundered := _laundered_denied_ref(parts[1])) is not None:
-                    globals_found.append(laundered)
+                ref = _record_global(globals_found, parts[0], parts[1], proto)
                 _record_call(ref, call_args)
                 # Real semantics push the newly constructed *instance*, not
                 # the class -- an opaque value, so a later opcode can't
                 # mistake it for a re-usable global reference or literal.
-                stack.append(_PickleCallResultType(ref))
+                stack.append(_call_result(ref, call_args))
         elif name == "OBJ":
             # Protocol 0's other old-style-instantiation opcode: like INST,
             # but the class is the first item after MARK (already resolved
@@ -1154,9 +1378,7 @@ def _walk_one_pickle(
             cls_ref = items[0] if items else None
             if items:
                 _record_call(cls_ref, tuple(items[1:]))
-            stack.append(
-                _PickleCallResultType(cls_ref) if isinstance(cls_ref, str) else _PICKLE_OPAQUE
-            )
+            stack.append(_call_result(cls_ref, tuple(items[1:])))
         elif name == "STACK_GLOBAL":
             # Protocol 4+: module and qualname were pushed as the two
             # preceding string constants.
@@ -1164,10 +1386,7 @@ def _walk_one_pickle(
                 qualname = stack.pop()
                 module = stack.pop()
                 if isinstance(module, str) and isinstance(qualname, str):
-                    ref = f"{module}.{qualname}"
-                    globals_found.append(ref)
-                    if (laundered := _laundered_denied_ref(qualname)) is not None:
-                        globals_found.append(laundered)
+                    ref = _record_global(globals_found, module, qualname, proto)
                     stack.append(_PickleGlobalRef(ref))
                 else:
                     # Non-string operands (a real unpickler raises here). No
@@ -1181,10 +1400,7 @@ def _walk_one_pickle(
                 raw_args = stack.pop()
                 callable_val = stack.pop()
                 _record_call(callable_val, raw_args)
-                stack.append(
-                    _PickleCallResultType(callable_val)
-                    if isinstance(callable_val, str) else _PICKLE_OPAQUE
-                )
+                stack.append(_call_result(callable_val, raw_args))
         elif name == "NEWOBJ":
             # Protocol 2+'s construction opcode -- how most modern PyTorch
             # pickles actually build tensors/objects (cls.__new__(cls, *args)).
@@ -1192,10 +1408,7 @@ def _walk_one_pickle(
                 raw_args = stack.pop()
                 cls_val = stack.pop()
                 _record_call(cls_val, raw_args)
-                stack.append(
-                    _PickleCallResultType(cls_val)
-                    if isinstance(cls_val, str) else _PICKLE_OPAQUE
-                )
+                stack.append(_call_result(cls_val))
         elif name == "NEWOBJ_EX":
             if len(stack) >= 3:
                 kwargs_val = stack.pop()
@@ -1206,10 +1419,7 @@ def _walk_one_pickle(
                     raw_args,
                     kwargs_val if isinstance(kwargs_val, dict) else None,
                 )
-                stack.append(
-                    _PickleCallResultType(cls_val)
-                    if isinstance(cls_val, str) else _PICKLE_OPAQUE
-                )
+                stack.append(_call_result(cls_val))
         elif name == "BUILD":
             # obj.__setstate__(state) / obj.__dict__.update(state) mutates
             # obj in place and returns nothing -- the state argument is
@@ -1218,7 +1428,25 @@ def _walk_one_pickle(
             # later opcodes from desyncing; BUILD itself doesn't call
             # arbitrary code.
             if stack:
-                stack.pop()
+                state = stack.pop()
+                target = stack[-1] if stack else None
+                if isinstance(target, _PickleNumpyDtype):
+                    target.state = state
+                elif joblib_arrays and isinstance(target, _PickleJoblibArrayWrapper):
+                    # joblib's load_build: the state lands in the instance
+                    # __dict__ (a (state, slotstate) pair sets both), then the
+                    # array is read straight off the file and takes the
+                    # wrapper's place. Inside an unfinished FRAME the file is
+                    # already past the frame, so the array is not where the
+                    # opcodes go on; joblib.dump ends the frame first.
+                    parts = state if isinstance(state, tuple) and len(state) == 2 else (state,)
+                    for part in parts:
+                        if isinstance(part, dict):
+                            target.attrs.update(part)
+                    if frame_end is not None and stream.tell() < frame_end:
+                        raise _PickleJoblibArrayUnsized
+                    _skip_joblib_array(stream, target.attrs, globals_found, resolved_calls)
+                    stack[-1] = _PICKLE_OPAQUE
 
 
 # Modules where *any* member is denied, matched on the module prefix rather

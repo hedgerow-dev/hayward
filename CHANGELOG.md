@@ -4,6 +4,30 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed (security)
+
+- **Legacy tar members read through links.** A `pickle`, `storages`,
+  `tensors` or `sys_info` member that is a symlink, a hard link or of an
+  unknown type is read the way torch.load reads it. One that resolves to
+  nothing readable, or is larger than the member cap, reports a coverage
+  gap; an oversized one still has its start scanned.
+- **Oversized tar checkpoints.** Past the 500MB cap, a file that torch.load
+  reads as a tar is walked as a tar, also when a zip is appended to it.
+- **Mixed lzma and xz streams.** After the first stream, each one is decoded
+  in either format, as `lzma.LZMAFile` does. A later stream that does not
+  decode reports `MFV-SKIP-003` instead of ending the read silently.
+- **`.npy` headers read as numpy reads them.** `descr` spellings such as
+  `'object'` and structured fields count as object dtypes, Python 2 `L`
+  integers in the header are accepted, and a header that does not parse
+  reports `MFV-SKIP-003`.
+- **joblib arrays inside the pickle.** The scanner skips the array data joblib
+  writes after each array, as joblib.load does, and scans the rest of the
+  pickle. An array it cannot size reports `MFV-SKIP-003`.
+- **Python 2 names.** Below protocol 3, globals are classified under the
+  Python 3 names pickle maps them to (`cPickle.loads` as `pickle.loads`).
+
 ## 1.2.6 (2026-10-21)
 
 Two new ways to run the scanner, and scanner fixes for files the loaders

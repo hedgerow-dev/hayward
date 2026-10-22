@@ -246,3 +246,229 @@ class TestUnparsedPickleIsNotClean:
         data = pickle.dumps({"w": [1.0, 2.0], "n": "layer"}, protocol=protocol)
         for name in ("model.pkl", "model.pt", "model.joblib"):
             assert self._strict_scan(tmp_path, name, data) == []
+
+
+# builtins.eval("40+2") with no PROTO in front: it opens with none of the
+# scanner's pickle openers, and torch still unpickles it under a known name.
+EVAL_BARE = EVAL[2:]
+
+
+def _torch_tar(extra: list[tuple[str, bytes | None, bytes, str]]) -> bytes:
+    """A legacy torch tar: harmless `storages` and `tensors`, then `extra` as
+    (name, data, tar type, linkname)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:", format=tarfile.USTAR_FORMAT) as tf:
+        base = [("storages", pickle.dumps(0, protocol=2) + pickle.dumps([], protocol=2)),
+                ("tensors", pickle.dumps(0, protocol=2))]
+        for name, data in base:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+        for name, data, kind, linkname in extra:
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.linkname = linkname
+            if data is None:
+                tf.addfile(info)
+            else:
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+class TestTorchTarMemberResolution:
+    """torch.load reads `pickle` with tarfile.extractfile, which follows links
+    and serves an unknown member type as a regular file."""
+
+    @pytest.mark.parametrize("kind", [tarfile.SYMTYPE, tarfile.LNKTYPE])
+    def test_pickle_member_that_is_a_link(self, tmp_path, kind):
+        data = _torch_tar([("blob", EVAL_BARE, tarfile.REGTYPE, ""),
+                           ("pickle", None, kind, "blob")])
+        assert _critical(_scan(tmp_path, "legacy.pt", data))
+
+    def test_pickle_member_with_an_unknown_type(self, tmp_path):
+        data = _torch_tar([("pickle", EVAL_BARE, b"Z", "")])
+        assert _critical(_scan(tmp_path, "legacy.pt", data))
+
+    def test_dangling_link_is_a_coverage_gap(self, tmp_path):
+        data = _torch_tar([("pickle", None, tarfile.SYMTYPE, "missing")])
+        assert any(is_coverage_gap(f) for f in _scan(tmp_path, "legacy.pt", data))
+
+    def test_oversized_member_is_read_up_to_the_cap_and_reported(self, tmp_path):
+        p = tmp_path / "legacy.pt"
+        p.write_bytes(_torch_tar([("pickle", EVAL + b"\x00" * 200, tarfile.REGTYPE, "")]))
+        scanner = ModelFileScanner()
+        scanner.MAX_ZIP_MEMBER_BYTES = 64
+        findings = scanner.scan_file(p)
+        assert _critical(findings)
+        assert any(is_coverage_gap(f) for f in findings)
+
+    def test_benign_legacy_tar_is_clean(self, tmp_path):
+        data = _torch_tar([("pickle", pickle.dumps({"w": 1}, protocol=2), tarfile.REGTYPE, "")])
+        assert _scan(tmp_path, "legacy.pt", data) == []
+
+
+class TestOversizedTar:
+    """Past the size cap a file torch.load reads as a tar is walked from disk,
+    even when zipfile also finds an archive at its end."""
+
+    @pytest.mark.parametrize("with_zip", [True, False])
+    def test_oversized_tar_is_walked(self, tmp_path, with_zip):
+        data = _torch_tar([("pickle", EVAL_BARE, tarfile.REGTYPE, "")])
+        if with_zip:
+            zbuf = io.BytesIO()
+            with zipfile.ZipFile(zbuf, "w") as zf:
+                zf.writestr("archive/version", "3\n")
+            data += zbuf.getvalue()
+        p = tmp_path / "big.pt"
+        p.write_bytes(data)
+        scanner = ModelFileScanner()
+        scanner.MAX_SCAN_BYTES = 64
+        assert _critical(scanner.scan_file(p))
+
+
+class TestMixedLzmaStreams:
+    """joblib reads lzma and xz through lzma.LZMAFile, which decodes every
+    stream in either format."""
+
+    @pytest.mark.parametrize("first,second", [
+        (lzma.FORMAT_ALONE, lzma.FORMAT_XZ), (lzma.FORMAT_XZ, lzma.FORMAT_ALONE),
+    ], ids=["lzma-then-xz", "xz-then-lzma"])
+    @pytest.mark.parametrize("name", ["model.joblib", "model.pkl"])
+    def test_mixed_formats(self, tmp_path, first, second, name):
+        data = (lzma.compress(b"ccollections\nOrderedDict\n0", format=first)
+                + lzma.compress(EVAL_P0, format=second))
+        assert _critical(_scan(tmp_path, name, data))
+
+    def test_undecodable_later_stream_is_a_coverage_gap(self, tmp_path):
+        data = (lzma.compress(pickle.dumps({"w": 1}, protocol=2), format=lzma.FORMAT_XZ)
+                + b"\xfd7zXZ\x00 not an xz stream")
+        assert any(is_coverage_gap(f) for f in _scan(tmp_path, "model.joblib", data))
+
+    def test_zero_padding_after_the_stream_is_clean(self, tmp_path):
+        data = lzma.compress(pickle.dumps({"w": 1}, protocol=2), format=lzma.FORMAT_XZ)
+        assert _scan(tmp_path, "model.joblib", data + b"\x00" * 8) == []
+
+
+def _npy(header: bytes, payload: bytes) -> bytes:
+    total = 10 + len(header) + 1
+    header += b" " * ((64 - total % 64) % 64) + b"\n"
+    return b"\x93NUMPY\x01\x00" + len(header).to_bytes(2, "little") + header + payload
+
+
+class TestNpyHeaderParity:
+    """The .npy header is read the way numpy's _read_array_header reads it."""
+
+    @pytest.mark.parametrize("descr", ["object", "object_", "<f8,object", "(2,)O"])
+    def test_object_dtype_spellings(self, tmp_path, descr):
+        header = b"{'descr': '%s', 'fortran_order': False, 'shape': (1,), }" % descr.encode()
+        assert _critical(_scan(tmp_path, "arr.npy", _npy(header, EVAL)))
+
+    def test_structured_object_field(self, tmp_path):
+        header = b"{'descr': [('a', '<f8'), ('b', '|O')], 'fortran_order': False, 'shape': (1,), }"
+        assert _critical(_scan(tmp_path, "arr.npy", _npy(header, EVAL)))
+
+    def test_python2_long_in_shape(self, tmp_path):
+        header = b"{'descr': '|O', 'fortran_order': False, 'shape': (1L,), }"
+        assert _critical(_scan(tmp_path, "arr.npy", _npy(header, EVAL)))
+
+    def test_unparseable_header_is_a_coverage_gap(self, tmp_path):
+        header = b"{'descr': '|O', 'fortran_order': False, 'shape': (1,) oops"
+        assert any(is_coverage_gap(f) for f in _scan(tmp_path, "arr.npy", _npy(header, EVAL)))
+
+    def test_numeric_structured_array_is_clean(self, tmp_path):
+        header = b"{'descr': [('Open', '<f8'), ('Obs', '<i4')], 'fortran_order': False, 'shape': (2,), }"
+        assert _scan(tmp_path, "arr.npy", _npy(header, b"\x00" * 24)) == []
+
+
+def _sbu(text: str) -> bytes:
+    return _short_binunicode(text)
+
+
+def _stack_global(module: str, name: str) -> bytes:
+    return _sbu(module) + _sbu(name) + b"\x93"
+
+
+def _binint(value: int) -> bytes:
+    return b"J" + value.to_bytes(4, "little", signed=True)
+
+
+def _numpy_dtype(typestr: str = "f8", flags: int = 0) -> bytes:
+    # numpy's own pickled form: numpy.dtype(typestr, False, True), then
+    # BUILD with (3, '<', None, None, None, elsize, alignment, flags).
+    return (_stack_global("numpy", "dtype") + _sbu(typestr) + b"\x89\x88\x87R"
+            + b"(K\x03" + _sbu("<") + b"NNN" + _binint(-1) + _binint(-1) + _binint(flags)
+            + b"tb")
+
+
+def _joblib_array(raw: bytes, *, dtype: bytes | None = None, count: int = 16,
+                  align: bool = True) -> bytes:
+    """A NumpyArrayWrapper the way joblib.dump writes one, followed by the
+    array bytes it splices into the stream."""
+    state = (b"}(" + _sbu("subclass") + _stack_global("numpy", "ndarray")
+             + _sbu("shape") + b"K" + bytes([count]) + b"\x85"
+             + _sbu("order") + _sbu("C")
+             + _sbu("dtype") + (_numpy_dtype() if dtype is None else dtype))
+    if align:
+        state += _sbu("numpy_array_alignment_bytes") + b"K\x10"
+    return (_stack_global("joblib.numpy_pickle", "NumpyArrayWrapper") + b")\x81"
+            + state + b"ub" + raw)
+
+
+EVAL_CALL = _stack_global("builtins", "eval") + _sbu("40+2") + b"\x85R"
+
+
+def _joblib_list(*items: bytes) -> bytes:
+    return b"\x80\x04](" + b"".join(items) + b"e."
+
+
+class TestJoblibInlineArrays:
+    """joblib splices a numeric array's raw bytes into the pickle right after
+    the wrapper's BUILD and carries on with the same pickle."""
+
+    def test_payload_after_an_aligned_array(self, tmp_path):
+        data = _joblib_list(_joblib_array(b"\x03\xff\xff\xff" + b"\x00" * 128), EVAL_CALL)
+        assert _critical(_scan(tmp_path, "model.joblib", data))
+        assert _critical(_scan(tmp_path, "model.pkl", data))
+
+    def test_payload_after_an_unaligned_array(self, tmp_path):
+        # joblib <= 1.1 wrote no alignment padding.
+        data = _joblib_list(_joblib_array(b"\x00" * 128, align=False), EVAL_CALL)
+        assert _critical(_scan(tmp_path, "model.joblib", data))
+
+    def test_payload_after_an_array_in_a_gzip_file(self, tmp_path):
+        data = _joblib_list(_joblib_array(b"\x00" + b"\x00" * 128), EVAL_CALL)
+        assert _critical(_scan(tmp_path, "model.joblib", gzip.compress(data)))
+
+    def test_array_that_cannot_be_sized_is_a_coverage_gap(self, tmp_path):
+        data = _joblib_list(_joblib_array(b"\x00" * 128, dtype=_sbu("f8")), EVAL_CALL)
+        assert any(is_coverage_gap(f) for f in _scan(tmp_path, "model.joblib", data))
+
+    def test_plain_pickle_reading_is_kept(self, tmp_path):
+        # pickle.load does not skip array bytes: what follows the BUILD is
+        # opcodes to it, so it is still walked as opcodes.
+        data = _joblib_list(_joblib_array(EVAL_CALL + b"0" * 200, align=False))
+        assert _critical(_scan(tmp_path, "model.pkl", data))
+
+    def test_benign_numeric_and_object_arrays_are_clean(self, tmp_path):
+        nested = b"\x80\x05" + b"](K\x01K\x02e."
+        data = _joblib_list(
+            _joblib_array(b"\x03\xff\xff\xff" + b"\x00" * 128),
+            _joblib_array(b"\x00" * 128, align=False),
+            _joblib_array(nested, dtype=_numpy_dtype("O8", flags=63)),
+            _sbu("tail"),
+        )
+        assert _scan(tmp_path, "model.joblib", data) == []
+
+
+class TestPython2Names:
+    """Below protocol 3 the unpickler maps Python 2 names to Python 3 ones
+    (pickle._compat_pickle) before it imports anything."""
+
+    @pytest.mark.parametrize("data", [
+        b"\x80\x02ccPickle\nloads\nC\x02N.\x85R.",
+        b"ccPickle\nloads\n(S'N.'\ntR.",
+        b"\x80\x02" + _stack_global("cPickle", "loads") + b"C\x02N.\x85R.",
+    ], ids=["proto2-global", "proto0", "proto2-stack-global"])
+    def test_cpickle_loads_is_mapped(self, tmp_path, data):
+        assert _critical(_scan(tmp_path, "model.pkl", data))
