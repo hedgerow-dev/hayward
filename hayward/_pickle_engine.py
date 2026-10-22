@@ -170,6 +170,9 @@ PICKLE_ALLOWED_GLOBALS: frozenset[str] = frozenset({
     "decimal.Decimal", "uuid.UUID", "fractions.Fraction",
     "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
     "pathlib.PosixPath", "pathlib.WindowsPath",
+    # Python 3.13 moved them, and pickles name the new home.
+    "pathlib._local.PurePosixPath", "pathlib._local.PureWindowsPath",
+    "pathlib._local.PosixPath", "pathlib._local.WindowsPath",
     "_codecs.encode",
     "numpy.core.multiarray._reconstruct", "numpy.core.multiarray.scalar",
     "numpy._core.multiarray._reconstruct", "numpy._core.multiarray.scalar",
@@ -187,6 +190,9 @@ PICKLE_ALLOWED_GLOBALS: frozenset[str] = frozenset({
 _PICKLE_PATH_CONSTRUCTORS: frozenset[str] = frozenset({
     "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
     "pathlib.PosixPath", "pathlib.WindowsPath",
+    # Python 3.13 moved them, and pickles name the new home.
+    "pathlib._local.PurePosixPath", "pathlib._local.PureWindowsPath",
+    "pathlib._local.PosixPath", "pathlib._local.WindowsPath",
 })
 
 # Modules whose dtype-specific storage/tensor classes are treated as allowed
@@ -1725,11 +1731,15 @@ _PICKLE_ALLOWED_STRING_ARG_OK: frozenset[str] = frozenset({
     "numpy.core.multiarray.scalar",
     "numpy._core.multiarray.scalar",
     # Text is these constructors' legitimate input: Decimal('1.5'), a UUID's
-    # hex form, a timezone's name, and path segments, absolute ones included.
-    "decimal.Decimal", "uuid.UUID",
+    # hex form, Fraction('1/3') (how Python 3.10 pickles one), a timezone's
+    # name, and path segments, absolute ones included.
+    "decimal.Decimal", "uuid.UUID", "fractions.Fraction",
     "datetime.timezone",
     "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
     "pathlib.PosixPath", "pathlib.WindowsPath",
+    # Python 3.13 moved them, and pickles name the new home.
+    "pathlib._local.PurePosixPath", "pathlib._local.PureWindowsPath",
+    "pathlib._local.PosixPath", "pathlib._local.WindowsPath",
 })
 
 
