@@ -6,6 +6,21 @@ within a major version.
 
 ## Unreleased
 
+### Added
+
+- **Load guard.** `import hayward.guard` guards `pickle.load`, `joblib.load`,
+  `numpy.load(allow_pickle=True)` and `torch.load`: each file is scanned
+  first, and while the loader runs every global it resolves on that thread is
+  checked before import. A refusal raises `UnsafeModelError`. Other
+  unpickling in the process, such as `pickle.loads` and multiprocessing, is
+  untouched. The default mode raises the bar but is not a sandbox;
+  `install(strict=True)` refuses every global not on the known-safe list and
+  is the setting for untrusted files. `mode="warn"`, `max_size`,
+  `prescan=False`, `uninstall()` and `HAYWARD_GUARD=off` are supported. The
+  usage guide lists what it does not cover.
+- The `dev` extra includes numpy and joblib again, so CI runs the guard's
+  tests for those loaders.
+
 ### Fixed (security)
 
 - **Legacy tar members read through links.** A `pickle`, `storages`,
