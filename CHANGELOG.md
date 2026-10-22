@@ -28,6 +28,9 @@ within a major version.
   `uuid.UUID`, `fractions.Fraction` and `pathlib` path classes, plus the
   Python 2 spellings protocols 0 and 1 write for plain instances. Path
   classes no longer count a filesystem path argument as evidence.
+- transformers objects are on the known-safe list by exact name only:
+  `TrainingArguments` and the four `trainer_utils` enums Trainer pickles.
+  Other class-shaped transformers names are no longer trusted by shape.
 
 ### Fixed (security)
 

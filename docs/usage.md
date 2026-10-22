@@ -279,13 +279,14 @@ known-safe list, the list behind `MFV-PICKLE-004`. It applies at load time
 and to the scan's `MFV-PICKLE-004` and `MFV-PICKLE-005` findings, whatever
 `fail_on` is. This is the setting for files you do not trust.
 
-It refuses many ordinary files. What loads: built-in containers, numpy
-arrays, torch tensors and state dicts, and class-shaped objects from
-scikit-learn, SciPy and transformers. What it refuses includes `datetime`,
-`decimal`, `uuid` and `pathlib` values, pandas objects, numpy random
-generator state, a whole pickled `nn.Module`, TorchScript archives and your
-own classes. Strict mode trusts the known-safe list, including its
-name-shape rules for those three libraries.
+It refuses some ordinary files. What loads: built-in containers, numpy
+arrays, torch tensors and state dicts, standard-library values such as
+`datetime`, `decimal`, `uuid` and `pathlib`, class-shaped objects from
+scikit-learn and SciPy, and transformers' `TrainingArguments`. What it
+refuses includes pandas objects, numpy random generator state, other
+transformers objects, a whole pickled `nn.Module`, TorchScript archives and
+your own classes. Strict mode trusts the known-safe list, including its
+name-shape rule for scikit-learn and SciPy.
 
 ### What it does not cover
 

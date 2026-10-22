@@ -212,12 +212,14 @@ _PICKLE_STORAGE_NAME_RE = re.compile(r"^_?[A-Z][A-Za-z0-9]*(?:Storage|Tensor)$")
 
 # ML frameworks whose namespaces carry no code-execution primitives, paired
 # with a class-shaped leaf (leading capital). The package prefix does the
-# safety work (no exec machinery lives in sklearn.*, scipy.*, transformers.*)
-# and the capital letter does the shape work: estimators, layers, dtypes and
-# config dataclasses are constructed at load, while the genuinely dangerous
-# members of these packages are all lowercase *functions* (dynamic-module
-# loading in transformers, file I/O in sklearn.datasets), which stay in the
-# unknown bucket where the argument-evidence triage sees them.
+# safety work (no exec machinery lives in sklearn.* or scipy.*) and the
+# capital letter does the shape work: estimators, sparse matrices and dtypes
+# are constructed at load, while the genuinely dangerous members of these
+# packages are lowercase *functions* (file I/O in sklearn.datasets), which
+# stay in the unknown bucket where the argument-evidence triage sees them.
+# `transformers` is deliberately NOT here: its namespace is far larger,
+# loads files and code by design, and real pickles use only the handful of
+# training classes listed exactly below.
 # `torch` is deliberately NOT here: torch.utils.collect_env and friends are
 # dangerous submodules, and a CapWords leaf under one
 # (torch.utils.collect_env.SomethingTensor) must stay unknown. torch is
@@ -227,17 +229,23 @@ _PICKLE_STORAGE_NAME_RE = re.compile(r"^_?[A-Z][A-Za-z0-9]*(?:Storage|Tensor)$")
 # shape (measured 2026-08-04: 62 names, all class-shaped bar the exact
 # additions below).
 _PICKLE_ALLOWED_ML_CLASS_ROOTS: frozenset[str] = frozenset({
-    "sklearn", "scipy", "transformers",
+    "sklearn", "scipy",
 })
 _PICKLE_ML_CLASS_NAME_RE = re.compile(r"^_?[A-Z][A-Za-z0-9]*$")
 
-# Measured ordinary-ML machinery with lowercase leaves, so the class-shape
-# rule cannot cover it. Each is a type/constructor with no execution
-# surface, observed in the benign corpus.
+# Measured ordinary-ML machinery the class-shape rule does not cover. Each is
+# a type/constructor observed in the benign corpus.
 _PICKLE_ALLOWED_ML_EXACT: frozenset[str] = frozenset({
     "numpy.float64", "numpy.random.mtrand.RandomState",
     "torch.device", "argparse.Namespace",
     "joblib.numpy_pickle.NumpyArrayWrapper", "scipy.sparse._csr.csr_matrix",
+    # The only transformers globals in the corpus: Trainer's training_args.bin
+    # (measured 2026-10-22, 22 files).
+    "transformers.training_args.TrainingArguments",
+    "transformers.trainer_utils.EvaluationStrategy",
+    "transformers.trainer_utils.HubStrategy",
+    "transformers.trainer_utils.IntervalStrategy",
+    "transformers.trainer_utils.SchedulerType",
 })
 
 

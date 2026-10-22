@@ -512,3 +512,30 @@ class TestStdlibValueTypes:
         data = b"clinecache\ngetline\n(V/etc/hosts\nI1\ntR."
         findings = _scan(tmp_path, "model.pkl", data)
         assert any(f.rule_id == "MFV-PICKLE-005" for f in findings)
+
+
+class TestTransformersExactList:
+    """transformers is allowed by exact name only: its namespace loads files
+    and code by design, and real pickles use only Trainer's training classes."""
+
+    @pytest.mark.parametrize("ref", [
+        "transformers.training_args.TrainingArguments",
+        "transformers.trainer_utils.IntervalStrategy",
+        "transformers.trainer_utils.SchedulerType",
+    ])
+    def test_training_classes_are_allowed(self, ref):
+        from hayward._pickle_engine import _classify_pickle_global
+        assert _classify_pickle_global(ref) == "allowed"
+
+    @pytest.mark.parametrize("ref", [
+        "transformers.AutoModel",
+        "transformers.pipelines.TextGenerationPipeline",
+        "transformers.trainer.Trainer",
+    ])
+    def test_other_class_shaped_names_are_not(self, ref):
+        from hayward._pickle_engine import _classify_pickle_global
+        assert _classify_pickle_global(ref) != "allowed"
+
+    def test_sklearn_shape_rule_is_unchanged(self):
+        from hayward._pickle_engine import _classify_pickle_global
+        assert _classify_pickle_global("sklearn.linear_model._logistic.LogisticRegression") == "allowed"
