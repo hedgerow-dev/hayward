@@ -4,6 +4,20 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## 1.4.1 (2026-10-23)
+
+### Added
+
+- `server.json` for the official MCP Registry, listing `hayward mcp` as
+  `io.github.hedgerow-dev/hayward`. Clients start it with
+  `uvx --with "mcp>=2.3,<3" hayward mcp`, so the core install keeps its one
+  dependency.
+
+### Changed
+
+- The PyPI page carries the current README: the load guard and MCP demo
+  sections.
+
 ## 1.4.0 (2026-10-22)
 
 ### Added

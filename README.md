@@ -1,5 +1,7 @@
 # Hayward
 
+<!-- mcp-name: io.github.hedgerow-dev/hayward -->
+
 **Security scanner for machine-learning model files.** Know whether a
 checkpoint will run code on your machine, before you load it.
 
