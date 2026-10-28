@@ -84,6 +84,7 @@ COVERAGE_RULE_IDS = frozenset({
     "MFV-SKIP-002",
     "MFV-SKIP-003",
     "MFV-7Z-001",
+    "MFV-GGUF-001",
     "MFV-GGUF-004",
     "MFV-LFS-001",
 })

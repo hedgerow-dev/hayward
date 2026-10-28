@@ -21,7 +21,7 @@ import struct
 import zipfile
 from pathlib import Path
 
-from hayward.findings import Severity
+from hayward.findings import Severity, is_coverage_gap
 from hayward.scanner import ModelFileScanner
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -133,16 +133,35 @@ class TestSafetensorsRules:
 class TestGgufMagicRule:
     """MFV-GGUF-001: magic number missing or invalid."""
 
-    def test_bad_magic_flags_gguf_001(self, tmp_path):
+    def test_bad_magic_is_a_coverage_gap_not_a_verdict(self, tmp_path):
         # One byte off the GGUF magic, enough length to be a real header.
+        # Unidentifiable bytes are "not verified", not "dangerous": the gate
+        # (--fail-on high) must not fail on them.
         blob = b"GGUG" + b"\x00" * 12
         findings = _scan(tmp_path, "model.gguf", blob)
         assert [f.rule_id for f in findings] == ["MFV-GGUF-001"]
-        assert findings[0].severity == Severity.HIGH
+        assert findings[0].severity == Severity.INFO
+        assert is_coverage_gap(findings[0])
 
-    def test_truncated_file_flags_gguf_001(self, tmp_path):
+    def test_truncated_file_is_a_coverage_gap(self, tmp_path):
         findings = _scan(tmp_path, "model.gguf", b"GG")
         assert [f.rule_id for f in findings] == ["MFV-GGUF-001"]
+        assert findings[0].severity == Severity.INFO
+        assert is_coverage_gap(findings[0])
+
+    def test_leading_zero_bytes_without_magic_do_not_fail_the_gate(self, tmp_path):
+        # The shape of two real public files (tiiuae Falcon-H1-Tiny GGUF
+        # repos): named .gguf, 48+ leading zero bytes, no GGUF magic anywhere.
+        findings = _scan(tmp_path, "model.gguf", b"\x00" * 64 + b"\x01" * 64)
+        assert not any(f.severity in (Severity.HIGH, Severity.CRITICAL) for f in findings)
+
+    def test_pickle_renamed_gguf_still_convicted(self, tmp_path):
+        # Softening the bad-magic rule must not blind the extension-confusion
+        # check: a pickle wearing a .gguf name is still HIGH and still scanned.
+        findings = _scan(tmp_path, "model.gguf", pickle.dumps(_Evil(), protocol=2))
+        assert any(f.rule_id == "MFV-CONFUSE-001" and f.severity == Severity.HIGH
+                   for f in findings), [(f.rule_id, f.severity) for f in findings]
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings)
 
     def test_ggml_magic_is_non_coverage_not_gguf_001(self, tmp_path):
         # GGUF's predecessor is a known format the scanner does not parse:
