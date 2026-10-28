@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hayward"
 dynamic = ["version"]
-description = "Security scanner for machine-learning model files: detects code execution in pickle, GGUF, ONNX, Keras and other checkpoints"
+description = "Static scanner for ML model files: finds code execution in PyTorch, pickle, joblib, GGUF, SafeTensors, ONNX and Keras checkpoints before you load them. Offline, one dependency."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -14,6 +14,9 @@ keywords = [
     "security", "security-scanner", "vulnerability-scanner",
     "machine-learning", "mlsecops", "ai-security",
     "pickle", "deserialization", "supply-chain", "malware-detection",
+    "model-scanner", "pickle-scanner", "model-security", "ml-security",
+    "huggingface", "pytorch", "safetensors", "gguf", "onnx", "keras",
+    "torch-load", "arbitrary-code-execution",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
