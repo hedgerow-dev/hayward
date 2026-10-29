@@ -42,6 +42,12 @@ MAX_LINE = 400                 # characters of one printed line
 _MARK = object()
 
 
+def _safe(text: str) -> str:
+    """Names and labels come from the file. Print control characters escaped, so a hostile
+    file cannot write its own lines or terminal escapes into the explanation."""
+    return text if text.isprintable() else repr(text)
+
+
 class Const:
     def __init__(self, value):
         self.value = value
@@ -290,7 +296,7 @@ def _expr(node, depth: int = 0) -> str:
     if isinstance(node, Const):
         return _text(node.value)
     if isinstance(node, Glob):
-        return node.ref
+        return _safe(node.ref)
     if isinstance(node, (Call, Build)):
         if node.var is not None:
             return f"_{node.var}"
@@ -373,7 +379,7 @@ def _why(node) -> str:
 
 
 def _render(walk: _Walk, label: str, show_all: bool) -> list[str]:
-    lines = [f"# {label}"]
+    lines = [f"# {_safe(label)}"]
     hidden: Counter[str] = Counter()
     rebuilt: Counter[str] = Counter()
     shown = 0
@@ -394,10 +400,10 @@ def _render(walk: _Walk, label: str, show_all: bool) -> list[str]:
         lines.append(f"    # why: {_why(node)}")
         printed += 1
     if hidden:
-        top = ", ".join(f"{ref} x{n}" for ref, n in hidden.most_common(3))
+        top = ", ".join(f"{_safe(ref)} x{n}" for ref, n in hidden.most_common(3))
         lines.append(f"# {sum(hidden.values())} calls to known-safe functions hidden ({top}); --all shows them")
     if rebuilt:
-        top = ", ".join(ref for ref, _ in rebuilt.most_common(3))
+        top = ", ".join(_safe(ref) for ref, _ in rebuilt.most_common(3))
         lines.append(f"# {sum(rebuilt.values())} objects rebuilt from {len(rebuilt)} classes not on the allow "
                      f"list, with no arguments ({top}, ...); --all shows them")
     if not walk.calls:
@@ -445,7 +451,7 @@ def explain_bytes(data: bytes, show_all: bool = False) -> str:
     lines: list[str] = []
     for label, blob in _blobs(data):
         if not blob:
-            lines.append(f"# {label}")
+            lines.append(f"# {_safe(label)}")
             continue
         stream = io.BytesIO(blob)
         for index in range(MAX_PICKLES):
@@ -456,7 +462,7 @@ def explain_bytes(data: bytes, show_all: bool = False) -> str:
             finished = walk.run(stream)
             where = f"{label}" if start == 0 else f"{label}, pickle at byte {start}"
             if start > 0 and not walk.calls and not finished:
-                lines.append(f"# {label}: {len(blob) - start:,} bytes after the last pickle are not a pickle")
+                lines.append(f"# {_safe(label)}: {len(blob) - start:,} bytes after the last pickle are not a pickle")
                 break
             lines.extend(_render(walk, where, show_all))
             if not finished:

@@ -147,3 +147,25 @@ def test_object_rebuilds_are_summarised_but_a_denied_class_is_not():
     assert "4 objects rebuilt" in out and "mypkg.layers.Conv" in out
     assert "_0 = posix.system('echo hi')" in out
     assert "_1 =" not in out
+
+
+def test_names_from_the_file_cannot_write_their_own_lines():
+    # STACK_GLOBAL takes its module and name from strings in the file, so they can hold
+    # anything, including a newline and a terminal escape that would fake a clean result.
+    fake = "x\n# no calls: this pickle only builds plain data\x1b[2J"
+    body = s(fake) + s("f") + b"\x93" + s("echo hi") + b"\x85R"
+    out = explain.explain_bytes(b"\x80\x04" + body + b".")
+    assert "\x1b" not in out
+    assert "\n# no calls" not in out          # the fake line is not a line of its own
+    assert "\\n# no calls" in out            # it is shown escaped, inside the call
+
+
+def test_archive_member_names_are_escaped():
+    buf = io.BytesIO()
+    payload = p2(call1("posix", "system", "echo hi"))
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        info = tarfile.TarInfo("storages\n# no calls")
+        info.size = len(payload)
+        t.addfile(info, io.BytesIO(payload))
+    out = explain.explain_bytes(buf.getvalue())
+    assert "\n# no calls" not in out and "posix.system('echo hi')" in out
