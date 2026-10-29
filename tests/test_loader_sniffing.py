@@ -143,6 +143,38 @@ class TestCompressedPickles:
             assert _scan(tmp_path, "model.pkl", data) == []
 
 
+# os.system as a protocol 2 pickle writes it on Linux: a plain GLOBAL opcode naming
+# "posix" (os.system's real __module__), one string argument, REDUCE. The command is
+# harmless; the shape is what matters.
+def _posix_system_p2(command: str = "echo hayward-test") -> bytes:
+    raw = command.encode()
+    return (b"\x80\x02cposix\nsystem\nq\x00X" + len(raw).to_bytes(4, "little") + raw
+            + b"q\x01\x85q\x02Rq\x03.")
+
+
+class TestPosixSystemInLegacyTar:
+    """A pickle that calls posix.system, wrapped as an old-style tar checkpoint whose
+    only member is `storages`, the layout torch.load still reads. Seen in real files
+    on the Hub: the tar is a single 10 KB block, and the name is usually
+    pytorch_model.bin even though torch reads it as a checkpoint."""
+
+    def test_tar_is_one_padded_block_like_the_real_files(self):
+        assert len(_tar([("storages", _posix_system_p2())])) == 10240
+
+    @pytest.mark.parametrize("name", ["pytorch_model.bin", "legacy.pt", "legacy.pth"])
+    def test_posix_system_is_critical_under_each_name(self, tmp_path, name):
+        findings = _scan(tmp_path, name, _tar([("storages", _posix_system_p2())]))
+        critical = [f for f in findings if f.rule_id == "MFV-PICKLE-001"]
+        assert critical, [(f.rule_id, f.severity) for f in findings]
+        assert critical[0].severity == Severity.CRITICAL
+        assert "posix.system" in critical[0].message
+
+    def test_a_shell_pipeline_argument_changes_nothing(self, tmp_path):
+        command = "OUT=$(echo aGVsbG8= | base64 -d | timeout 60 sh 2>&1)"
+        findings = _scan(tmp_path, "pytorch_model.bin", _tar([("storages", _posix_system_p2(command))]))
+        assert _critical(findings)
+
+
 class TestTarCheckpoints:
     def test_tar_with_a_zip_appended(self, tmp_path):
         # zipfile finds the trailing archive; torch.load sees no zip magic at
