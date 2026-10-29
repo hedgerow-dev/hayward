@@ -4,6 +4,27 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## 1.4.3 (2026-10-29)
+
+### Fixed
+
+- Binary data in a pickle no longer comes out HIGH (`MFV-PICKLE-006`). A
+  protocol 2 pickle stores a bytes literal as `_codecs.encode(text, 'latin1')`,
+  and for binary data that text is random characters that matched the
+  command-shape check by chance (a backtick, a `;` beside a space). Resnet and
+  zipformer checkpoints were affected. The text is now turned back into bytes
+  first, so the printable-ASCII gate that already applies to other bytes
+  arguments applies here too. Readable command text still flags. As with
+  protocol 3 bytes, a payload with a control character added is not matched.
+
+### Changed
+
+- `MFV-GGUF-001` (a `.gguf` file with no GGUF magic) is now INFO and counts as a
+  coverage gap: **not a clean verdict**, no longer a HIGH that fails
+  `--fail-on high`. A pickle, zip or other dangerous format wearing a `.gguf`
+  name is still `MFV-CONFUSE-001` at HIGH and is scanned as what it is.
+  Unverified bytes are reported as unverified, not as a threat.
+
 ## 1.4.2 (2026-10-28)
 
 ### Changed
