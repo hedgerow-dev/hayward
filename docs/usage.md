@@ -60,6 +60,33 @@ threshold you pick, state it whenever you quote a number from it. The
 difference between counting the INFO tier and not counting it is the single
 largest lever on any scanner's false-positive rate, this one included.
 
+## Explain a pickle
+
+```bash
+hayward explain model.pt
+hayward explain model.pt --all
+```
+
+`scan` says whether a file is dangerous; `explain` shows what it would do, as
+readable lines, without running anything:
+
+```text
+_0 = builtins.__import__('subprocess')
+    # why: on Hayward's deny list: can run code, commands, or reach files or the network
+_1 = builtins.getattr(_0, 'getoutput')
+    # why: on Hayward's deny list: can run code, commands, or reach files or the network
+_2 = _1('echo $(id)')
+    # why: calls the result of an earlier line; argument looks like a shell command
+```
+
+It reads a bare pickle, the `.pkl` members of a zip checkpoint, and the members
+of an old tar checkpoint. Each callable is classified with the scanner's own
+allow and deny lists, so `explain` and `scan` agree. Calls to known-safe
+functions, and objects rebuilt from classes with no arguments, are counted on
+one line instead of listed; `--all` lists them. Long strings, big containers and
+deep nesting are shortened, and a hostile or truncated stream stops with a note
+saying where. It is for reading a file you already have; it is not a verdict.
+
 ## Reports
 
 `html` produces one self-contained page: no external stylesheet, font or
