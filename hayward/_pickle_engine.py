@@ -1517,9 +1517,11 @@ def _walk_one_pickle(
 # through `ctypes` anyway.
 _PICKLE_DENIED_MODULES: frozenset[str] = frozenset({
     "_aix_support", "_osx_support", "_pickle", "_pyrepl", "aiohttp", "asyncio",
-    "bdb", "cProfile", "commands", "ctypes", "distutils.file_util", "httplib",
+    "bdb", "cProfile", "commands", "ctypes", "distutils.file_util", "distutils.spawn",
+    "httplib",
     "nt", "numpy.f2py", "numpy.testing._private.utils", "os", "pdb", "pickle",
     "pip", "posix", "profile", "pty", "pydoc", "requests.api", "runpy",
+    "setuptools._distutils.spawn",  # what `distutils` resolves to on Python 3.12+
     "shutil", "socket", "ssl", "subprocess", "sys", "test", "timeit",
     "urllib.request", "venv", "webbrowser",
 })

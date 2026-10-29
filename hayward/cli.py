@@ -386,8 +386,22 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
     sub.add_parser("mcp", help="run a stdio MCP server for coding agents")
     sub.add_parser("hub", help="fetch and scan a Hugging Face Hub repo (uses the network)")
     sub.add_parser("lock", help="pin a Hub repo's files for loading, or --verify a snapshot against a lock")
+    explain = sub.add_parser(
+        "explain", help="show what a pickle-based file would do, as readable lines (nothing is run)")
+    explain.add_argument("path", type=Path, help="a pickle, a zip checkpoint, or an old tar checkpoint")
+    explain.add_argument("--all", action="store_true", help="also show calls to known-safe functions")
 
     args = parser.parse_args(argv)
+
+    if args.command == "explain":
+        from .explain import explain_file
+
+        try:
+            print(explain_file(args.path, show_all=args.all))
+        except OSError as exc:
+            print(f"hayward explain: {exc}", file=sys.stderr)
+            return 2
+        return 0
 
     if args.command == "mcp":
         # The SDK is an optional extra, so it is imported here and nowhere
