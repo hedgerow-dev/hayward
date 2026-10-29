@@ -278,11 +278,16 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
     """`label` names the target in the report when it is a temp folder (hayward hub)."""
     args_list = sys.argv[1:] if argv is None else argv
     if args_list[:1] == ["hub"]:
-        # The only command that uses the network. Handled before argparse so its own
+        # Uses the network (so does creating a lock). Handled before argparse so its own
         # flags and every `scan` flag can follow the repo id.
         from .hub import main as hub_main
 
         return hub_main(args_list[1:])
+    if args_list[:1] == ["lock"]:
+        # Uses the network to read the repo listing; --verify works offline.
+        from .lock import main as lock_main
+
+        return lock_main(args_list[1:])
     parser = argparse.ArgumentParser(
         prog="hayward",
         description=(
@@ -379,7 +384,8 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
     )
 
     sub.add_parser("mcp", help="run a stdio MCP server for coding agents")
-    sub.add_parser("hub", help="fetch and scan a Hugging Face Hub repo (the one command that uses the network)")
+    sub.add_parser("hub", help="fetch and scan a Hugging Face Hub repo (uses the network)")
+    sub.add_parser("lock", help="pin a Hub repo's files for loading, or --verify a snapshot against a lock")
 
     args = parser.parse_args(argv)
 

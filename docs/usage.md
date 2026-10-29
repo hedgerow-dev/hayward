@@ -7,8 +7,9 @@ pip install hayward
 ```
 
 Python 3.10 or newer. One runtime dependency, `defusedxml`. No native
-extensions, no model framework, and `hayward scan` makes no network calls at any point. The one
-command that uses the network is [`hayward hub`](#scan-a-hub-repo), and only when you run it.
+extensions, no model framework, and `hayward scan` makes no network calls at any point. Only
+[`hayward hub`](#scan-a-hub-repo) and creating a [`hayward lock`](#pin-a-hub-repo) use the
+network, and only when you run them.
 
 ## Command line
 
@@ -69,9 +70,8 @@ hayward hub org/name --revision v1.0 --fail-on high --format sarif -o report.sar
 ```
 
 This fetches a Hugging Face repo's scannable files and runs `scan` on them, so you
-can check a repo before you download it into your own project. It is the only
-command that uses the network, and nothing is loaded or run. Any other flag goes
-to `scan`.
+can check a repo before you download it into your own project. It uses the
+network, and nothing is loaded or run. Any other flag goes to `scan`.
 
 - Files come from one pinned commit, the one the Hub reports for `--revision`
   (default `main`). A file with a Hub hash is checked against it after download.
@@ -88,6 +88,25 @@ to `scan`.
 - A private or gated repo needs `HF_TOKEN` in the environment. It is sent only to
   `huggingface.co`, and not on to the CDN it redirects to.
 - The report names the target `hf://org/name@commit`. The temp folder is deleted.
+
+## Pin a Hub repo
+
+```bash
+hayward lock org/name --revision main -o hayward.lock.json
+hayward lock --verify hayward.lock.json ./downloaded-snapshot
+```
+
+`lock` records the commit and every file in the repo with its hash (SHA-256 for
+LFS files, the git blob id for the rest). `--verify` checks a downloaded snapshot
+against it, offline: a file that is missing, changed, or **not in the lock** fails,
+so an extra `.py` cannot ride along.
+
+It is written for one profile: `transformers` `from_pretrained` at a pinned
+revision. It fails closed. Custom code files are listed, and anything the profile
+would load from outside the repo is recorded as unresolved and the lock is marked
+`needs_review` (exit code 1): an `auto_map` entry that loads code from another
+repo (`other/repo--module.Class`), or an adapter's base model. A lock pins what
+will be loaded; it does not say the files are safe. Scan them as well.
 
 ## Reports
 

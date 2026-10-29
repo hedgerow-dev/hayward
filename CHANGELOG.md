@@ -10,13 +10,18 @@ within a major version.
 
 - `hayward hub org/name` fetches a Hugging Face repo's scannable files at a pinned
   commit and scans them, so a repo can be checked before it is downloaded into a
-  project. It is the one command that uses the network; `hayward scan` still makes
-  no network calls. A big zip checkpoint is read by Range request for its pickle
+  project. It uses the network; `hayward scan` still makes no network calls. A big zip checkpoint is read by Range request for its pickle
   member only, so a multi-gigabyte `.pt` or `.bin` is checked by fetching a few
   kilobytes; the run says the tensor data was not read. Other files over
   `--max-file-mb` are listed as NOT SCANNED with the reason, never as clean. File
   names from the API are checked, Hub hashes are verified, and `HF_TOKEN` goes
   only to `huggingface.co`.
+
+- `hayward lock org/name` pins a repo's commit and every file's hash for the
+  `transformers` `from_pretrained` profile, and `hayward lock --verify` checks a
+  downloaded snapshot against it offline (missing, changed and extra files fail).
+  It fails closed: code loaded from another repo, or an adapter's base model, is
+  recorded as unresolved and the lock is marked `needs_review`.
 
 ## 1.4.3 (2026-10-29)
 

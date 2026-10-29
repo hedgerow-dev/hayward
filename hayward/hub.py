@@ -1,6 +1,6 @@
 """Scan a Hugging Face Hub repo without loading it: ``hayward hub org/name``.
 
-This is the one command that uses the network. Plain ``hayward scan`` never does.
+It uses the network (so does creating a ``hayward lock``). Plain ``hayward scan`` never does.
 It lists the repo's files at a pinned commit, downloads the ones Hayward can scan
 into a temp folder, then runs the ordinary ``scan`` on that folder, so every
 ``scan`` flag, report format and exit code works unchanged. Nothing is loaded or
