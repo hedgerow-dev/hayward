@@ -1990,13 +1990,19 @@ class ModelFileScanner:
                     "scanner does not parse.",
                     metadata={"skipped_reason": "ggml_format"},
                 )]
+            # Not a GGUF, and not any format this scanner recognises as
+            # dangerous either (a pickle or zip wearing a .gguf name is
+            # convicted separately by MFV-CONFUSE-001). A blob nothing can
+            # load is unverified, not malicious: a coverage gap, not a verdict.
             return [Finding(
                 rule_id="MFV-GGUF-001",
-                message="GGUF magic number invalid or missing. Corrupted or non-GGUF file.",
-                severity=Severity.HIGH,
+                message="GGUF magic number invalid or missing. Corrupted or non-GGUF "
+                        "file; the content was not checked. NOT a clean verdict.",
+                severity=Severity.INFO,
                 category=Category.AI_ML,
                 file_path=str(file_path),
-                confidence=0.95,
+                confidence=0.3,
+                metadata={"skipped_reason": "gguf_bad_magic"},
             )]
 
         # GGUF version 1 stores its counts and string/array lengths as 32-bit

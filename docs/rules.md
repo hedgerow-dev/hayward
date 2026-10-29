@@ -43,7 +43,7 @@ derive theirs from the strength of the evidence found.
 
 | Rule | Severity | CWE | Fires when |
 |------|----------|-----|------------|
-| `MFV-GGUF-001` | HIGH | - | Magic number missing or invalid |
+| `MFV-GGUF-001` | INFO | - | Magic number missing or invalid, and the bytes are not a format Hayward recognises as dangerous. **Not a clean verdict**, see coverage limits. A pickle or zip wearing a `.gguf` name is `MFV-CONFUSE-001` at HIGH |
 | `MFV-GGUF-002` | CRITICAL | - | Metadata carries suspicious content |
 | `MFV-GGUF-003` | CRITICAL | 94, 1336 | `tokenizer.chat_template` contains a code-execution construct in Jinja2 syntax |
 | `MFV-GGUF-004` | INFO | - | Magic is valid but the KV section will not parse. **Not a clean verdict**, see coverage limits |
@@ -117,7 +117,7 @@ authenticity.
 
 ## Coverage limits, stated plainly
 
-**`MFV-SKIP-001/002/003`, `MFV-7Z-001`, `MFV-GGUF-004` and `MFV-LFS-001` are
+**`MFV-SKIP-001/002/003`, `MFV-7Z-001`, `MFV-GGUF-001`, `MFV-GGUF-004` and `MFV-LFS-001` are
 not clean verdicts.** Each means some or all of the file was never analysed.
 Treat them as "unknown", never as "safe", and do not count them as detections
 when scoring.
