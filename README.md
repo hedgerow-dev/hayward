@@ -11,7 +11,7 @@ code, before you load it.
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-013D5A?style=flat-square&labelColor=013D5A)
 ![Rules 47](https://img.shields.io/badge/rules-47-013D5A?style=flat-square&labelColor=013D5A)
 ![Dependencies 1](https://img.shields.io/badge/dependencies-1-708C69?style=flat-square&labelColor=013D5A)
-![No outbound calls](https://img.shields.io/badge/outbound_calls-none-F4A25B?style=flat-square&labelColor=013D5A)
+![Scan makes no outbound calls](https://img.shields.io/badge/scan_outbound_calls-none-F4A25B?style=flat-square&labelColor=013D5A)
 
 ```bash
 pip install hayward
@@ -88,7 +88,7 @@ arguments they were handed, not by their name. A URL, a shell command, a host
 and port. That is what generalises past the deny list.
 
 **It installs anywhere.** One dependency, no model framework, no native
-extensions, no network. Python 3.10 and up.
+extensions, and `hayward scan` makes no network calls. Python 3.10 and up.
 
 **It fits a build.** Documented exit codes, JSON output, a threshold you set.
 

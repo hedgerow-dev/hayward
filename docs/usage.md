@@ -7,7 +7,8 @@ pip install hayward
 ```
 
 Python 3.10 or newer. One runtime dependency, `defusedxml`. No native
-extensions, no model framework, and no network access at any point.
+extensions, no model framework, and `hayward scan` makes no network calls at any point. The one
+command that uses the network is [`hayward hub`](#scan-a-hub-repo), and only when you run it.
 
 ## Command line
 
@@ -59,6 +60,27 @@ piped report (for example `-f json`) stays clean.
 threshold you pick, state it whenever you quote a number from it. The
 difference between counting the INFO tier and not counting it is the single
 largest lever on any scanner's false-positive rate, this one included.
+
+## Scan a Hub repo
+
+```bash
+hayward hub org/name
+hayward hub org/name --revision v1.0 --fail-on high --format sarif -o report.sarif
+```
+
+This fetches a Hugging Face repo's scannable files and runs `scan` on them, so you
+can check a repo before you download it into your own project. It is the only
+command that uses the network, and nothing is loaded or run. Any other flag goes
+to `scan`.
+
+- Files come from one pinned commit, the one the Hub reports for `--revision`
+  (default `main`). A file with a Hub hash is checked against it after download.
+- Files over `--max-file-mb` (default 50) are **not fetched**. Each is named on
+  stderr as `NOT SCANNED`: a clean result does not cover them. Big checkpoints
+  are the common case, so raise the cap when you need them.
+- A private or gated repo needs `HF_TOKEN` in the environment. It is sent only to
+  `huggingface.co`, and not on to the CDN it redirects to.
+- The report names the target `hf://org/name@commit`. The temp folder is deleted.
 
 ## Reports
 
@@ -457,6 +479,6 @@ hayward scan ./models -f json \
 `--check-signatures` reports sibling signature and attestation artifacts next to
 a model (a detached `.sig`, a Sigstore bundle, an in-toto/SLSA/DSSE
 attestation), as an INFO `MFV-SIG-001` finding stating what the artifact
-structurally claims. This is detection only: the scanner does no network I/O and
+structurally claims. This is detection only: scanning does no network I/O and
 no cryptographic verification, so a present signature is reported, never
 trusted.

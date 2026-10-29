@@ -4,6 +4,17 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- `hayward hub org/name` fetches a Hugging Face repo's scannable files at a pinned
+  commit and scans them, so a repo can be checked before it is downloaded into a
+  project. It is the one command that uses the network; `hayward scan` still makes
+  no network calls. Files over `--max-file-mb` are not fetched and are listed as
+  NOT SCANNED, never as clean. File names from the API are checked, Hub hashes are
+  verified, and `HF_TOKEN` goes only to `huggingface.co`.
+
 ## 1.4.3 (2026-10-29)
 
 ### Fixed

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hayward"
 dynamic = ["version"]
-description = "Static scanner for ML model files: finds code execution in PyTorch, pickle, joblib, GGUF, SafeTensors, ONNX and Keras checkpoints before you load them. Offline, one dependency."
+description = "Static scanner for ML model files: finds code execution in PyTorch, pickle, joblib, GGUF, SafeTensors, ONNX and Keras checkpoints before you load them. Scans offline, one dependency."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
