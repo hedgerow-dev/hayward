@@ -157,3 +157,15 @@ def test_verify_refuses_a_lock_that_needs_review(monkeypatch, tmp_path, capsys):
     snap = fake.snapshot(tmp_path / "snap")
     assert lock.main(["--verify", str(path), str(snap)]) == 1
     assert "needs review" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["preprocessor_config.json", "processor_config.json",
+                                  "video_preprocessor_config.json"])
+def test_remote_code_in_any_auto_class_config_needs_review(monkeypatch, tmp_path, capsys, name):
+    # AutoProcessor and the image and feature-extractor Auto classes read auto_map from
+    # their own config files, not only from config.json.
+    files = {**BASIC, name: json.dumps({"auto_map": {"AutoProcessor": "other/repo--proc.P"}}).encode()}
+    FakeRepo(monkeypatch, files)
+    code, data, _ = make_lock(["org/name"], tmp_path, capsys)
+    assert code == 1 and data["unresolved"][0]["ref"] == "other/repo--proc.P"
+    assert data["requires_trust_remote_code"] is True

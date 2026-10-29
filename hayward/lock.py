@@ -32,8 +32,10 @@ FORMAT = "hayward-lock/1"
 PROFILE = "transformers.from_pretrained"
 CODE_SUFFIXES = frozenset({".py", ".so", ".pyd", ".dll", ".dylib", ".pyc"})
 CONFIG_MAX_BYTES = 1024 * 1024
-# Files whose JSON can make the profile load something from outside the repo.
-AUTO_MAP_FILES = ("config.json", "tokenizer_config.json")
+# Any *config.json can carry an auto_map: the model and tokenizer configs, and also the
+# processor, image-processor and feature-extractor configs the Auto classes read.
+CONFIG_SUFFIX = "config.json"
+MAX_CONFIGS = 50
 ADAPTER_FILE = "adapter_config.json"
 
 
@@ -102,7 +104,11 @@ def create(repo: str, revision: str) -> dict:
             code_files.append(name)
     requires_remote_code = False
     with tempfile.TemporaryDirectory(prefix="hayward-lock-") as tmp:
-        for name in [n for n in AUTO_MAP_FILES if n in names]:
+        configs = sorted(n for n in names if n.rsplit("/", 1)[-1].endswith(CONFIG_SUFFIX))
+        if len(configs) > MAX_CONFIGS:
+            unresolved.append({"kind": "unreadable", "ref": f"{len(configs)} config files",
+                               "why": f"more than {MAX_CONFIGS} config files; not all were checked"})
+        for name in configs[:MAX_CONFIGS]:
             config = _read_json(repo, sha, name, Path(tmp))
             if config is None:
                 unresolved.append({"kind": "unreadable", "ref": name,
