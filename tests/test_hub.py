@@ -87,14 +87,14 @@ def test_unsafe_file_names_from_the_api_are_never_written(monkeypatch, tmp_path,
     assert "refusing" in err
 
 
-@pytest.mark.parametrize("repo", ["", "../x", "a/b/c", "a b/c", "org", "org/", "/name", "org/na me", "http://evil/x"])
+@pytest.mark.parametrize("repo", ["", "../x", "a/b/c", "a b/c", "org", "org/", "/name", "org/na me", "http://evil/x", "org/name\n"])
 def test_malformed_repo_ids_are_refused_before_any_request(monkeypatch, capsys, repo):
     monkeypatch.setattr(hub, "_api_get", lambda url: pytest.fail("made a request"))
     code, _, err = run([repo, "--quiet"], capsys)
     assert code == 2 and "repo id" in err
 
 
-@pytest.mark.parametrize("rev", ["../main", "a b", "x" * 200, "a/b"])
+@pytest.mark.parametrize("rev", ["../main", "a b", "x" * 200, "a/b", "main\n"])
 def test_malformed_revisions_are_refused(monkeypatch, capsys, rev):
     monkeypatch.setattr(hub, "_api_get", lambda url: pytest.fail("made a request"))
     code, _, err = run(["org/name", "--revision", rev, "--quiet"], capsys)

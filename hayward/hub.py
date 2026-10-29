@@ -33,10 +33,10 @@ HUB = "https://huggingface.co"
 TIMEOUT_SECONDS = 30
 RETRIES_429 = 4
 # "org/name": ASCII letters, digits, "_", "." and "-", no empty or dot-only parts.
-REPO_RE = re.compile(r"^\w[\w.-]{0,95}/\w[\w.-]{0,95}$", re.ASCII)
+REPO_RE = re.compile(r"\w[\w.-]{0,95}/\w[\w.-]{0,95}", re.ASCII)
 # A branch, tag or commit. No slash, so it cannot change the shape of the URL.
-REVISION_RE = re.compile(r"^\w[\w.-]{0,99}$", re.ASCII)
-COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+REVISION_RE = re.compile(r"\w[\w.-]{0,99}", re.ASCII)
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 # Of the .json files only these carry something the scanner reads (auto_map,
 # trust_remote_code, chat templates), so the rest are not worth downloading.
 CONFIG_NAMES = frozenset({"config.json", "tokenizer_config.json"})
@@ -131,7 +131,7 @@ def fetch(repo: str, revision: str, dest: Path, max_bytes: int) -> dict:
     quoted = urllib.parse.quote(repo, safe="/")
     info = _api_get(f"{HUB}/api/models/{quoted}/revision/{urllib.parse.quote(revision)}?blobs=true")
     sha = str(info.get("sha", ""))
-    if not COMMIT_RE.match(sha):
+    if not COMMIT_RE.fullmatch(sha):
         raise HubError("the Hub did not return a commit id for this repo")
     suffixes = _scannable_suffixes()
     result: dict = {"sha": sha, "fetched": [], "too_large": [], "refused": []}
@@ -177,10 +177,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--max-file-mb", type=float, default=50,
                         help="skip files bigger than this and say so (default 50)")
     args, scan_flags = parser.parse_known_args(argv)
-    if not REPO_RE.match(args.repo):
+    if not REPO_RE.fullmatch(args.repo):
         print(f"hayward hub: {args.repo!r} is not a repo id like org/name", file=sys.stderr)
         return 2
-    if not REVISION_RE.match(args.revision):
+    if not REVISION_RE.fullmatch(args.revision):
         print(f"hayward hub: {args.revision!r} is not a usable revision (a branch without "
               "slashes, a tag or a commit id)", file=sys.stderr)
         return 2
