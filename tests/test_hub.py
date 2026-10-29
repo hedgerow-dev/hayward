@@ -74,7 +74,7 @@ def test_a_malicious_checkpoint_fails_the_scan(monkeypatch, capsys):
     FakeHub(monkeypatch, {"sub/model.pkl": EVIL})
     code, out, _ = run(["org/name", "--quiet"], capsys)
     assert code == 1
-    assert "sub/model.pkl" in out and "MFV-PICKLE-001" in out
+    assert "sub/model.pkl" in out.replace("\\", "/") and "MFV-PICKLE-001" in out  # Windows prints sub\\model.pkl
 
 
 def test_a_clean_repo_exits_zero(monkeypatch, capsys):
