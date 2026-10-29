@@ -105,6 +105,33 @@ rest. This mirrors how Hayward treats coverage everywhere else; see
 than in true positives, the fix is usually to install the missing extractor or
 fetch the LFS content, not to change the threshold.
 
+## Reference corpus (a regression set, not an accuracy rate)
+
+`corpus/manifest.json` lists 266 public Hub files by repo, pinned commit and
+SHA-256: 258 benign and 8 malicious. **The files are not stored here.** Most of
+the benign repos declare no licence, so the manifest points at them and
+`scripts/fetch_corpus.py` downloads exactly those bytes, deleting any file whose
+hash differs:
+
+```bash
+python scripts/fetch_corpus.py corpus/manifest.json /tmp/corpus
+python scripts/eval_corpus.py /tmp/corpus corpus/manifest.json --threshold high
+```
+
+About 800 MB. Treat the folder as untrusted: it holds deliberate
+proof-of-concept payloads. Nothing is loaded or executed.
+
+What it is and is not:
+
+* **Benign entries** are Hub files whose pickle was disassembled and held no
+  dangerous global. They were picked from files Hayward already called clean, so
+  a clean result on them is a **regression check** (a change that starts
+  flagging them fails), **not a false-positive rate**.
+* **Malicious entries** are 8 files from public proof-of-concept repos that
+  Hayward and the Hub both flag. Again a regression check, not a recall figure.
+* A real false-positive rate needs benign files chosen without looking at
+  Hayward's verdict. This set does not provide one.
+
 ## The blocking decision (maintainer)
 
 **The flagship accuracy figures Hayward has quoted are self-measured against
