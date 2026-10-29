@@ -2,8 +2,10 @@
 
 <!-- mcp-name: io.github.hedgerow-dev/hayward -->
 
-**Security scanner for machine-learning model files.** Know whether a
-checkpoint will run code on your machine, before you load it.
+**Hayward is a static security scanner for machine-learning model files.**
+It scans PyTorch, pickle, joblib, GGUF, SafeTensors, ONNX and Keras files, plus
+Hugging Face `config.json`, and tells you whether loading a checkpoint would run
+code, before you load it.
 
 ![License MIT](https://img.shields.io/badge/license-MIT-013D5A?style=flat-square&labelColor=013D5A)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-013D5A?style=flat-square&labelColor=013D5A)
