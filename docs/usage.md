@@ -75,9 +75,16 @@ to `scan`.
 
 - Files come from one pinned commit, the one the Hub reports for `--revision`
   (default `main`). A file with a Hub hash is checked against it after download.
-- Files over `--max-file-mb` (default 50) are **not fetched**. Each is named on
-  stderr as `NOT SCANNED`: a clean result does not cover them. Big checkpoints
-  are the common case, so raise the cap when you need them.
+- Files over `--max-file-mb` (default 50) are not fetched whole. A **zip
+  checkpoint** (what `torch.save` writes: `.pt`, `.pth`, `.bin`, `.ckpt`) is read
+  by Range request for its pickle member only, which is the part that can run
+  code. The run says so on stderr; the tensor data is not read and the partial
+  read cannot be checked against the Hub's file hash. At most 64 MB is fetched
+  per file and 16 pickle members are read.
+- Anything else over the cap is named on stderr as `NOT SCANNED`, with the
+  reason: an older non-zip checkpoint, a `.safetensors`, `.gguf` or `.onnx`
+  file, a zip that will not parse. A clean result does not cover those files;
+  raise `--max-file-mb` to fetch them whole.
 - A private or gated repo needs `HF_TOKEN` in the environment. It is sent only to
   `huggingface.co`, and not on to the CDN it redirects to.
 - The report names the target `hf://org/name@commit`. The temp folder is deleted.

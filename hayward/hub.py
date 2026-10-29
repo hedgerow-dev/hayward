@@ -6,8 +6,10 @@ into a temp folder, then runs the ordinary ``scan`` on that folder, so every
 ``scan`` flag, report format and exit code works unchanged. Nothing is loaded or
 executed, and the temp folder is deleted afterwards.
 
-A file over the size cap is not fetched and is named on stderr as NOT SCANNED, so a
-clean result is never read as covering it.
+A file over the size cap is not fetched whole. A zip checkpoint (what ``torch.save``
+writes) is instead read by Range request for its pickle member only, which is the part
+that can run code; the tensor data is not read, and the run says so. Anything else over
+the cap is named on stderr as NOT SCANNED, so a clean result is never read as covering it.
 """
 
 from __future__ import annotations
@@ -17,12 +19,15 @@ import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
+import zlib
 from pathlib import Path
 
 from . import __version__
@@ -41,6 +46,16 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 # trust_remote_code, chat templates), so the rest are not worth downloading.
 CONFIG_NAMES = frozenset({"config.json", "tokenizer_config.json"})
 
+# Range reads: only the zip checkpoints torch.save writes.
+RANGE_SUFFIXES = frozenset({".pt", ".pth", ".bin", ".ckpt", ".ptl", ".th"})
+RANGE_BUDGET = 64 * 1024 * 1024  # bytes fetched, and bytes of pickle held, per file
+ZIP_MAGIC = b"PK\x03\x04"
+PICKLE_MEMBER_SUFFIXES = (".pkl", ".pickle")
+MAX_PICKLE_MEMBERS = 16  # torch.save writes one; each member costs a few requests
+# What a malformed zip can raise while it is parsed or read.
+ZIP_ERRORS = (zipfile.BadZipFile, ValueError, EOFError, RuntimeError, NotImplementedError,
+              struct.error, zlib.error)
+
 
 class HubError(Exception):
     """Something went wrong talking to the Hub; reported as exit code 2."""
@@ -48,6 +63,10 @@ class HubError(Exception):
 
 class TooLarge(Exception):
     """A download passed the per-file cap."""
+
+
+class RangeSkip(Exception):
+    """A big file could not be read by range; the message says why, in plain words."""
 
 
 def _request(url: str) -> urllib.request.Request:
@@ -67,10 +86,14 @@ def _request(url: str) -> urllib.request.Request:
     return req
 
 
-def _open(url: str):
+def _open(url: str, byte_range: tuple[int, int] | None = None):
     for attempt in range(RETRIES_429 + 1):
+        req = _request(url)
+        if byte_range is not None:
+            # A plain header, so it follows the redirect to the CDN; the token does not.
+            req.add_header("Range", f"bytes={byte_range[0]}-{byte_range[1]}")
         try:
-            return urllib.request.urlopen(_request(url), timeout=TIMEOUT_SECONDS)  # noqa: S310 - https Hub host checked in _request
+            return urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS)  # noqa: S310 - https Hub host checked in _request
         except urllib.error.HTTPError as exc:
             if exc.code != 429 or attempt == RETRIES_429:
                 raise
@@ -95,6 +118,100 @@ def _download(url: str, dest: Path, max_bytes: int) -> None:
             if written > max_bytes:
                 raise TooLarge(written)
             out.write(block)
+
+
+def _fetch_range(url: str, start: int, stop: int, size: int) -> bytes:
+    """Bytes ``start`` to ``stop`` (exclusive) of a ``size``-byte file, or RangeSkip.
+
+    Only the exact range asked for is accepted: a 206 whose Content-Range names those
+    bytes of a file of that size, over https. Anything else could be a whole file, or
+    a different file, handed back as if it were the slice.
+    """
+    try:
+        with _open(url, (start, stop - 1)) as resp:
+            if not resp.geturl().startswith("https://"):
+                raise RangeSkip("the download was redirected off https")
+            if resp.status != 206:
+                raise RangeSkip("the server does not support range requests for this file")
+            if resp.headers.get("Content-Range") != f"bytes {start}-{stop - 1}/{size}":
+                raise RangeSkip("the server returned a different range than the one asked for")
+            data = resp.read(stop - start + 1)
+    except (OSError, urllib.error.URLError) as exc:
+        raise RangeSkip(f"the range request failed ({type(exc).__name__})") from None
+    if len(data) != stop - start:
+        raise RangeSkip("the server returned a short range")
+    return data
+
+
+class RangeFile:
+    """A read-only, seekable view of a remote file, enough for ``zipfile``.
+
+    Every byte requested counts against ``budget``, checked before the request is sent.
+    """
+
+    def __init__(self, url: str, size: int, budget: int):
+        self.url, self.size, self.budget = url, size, budget
+        self.pos = 0
+        self.fetched = 0
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.pos
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        base = {os.SEEK_SET: 0, os.SEEK_CUR: self.pos, os.SEEK_END: self.size}[whence]
+        if base + offset < 0:
+            raise OSError("seek before the start of the file")
+        self.pos = base + offset
+        return self.pos
+
+    def read(self, n: int = -1) -> bytes:
+        stop = self.size if n is None or n < 0 else min(self.pos + n, self.size)
+        if stop <= self.pos:
+            return b""
+        if stop - self.pos > self.budget - self.fetched:
+            raise RangeSkip("the pickle is bigger than the range-read budget")
+        data = _fetch_range(self.url, self.pos, stop, self.size)
+        self.fetched += len(data)
+        self.pos = stop
+        return data
+
+
+def _range_scan_zip(url: str, size: int, dest: Path) -> list[str]:
+    """Rebuild a big zip checkpoint at ``dest`` holding only its pickle members.
+
+    Returns the member names. Raises RangeSkip for anything that is not a plain zip
+    checkpoint, or that goes over the budget; the caller reports the file as NOT SCANNED.
+    """
+    remote = RangeFile(url, size, RANGE_BUDGET)
+    # torch.load treats a file that does not open with the zip magic as the legacy
+    # layout (a tar or a bare pickle), even when a zip sits at its end.
+    if remote.read(4) != ZIP_MAGIC:
+        raise RangeSkip("it is not a zip checkpoint (an older layout), so only a full read could scan it")
+    try:
+        with zipfile.ZipFile(remote) as zf, zipfile.ZipFile(dest, "w") as out:
+            members = [i for i in zf.infolist() if i.filename.endswith(PICKLE_MEMBER_SUFFIXES)]
+            if not members:
+                raise RangeSkip("it has no pickle member to read")
+            if len(members) > MAX_PICKLE_MEMBERS:
+                raise RangeSkip(f"it has more than {MAX_PICKLE_MEMBERS} pickle members")
+            if any(not _safe_relative(i.filename) for i in members):
+                raise RangeSkip("a pickle member name is not a plain relative path")
+            if sum(i.compress_size for i in members) > RANGE_BUDGET - remote.fetched:
+                raise RangeSkip("the pickle is bigger than the range-read budget")
+            held = 0  # decompressed bytes kept, capped by the same budget
+            for info in members:
+                with zf.open(info) as member:
+                    data = member.read(RANGE_BUDGET - held + 1)
+                held += len(data)
+                if held > RANGE_BUDGET:
+                    raise RangeSkip("the pickle is bigger than the range-read budget")
+                out.writestr(info.filename, data)
+    except ZIP_ERRORS:
+        raise RangeSkip("its zip structure could not be read") from None
+    return [i.filename for i in members]
 
 
 def _scannable_suffixes() -> frozenset[str]:
@@ -125,8 +242,10 @@ def _sha256(path: Path) -> str:
 def fetch(repo: str, revision: str, dest: Path, max_bytes: int) -> dict:
     """Download a repo's scannable files into ``dest``.
 
-    Returns ``{"sha", "fetched", "too_large", "refused"}``. Every file comes from the
-    commit the API reported, so a push during the scan cannot swap one in.
+    Returns ``{"sha", "fetched", "partial", "too_large", "refused"}``. ``partial`` holds big
+    zip checkpoints of which only the pickle member was read; ``too_large`` holds
+    ``(name, size, reason)`` for files not scanned at all. Every file comes from the commit
+    the API reported, so a push during the scan cannot swap one in.
     """
     quoted = urllib.parse.quote(repo, safe="/")
     info = _api_get(f"{HUB}/api/models/{quoted}/revision/{urllib.parse.quote(revision)}?blobs=true")
@@ -134,7 +253,7 @@ def fetch(repo: str, revision: str, dest: Path, max_bytes: int) -> dict:
     if not COMMIT_RE.fullmatch(sha):
         raise HubError("the Hub did not return a commit id for this repo")
     suffixes = _scannable_suffixes()
-    result: dict = {"sha": sha, "fetched": [], "too_large": [], "refused": []}
+    result: dict = {"sha": sha, "fetched": [], "partial": [], "too_large": [], "refused": []}
     root = dest.resolve()
     for sibling in info.get("siblings", []):
         name = str(sibling.get("rfilename", ""))
@@ -144,20 +263,29 @@ def fetch(repo: str, revision: str, dest: Path, max_bytes: int) -> dict:
             result["refused"].append(name)
             continue
         size = sibling.get("size")
-        if isinstance(size, int) and size > max_bytes:
-            result["too_large"].append((name, size))
-            continue
         target = (root / name).resolve()
         if root not in target.parents:
             result["refused"].append(name)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         url = f"{HUB}/{quoted}/resolve/{sha}/{urllib.parse.quote(name)}"
+        if isinstance(size, int) and size > max_bytes:
+            reason = "over the cap"
+            if Path(name).suffix.lower() in RANGE_SUFFIXES:
+                try:
+                    members = _range_scan_zip(url, size, target)
+                    result["partial"].append((name, size, members))
+                    continue
+                except RangeSkip as exc:
+                    target.unlink(missing_ok=True)
+                    reason = f"over the cap; {exc}"
+            result["too_large"].append((name, size, reason))
+            continue
         try:
             _download(url, target, max_bytes)
         except TooLarge as exc:
             target.unlink(missing_ok=True)
-            result["too_large"].append((name, exc.args[0]))
+            result["too_large"].append((name, exc.args[0], "over the cap"))
             continue
         expected = (sibling.get("lfs") or {}).get("sha256")
         if expected and _sha256(target) != expected:
@@ -197,9 +325,13 @@ def main(argv: list[str]) -> int:
         for name in got["refused"]:
             print(f"hayward hub: refusing the file name {name!r}", file=sys.stderr)
         code = scan_main(["scan", tmp, *scan_flags], label=f"hf://{args.repo}@{got['sha'][:12]}")
-    for name, size in got["too_large"]:
-        print(f"hayward hub: NOT SCANNED (over the cap, {size / 1_000_000:.0f} MB): {name}", file=sys.stderr)
+    if got["partial"]:
+        names = ", ".join(name for name, _, _ in got["partial"])
+        print(f"hayward hub: read only the pickle member of {len(got['partial'])} big checkpoint(s), "
+              f"not the tensor data: {names}", file=sys.stderr)
+    for name, size, reason in got["too_large"]:
+        print(f"hayward hub: NOT SCANNED ({size / 1_000_000:.0f} MB, {reason}): {name}", file=sys.stderr)
     if got["too_large"]:
-        print("hayward hub: a clean result does not cover those files; raise --max-file-mb to fetch them",
+        print("hayward hub: a clean result does not cover those files; raise --max-file-mb to fetch them whole",
               file=sys.stderr)
     return code
