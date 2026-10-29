@@ -2728,17 +2728,6 @@
   "basis": "pickle disassembled, no dangerous global; see docs/accuracy-harness.md"
  },
  {
-  "path": "wulonchia__modelscan-pickle-bypass-poc/malicious_model.joblib",
-  "expected": "benign",
-  "repo": "wulonchia/modelscan-pickle-bypass-poc",
-  "revision": "6ebcb39fec0bb8652fd930fc1d257cf7bef06afa",
-  "hub_path": "malicious_model.joblib",
-  "sha256": "63cd631a0b70bf7344e0fcb3763933c8f572a3568d22d180d911f82dc1d4a073",
-  "size": 83,
-  "license": "mit",
-  "basis": "pickle disassembled, no dangerous global; see docs/accuracy-harness.md"
- },
- {
   "path": "wz7475__qwen2.5-7b-instruct-katcher-legal-lwf-wildchat-kw1-smoke/checkpoint-5__rng_state.pth",
   "expected": "benign",
   "repo": "wz7475/qwen2.5-7b-instruct-katcher-legal-lwf-wildchat-kw1-smoke",
@@ -2913,6 +2902,17 @@
   "size": 65,
   "license": "mit",
   "basis": "deliberate proof-of-concept repo; flagged by Hayward and the Hub"
+ },
+ {
+  "path": "wulonchia__modelscan-pickle-bypass-poc/malicious_model.joblib",
+  "expected": "malicious",
+  "repo": "wulonchia/modelscan-pickle-bypass-poc",
+  "revision": "6ebcb39fec0bb8652fd930fc1d257cf7bef06afa",
+  "hub_path": "malicious_model.joblib",
+  "sha256": "63cd631a0b70bf7344e0fcb3763933c8f572a3568d22d180d911f82dc1d4a073",
+  "size": 83,
+  "license": "mit",
+  "basis": "deliberate proof-of-concept repo; calls distutils.spawn.spawn. Was labelled benign by mistake: Hayward 1.4.3 rated it INFO and the review that built this list missed it"
  },
  {
   "path": "wulonchia__modelscan-pickle-bypass-poc/timeit_bypass.joblib",
