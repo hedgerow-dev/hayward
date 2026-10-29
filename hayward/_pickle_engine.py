@@ -2070,6 +2070,23 @@ def _embedded_pickle_denied_globals(data: bytes, depth: int = 0) -> list[str]:
     return sorted(set(found))
 
 
+def _codecs_encode_as_bytes(call: PickleResolvedCall) -> tuple:
+    """`_codecs.encode(text, 'latin1')` is how a protocol-2 pickle spells a bytes
+    literal. The text is the bytes decoded as latin-1, so for binary data it is
+    random characters, and the command-shape checks below match those by
+    chance (a backtick, a `;` beside a space). Hand back the real bytes, so
+    `_pickle_arg_text` applies the same printable-ASCII gate it applies to
+    every other bytes argument: binary is skipped, readable command text is not."""
+    args = call.args
+    if (call.ref == "_codecs.encode" and len(args) == 2 and isinstance(args[0], str)
+            and args[1] in ("latin1", "latin-1")):
+        try:
+            return (args[0].encode("latin1"), args[1])
+        except UnicodeEncodeError:
+            pass
+    return args
+
+
 def _triage_unknown_pickle_call(
     call: PickleResolvedCall | None,
 ) -> tuple[Severity, str] | None:
@@ -2105,7 +2122,7 @@ def _triage_unknown_pickle_call(
         texts = list(call.partial_texts)
         arguments: Any = ()
     else:
-        arguments = (call.args, call.kwargs or {})
+        arguments = (_codecs_encode_as_bytes(call), call.kwargs or {})
         texts = [
             text
             for text in (_pickle_arg_text(v) for v in _iter_pickle_arg_values(arguments))
