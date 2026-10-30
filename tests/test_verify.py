@@ -232,3 +232,12 @@ def test_a_covered_file_you_did_not_download_is_fine(service, tmp_path, capsys):
         (snap / name).unlink()  # downloaded only the weights
     assert cli.main(["verify", "org/name", str(snap)]) == 0
     assert "not downloaded" in capsys.readouterr().out
+
+
+def test_remote_code_is_shown_and_needs_allow_gaps(service, capsys):
+    files = dict(FILES, **{"config.json": {"verdict": "remote_code", "rules": ["MFV-HF-002"], "coverage_gaps": []}})
+    service["publish"](statement(files), SIBLINGS)
+    assert cli.main(["verify", "org/name"]) == 1
+    out = capsys.readouterr().out
+    assert "remote_code" in out and "runs code" in out
+    assert cli.main(["verify", "org/name", "--allow-gaps"]) == 0

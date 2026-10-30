@@ -33,6 +33,14 @@ within a major version.
 - `hayward verify` with a directory counts gaps only among the files you
   downloaded.
 
+### Changed
+
+- A file whose only detection is `MFV-HF-002` (it makes transformers import
+  the repo's own Python) gets the verdict `remote_code` instead of `flagged`.
+  Many legitimate models work this way; the code is still not vouched for, and
+  `hayward verify` treats it as a gap. Severity and the `--fail-on` gate are
+  unchanged.
+
 ### Fixed
 
 - `hayward hub --receipt` recorded a big checkpoint read in part under the hash

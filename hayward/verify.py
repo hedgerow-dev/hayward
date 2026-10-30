@@ -218,6 +218,8 @@ def _run(args: argparse.Namespace) -> int:
         print(f"  note: that is older than this hayward ({__version__}); detections added since were not run")
     for name, entry in sorted(files.items()):
         note = f" ({entry['read']} read)" if entry.get("read") else ""
+        if entry.get("verdict") == "remote_code":
+            note += " (runs code from the repo with trust_remote_code; not vouched for)"
         print(f"  {entry.get('verdict', '?'):<13} {name}{note}")
     for name in uncovered:
         kind = "not covered, CODE" if name.lower().endswith(".py") else "not covered"
@@ -230,7 +232,7 @@ def _run(args: argparse.Namespace) -> int:
         print(f"  problem: {problem}")
 
     verdicts = [entry.get("verdict") for name, entry in files.items() if name in in_scope]
-    gaps = verdicts.count("not_verified") + len(uncovered)
+    gaps = verdicts.count("not_verified") + verdicts.count("remote_code") + len(uncovered)
     if problems or "flagged" in verdicts:
         print(f"{args.repo}: does NOT match its published verdict")
         return 1

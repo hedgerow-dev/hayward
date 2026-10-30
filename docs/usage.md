@@ -211,7 +211,8 @@ check it. A verdict that covers no files is not a pass.
   or may have been held back: the service never publishes a flagged repo, so
   "nothing published" and "flagged" look the same. Exit code 1.
 - **Gaps fail.** A verdict means "vouched for", so a file that was not fully
-  checked (`not_verified`) or not covered fails the command. `--allow-gaps`
+  checked (`not_verified`), one that runs the repo's own code (`remote_code`),
+  or one not covered fails the command. `--allow-gaps`
   accepts them, still listed. This is the opposite of `scan`, on purpose.
 - Big SafeTensors files are checked by their header and shown as `(header read)`.
 - `--service`, `--identity`, `--issuer` and `--trigger` point it at a
@@ -289,9 +290,11 @@ window is byte-identical to one written from the command line.
 [coverage](coverage.md).
 
 `verdicts` gives each file with findings one verdict, separate from severity:
-`flagged` (a detection at LOW or above), `not_verified` (only coverage gaps,
-so the file was not fully read) or `clean` (only INFO notes). A detection wins
-over a coverage gap. A file with no findings is clean and is not listed. In
+`flagged` (a detection at LOW or above), `remote_code` (the file makes the
+loader import the repo's own Python, `MFV-HF-002`: how many legitimate models
+work, but code nobody vouched for), `not_verified` (only coverage gaps, so the
+file was not fully read) or `clean` (only INFO notes). A detection wins over
+remote code, and both win over a coverage gap. A file with no findings is clean and is not listed. In
 SARIF output each result carries its file's verdict as `properties.verdict`.
 
 ## Continuous integration
