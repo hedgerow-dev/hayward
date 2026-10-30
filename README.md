@@ -12,6 +12,7 @@ code, before you load it.
 ![Rules 47](https://img.shields.io/badge/rules-47-013D5A?style=flat-square&labelColor=013D5A)
 ![Dependencies 1](https://img.shields.io/badge/dependencies-1-708C69?style=flat-square&labelColor=013D5A)
 ![Scan makes no outbound calls](https://img.shields.io/badge/scan_outbound_calls-none-F4A25B?style=flat-square&labelColor=013D5A)
+[![GitHub Marketplace](https://img.shields.io/badge/marketplace-hayward_model_scan-013D5A?style=flat-square&labelColor=013D5A&logo=github)](https://github.com/marketplace/actions/hayward-model-scan)
 
 ```bash
 pip install hayward
@@ -135,7 +136,8 @@ scanning:
     fail-on: high
 ```
 
-See the [GitHub Action guide](docs/github-action.md).
+See the [GitHub Action guide](docs/github-action.md), or the
+[listing on GitHub Marketplace](https://github.com/marketplace/actions/hayward-model-scan).
 
 ## What a clean result means
 
