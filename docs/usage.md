@@ -349,7 +349,8 @@ hayward.guard.install(remote_code=["my_model"])  # a local model folder, by its 
 Naming a repo allows its code at any revision, so pin `revision=` as well, or
 check the snapshot with `hayward lock --verify`. Like other findings, it
 follows `fail_on` and `mode`: it is HIGH, so `fail_on="critical"` lets it run
-and warn mode warns.
+and warn mode warns. Strict mode refuses it whatever `fail_on` is. A one-part
+name such as `my_model` matches a local folder of that name wherever it is.
 
 ### Default mode raises the bar; it is not a sandbox
 
@@ -395,7 +396,8 @@ name-shape rule for scikit-learn and SciPy.
   scan still runs, the load-time check does not.
 - In default mode, work a pickle hands to another thread.
 - Remote code that is not run by transformers from its `transformers_modules`
-  cache, such as diffusers' custom pipelines.
+  cache, such as diffusers' custom pipelines, and remote code transformers
+  already imported before the guard was installed.
 - A stream that cannot seek is not scanned first; the load-time check still
   applies. A file the scan could not fully read (a coverage finding,
   `MFV-SKIP-*`) warns and loads, with the load-time check still on.

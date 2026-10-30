@@ -81,8 +81,9 @@ _max_size: int | None = None  # None keeps the scanner's own 500MB cap
 _prescan = True
 _strict = False
 # In strict mode these are refused whatever `fail_on` says: each reports a
-# global that is not on the known-safe list.
-_STRICT_RULES = frozenset({"MFV-PICKLE-001", "MFV-PICKLE-004", "MFV-PICKLE-005"})
+# global that is not on the known-safe list, or remote code from a repo that
+# install(remote_code=...) does not name.
+_STRICT_RULES = frozenset({"MFV-PICKLE-001", "MFV-PICKLE-004", "MFV-PICKLE-005", "MFV-HF-002"})
 # Repos (org/name) and local folder names whose remote code may run, each as
 # the tuple of path parts transformers files it under, see _module_parts.
 _remote_code: frozenset[tuple[str, ...]] = frozenset()
@@ -317,7 +318,8 @@ def _check_remote_code(code) -> None:
         return
     if not code.co_names:
         return  # the empty package __init__.py files transformers writes
-    folders = parts[len(parts) - 1 - parts[::-1].index("transformers_modules") + 1:-1]
+    last = max(i for i, part in enumerate(parts[:-1]) if part == "transformers_modules")
+    folders = parts[last + 1:-1]
     # The last folder is the commit or content hash; what precedes it names the repo.
     if folders[:-1] in _remote_code:
         return
@@ -497,6 +499,8 @@ def install(
         raise ValueError("max_size must be a positive byte count")
     if isinstance(remote_code, str):
         raise ValueError("remote_code must be a list of repo ids, not one string")
+    if any(not name.strip("/") for name in remote_code):
+        raise ValueError("remote_code entries must be repo ids or folder names, not empty")
     uninstall()
     _limit, _mode, _max_size, _prescan = _THRESHOLDS[fail_on], mode, max_size, prescan
     _strict = bool(strict)

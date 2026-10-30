@@ -1186,6 +1186,15 @@ class TestRemoteCode:
         with pytest.raises(ValueError):
             guard.install(remote_code="org/repo")
 
+    def test_an_empty_name_is_rejected(self):
+        with pytest.raises(ValueError):
+            guard.install(remote_code=["/"])
+
+    def test_strict_mode_refuses_whatever_fail_on_is(self, tmp_path):
+        guard.install(strict=True, fail_on="never")
+        with pytest.raises(guard.UnsafeModelError):
+            _run_remote_module(tmp_path, ["org", "repo", "abc123"])
+
     def test_allowing_one_repo_does_not_allow_another(self, tmp_path):
         guard.install(remote_code=["org/repo"])
         with pytest.raises(guard.UnsafeModelError):
