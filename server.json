@@ -6,12 +6,12 @@
     "url": "https://github.com/hedgerow-dev/hayward",
     "source": "github"
   },
-  "version": "1.5.0",
+  "version": "1.6.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "hayward",
-      "version": "1.5.0",
+      "version": "1.6.0",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
