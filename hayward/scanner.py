@@ -75,7 +75,6 @@ from hayward._gguf import _GGUF_JINJA_BLOCK_RE as _GGUF_JINJA_BLOCK_RE
 from hayward._gguf import _GGUF_JINJA_STRING_RE as _GGUF_JINJA_STRING_RE
 from hayward._gguf import _GGUF_MAX_DIMS as _GGUF_MAX_DIMS
 from hayward._gguf import _GGUF_MAX_KEY_BYTES as _GGUF_MAX_KEY_BYTES
-from hayward._gguf import _GGUF_MAX_PLAUSIBLE_TYPE as _GGUF_MAX_PLAUSIBLE_TYPE
 from hayward._gguf import _GGUF_TYPE_ARRAY as _GGUF_TYPE_ARRAY
 from hayward._gguf import _GGUF_TYPE_STRING as _GGUF_TYPE_STRING
 from hayward._gguf import _U64 as _U64
@@ -2132,7 +2131,10 @@ class ModelFileScanner:
 
         hits: list[str] = []
         for key, value in kv.items():
-            if key in _GGUF_FREETEXT_KEYS:
+            # An architecture can keep its vocabulary under its own prefix
+            # (`<arch>.tokenizer.tokens`); it is the same data as tokenizer.ggml.tokens.
+            parts = key.split(".")
+            if key in _GGUF_FREETEXT_KEYS or (parts[-2:-1] == ["tokenizer"] and parts[-1] in ("tokens", "merges")):
                 continue
             values = value if isinstance(value, list) else [value]
             for v in values:

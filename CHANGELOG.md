@@ -4,6 +4,18 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- Four kinds of legitimate GGUF file no longer raise a false alarm, found by
+  scanning a sample of popular Hub GGUF repos. `MFV-GGUF-005` accepts tensors
+  with 0 to 8 dimensions (ComfyUI-GGUF video VAEs use 5, a scalar has 0) and
+  tensor type ids from forks' own quantisations. The u64 wrap and overrun
+  checks still run on every tensor. `MFV-GGUF-002` treats a vocabulary kept
+  under an architecture's own prefix (`<arch>.tokenizer.tokens`) as data, like
+  `tokenizer.ggml.tokens`.
+
 ## 1.7.0 (2026-10-30)
 
 ### Added

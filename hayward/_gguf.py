@@ -193,8 +193,10 @@ _GGML_TYPE_TRAITS: dict[int, tuple[int, int]] = {
     39: (256, 82),  # IQ2_M
 }
 
-_GGUF_MAX_DIMS = 4          # GGML_MAX_DIMS
-_GGUF_MAX_PLAUSIBLE_TYPE = 64
+# GGML_MAX_DIMS is 4, but real files go past it: ComfyUI-GGUF stores 5-dimension
+# video VAE tensors, and a scalar has 0. llama.cpp refuses those cleanly, so they
+# are not exploits. The cap only bounds the read; the wrap checks cover each dim.
+_GGUF_MAX_DIMS = 8
 _GGUF_MAX_KEY_BYTES = 1 << 20
 _U64 = 1 << 64
 
@@ -310,8 +312,8 @@ def _check_gguf_layout(data: bytes) -> list[str]:
             offset += 8 + name_len
             (n_dims,) = struct.unpack_from("<I", data, offset)
             offset += 4
-            if n_dims < 1 or n_dims > _GGUF_MAX_DIMS:
-                problems.append(f"tensor {i} has {n_dims} dimensions (GGML_MAX_DIMS is 4)")
+            if n_dims > _GGUF_MAX_DIMS:
+                problems.append(f"tensor {i} has {n_dims} dimensions (no real tensor has over {_GGUF_MAX_DIMS})")
                 return problems
             if offset + 8 * n_dims + 12 > file_size:
                 problems.append(f"tensor info {i} extends past end of file")
@@ -322,9 +324,6 @@ def _check_gguf_layout(data: bytes) -> list[str]:
             offset += 4
             (tensor_offset,) = struct.unpack_from("<Q", data, offset)
             offset += 8
-            if type_id >= _GGUF_MAX_PLAUSIBLE_TYPE:
-                problems.append(f"tensor {i} has implausible ggml type id {type_id}")
-                continue
             elements = 1
             wrapped = False
             for dim in dims:
@@ -339,7 +338,7 @@ def _check_gguf_layout(data: bytes) -> list[str]:
             if traits is None or wrapped:
                 continue
             block, type_size = traits
-            nbytes = (dims[0] // block) * type_size if block > 1 else elements * type_size
+            nbytes = (dims[0] // block) * type_size if block > 1 and dims else elements * type_size
             if block > 1:
                 for dim in dims[1:]:
                     nbytes *= dim
