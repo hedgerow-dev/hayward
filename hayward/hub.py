@@ -8,8 +8,10 @@ executed, and the temp folder is deleted afterwards.
 
 A file over the size cap is not fetched whole. A zip checkpoint (what ``torch.save``
 writes) is instead read by Range request for its pickle member only, which is the part
-that can run code; the tensor data is not read, and the run says so. Anything else over
-the cap is named on stderr as NOT SCANNED, so a clean result is never read as covering it.
+that can run code, and a SafeTensors file for its header, which is everything a loader
+acts on; the tensor data is not read, and the run says so. Anything else over the cap is
+named on stderr as NOT SCANNED, so a clean result is never read as covering it. With
+``--receipt``, a file read in part is recorded under the Hub's own SHA-256 for it.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ REPO_RE = re.compile(r"\w[\w.-]{0,95}/\w[\w.-]{0,95}", re.ASCII)
 # A branch, tag or commit. No slash, so it cannot change the shape of the URL.
 REVISION_RE = re.compile(r"\w[\w.-]{0,99}", re.ASCII)
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # Of the .json files only these carry something the scanner reads (auto_map,
 # trust_remote_code, chat templates), so the rest are not worth downloading.
 CONFIG_NAMES = frozenset({"config.json", "tokenizer_config.json"})
@@ -214,6 +217,24 @@ def _range_scan_zip(url: str, size: int, dest: Path) -> list[str]:
     return [i.filename for i in members]
 
 
+def _range_safetensors_header(url: str, size: int, dest: Path) -> None:
+    """Write ``dest`` as a sparse file of ``size`` bytes holding only the header.
+
+    The scanner reads a big SafeTensors file by its header and checks the header's
+    offsets against the file size, so the length must be the real one; the tensor
+    bytes are never fetched. A declared header the file cannot hold is written as is,
+    for the scanner to report.
+    """
+    head = _fetch_range(url, 0, 8, size)
+    declared = struct.unpack("<Q", head)[0]
+    if declared > RANGE_BUDGET and 8 + declared <= size:
+        raise RangeSkip("its header is bigger than the range-read budget")
+    body = _fetch_range(url, 8, 8 + declared, size) if 0 < declared and 8 + declared <= size else b""
+    with dest.open("wb") as out:
+        out.write(head + body)
+        out.truncate(size)
+
+
 def _scannable_suffixes() -> frozenset[str]:
     scanner = ModelFileScanner()
     return frozenset((*scanner._format_map, *scanner._AMBIGUOUS_EXTENSIONS))
@@ -243,8 +264,9 @@ def _sha256(path: Path) -> str:
 def fetch(repo: str, revision: str, dest: Path, max_bytes: int) -> dict:
     """Download a repo's scannable files into ``dest``.
 
-    Returns ``{"sha", "fetched", "partial", "too_large", "refused"}``. ``partial`` holds big
-    zip checkpoints of which only the pickle member was read; ``too_large`` holds
+    Returns ``{"sha", "fetched", "partial", "too_large", "refused"}``. ``partial`` holds
+    ``(name, size, what was read, the Hub's sha256 or None)`` for big zip checkpoints read
+    by their pickle members and big SafeTensors files read by their header; ``too_large`` holds
     ``(name, size, reason)`` for files not scanned at all. Every file comes from the commit
     the API reported, so a push during the scan cannot swap one in.
     """
@@ -272,14 +294,20 @@ def fetch(repo: str, revision: str, dest: Path, max_bytes: int) -> dict:
         url = f"{HUB}/{quoted}/resolve/{sha}/{urllib.parse.quote(name)}"
         if isinstance(size, int) and size > max_bytes:
             reason = "over the cap"
-            if Path(name).suffix.lower() in RANGE_SUFFIXES:
-                try:
-                    members = _range_scan_zip(url, size, target)
-                    result["partial"].append((name, size, members))
+            suffix = Path(name).suffix.lower()
+            hub_sha = (sibling.get("lfs") or {}).get("sha256")
+            try:
+                if suffix in RANGE_SUFFIXES:
+                    _range_scan_zip(url, size, target)
+                    result["partial"].append((name, size, "pickle members", hub_sha))
                     continue
-                except RangeSkip as exc:
-                    target.unlink(missing_ok=True)
-                    reason = f"over the cap; {exc}"
+                if suffix == ".safetensors":
+                    _range_safetensors_header(url, size, target)
+                    result["partial"].append((name, size, "header", hub_sha))
+                    continue
+            except RangeSkip as exc:
+                target.unlink(missing_ok=True)
+                reason = f"over the cap; {exc}"
             result["too_large"].append((name, size, reason))
             continue
         try:
@@ -325,14 +353,62 @@ def main(argv: list[str]) -> int:
                   file=sys.stderr)
         for name in got["refused"]:
             print(f"hayward hub: refusing the file name {name!r}", file=sys.stderr)
+        # A file read in part is on disk at its real size, so the scan must treat it as
+        # over its cap and read it the same partial way, whatever the default cap is.
+        if not any(flag == "--max-size" or flag.startswith("--max-size=") for flag in scan_flags):
+            scan_flags = [*scan_flags, "--max-size", str(int(args.max_file_mb * 1024 * 1024))]
+        # Only a receipt this scan writes is rewritten below, never an older file.
+        receipt_path = _receipt_path(scan_flags)
+        if receipt_path is not None:
+            receipt_path.unlink(missing_ok=True)
         code = scan_main(["scan", tmp, *scan_flags], label=f"hf://{args.repo}@{got['sha'][:12]}")
-    if got["partial"]:
-        names = ", ".join(name for name, _, _ in got["partial"])
-        print(f"hayward hub: read only the pickle member of {len(got['partial'])} big checkpoint(s), "
-              f"not the tensor data: {names}", file=sys.stderr)
+    if receipt_path is not None and receipt_path.is_file() and got["partial"]:
+        _use_hub_hashes(receipt_path, got["partial"])
+    for read in ("pickle members", "header"):
+        names = [name for name, _, what, _ in got["partial"] if what == read]
+        if names:
+            print(f"hayward hub: read only the {read} of {len(names)} big file(s), "
+                  f"not the tensor data: {', '.join(names)}", file=sys.stderr)
     for name, size, reason in got["too_large"]:
         print(f"hayward hub: NOT SCANNED ({size / 1_000_000:.0f} MB, {reason}): {name}", file=sys.stderr)
     if got["too_large"]:
         print("hayward hub: a clean result does not cover those files; raise --max-file-mb to fetch them whole",
               file=sys.stderr)
     return code
+
+
+def _receipt_path(scan_flags: list[str]) -> Path | None:
+    """The receipt path the scan will write, the last one given, as argparse takes it."""
+    found = None
+    for i, flag in enumerate(scan_flags):
+        if flag == "--receipt" and i + 1 < len(scan_flags):
+            found = Path(scan_flags[i + 1])
+        elif flag.startswith("--receipt="):
+            found = Path(flag.split("=", 1)[1])
+    return found
+
+
+def _use_hub_hashes(path: Path, partial: list[tuple[str, int, str, str | None]]) -> None:
+    """Record each file read in part under the Hub's sha256, since the local copy is not the file.
+
+    A file with no Hub sha256 is left out of the receipt, which cannot name its bytes.
+    """
+    statement = json.loads(path.read_text(encoding="utf-8"))
+    files = statement["predicate"]["files"]
+    by_name = {name: (read, sha) for name, _, read, sha in partial}
+    subjects = []
+    for subject in statement["subject"]:
+        name = subject["name"]
+        if name not in by_name or name not in files:
+            subjects.append(subject)
+            continue
+        read, sha = by_name[name]
+        if not (isinstance(sha, str) and SHA256_RE.fullmatch(sha)):
+            files.pop(name, None)
+            print(f"hayward hub: left out of the receipt (the Hub gave no usable sha256 for it): {name}",
+                  file=sys.stderr)
+            continue
+        subjects.append({"name": name, "digest": {"sha256": sha}})
+        files[name].update(read=read, hash_source="hub")
+    statement["subject"] = subjects
+    path.write_text(json.dumps(statement, indent=1) + "\n", encoding="utf-8")

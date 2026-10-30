@@ -4,6 +4,24 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- A SafeTensors file over the 500 MB scan cap is checked by its header (dtypes,
+  shapes, offsets, metadata: everything a loader acts on) instead of reported
+  as never scanned (`MFV-SKIP-001`). Most real models are multi-GB SafeTensors
+  files. Its tensor bytes are not searched for embedded binaries.
+- `hayward hub` reads a big `.safetensors` file's header by Range request, so a
+  15 GB model is checked in seconds instead of being NOT SCANNED.
+
+### Fixed
+
+- `hayward hub --receipt` recorded a big checkpoint read in part under the hash
+  of the partial local copy, so the receipt could never verify against the real
+  file. A file read in part is now recorded under the Hub's own SHA-256, marked
+  `read` and `hash_source: hub`, or left out when the Hub gives no hash.
+
 ## 1.10.0 (2026-10-30)
 
 ### Added

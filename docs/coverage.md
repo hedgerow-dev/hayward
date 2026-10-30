@@ -62,7 +62,10 @@ Stated rather than hidden, current as of version 1.1.0.
 **Files over 500 MB** are read only when the format allows it without loading
 the whole file into memory. ZIP containers are streamed member by member, and
 HDF5 is streamed to its `model_config` attribute, so oversized PyTorch and
-Keras models are both scanned. Anything else over the cap reports
+Keras models are both scanned. An oversized SafeTensors file is checked by its
+header, which holds everything a loader acts on (dtypes, shapes, offsets and
+metadata); its tensor bytes are not searched for embedded binaries. Anything
+else over the cap reports
 `MFV-SKIP-001`, including a named file whose extension is not recognised:
 padding a payload past the cap and renaming it is an evasion, so the gap is
 reported rather than passed over.
