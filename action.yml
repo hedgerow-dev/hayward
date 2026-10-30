@@ -23,6 +23,13 @@ inputs:
       Also fail when a file could not be fully read. Set to "true" to enable.
     required: false
     default: "false"
+  lock:
+    description: >-
+      Optional path to a hayward lock file (made with `hayward lock`, hayward
+      1.5.0 or later). When set, the scanned path must match it exactly: a
+      missing, changed or extra file fails the build before the scan runs.
+    required: false
+    default: ""
   output:
     description: Path for the SARIF report.
     required: false
@@ -64,6 +71,14 @@ runs:
         else
           python -m pip install hayward
         fi
+
+    - name: Verify against the lock
+      if: ${{ inputs.lock != '' }}
+      shell: bash
+      env:
+        LOCK_FILE: ${{ inputs.lock }}
+        SCAN_PATH: ${{ inputs.path }}
+      run: hayward lock --verify "$LOCK_FILE" "$SCAN_PATH"
 
     - name: Run scan
       shell: bash
