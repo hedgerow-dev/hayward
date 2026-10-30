@@ -20,7 +20,7 @@ derive theirs from the strength of the evidence found.
 |------|----------|-----|------------|
 | `MFV-PICKLE-001` | CRITICAL | 502 | References a callable that grants code or command execution on load |
 | `MFV-PICKLE-002` | HIGH | 502 | Stream will not parse as opcodes but carries suspicious byte patterns |
-| `MFV-PICKLE-003` | HIGH | - | Member exceeds the decompressed-size limit, possible zip bomb |
+| `MFV-PICKLE-003` | HIGH | - | Member exceeds the decompressed-size limit, possible zip bomb. Also a compressed tar member that would decompress to over 100 times the file size, or a tar long-name or pax header over 1 MB: both stop the walk, so they are reported HIGH rather than only as a coverage gap |
 | `MFV-PICKLE-004` | INFO | 502 | References a global on neither the allow nor the deny list |
 | `MFV-PICKLE-005` | HIGH/MEDIUM/LOW | 502 | An unknown callable's **resolved arguments** convict it: a URL, a shell-shaped string, a `(host, port)` pair, or a literal naming a denied global. Severity follows the strength of the signal, never the callable's name |
 | `MFV-PICKLE-006` | HIGH/MEDIUM | 502 | An allow-listed callable is handed an argument no legitimate model would supply |
@@ -99,7 +99,7 @@ CRITICAL.
 | `MFV-EXEC-001` | HIGH | 506 | A loadable binary (PE, ELF, Mach-O) is embedded. No serialisation format writes one |
 | `MFV-CONFUSE-001` | HIGH | - | Extension implies one format, magic bytes say another |
 | `MFV-SKIP-001` | LOW | - | File exceeds the 500MB cap and cannot be streamed (ZIP and Keras HDF5 can) |
-| `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed |
+| `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed. Includes a compressed tar that would decompress more than 500 MB, and a long-name or pax header over 1 MB |
 | `MFV-SKIP-003` | LOW | - | Content could not be verified |
 | `MFV-7Z-001` | INFO | - | A `.7z` archive is present and no extractor is available |
 | `MFV-LFS-001` | INFO | - | The file is a Git LFS pointer: a placeholder for content stored elsewhere, so the real bytes were never fetched and nothing was scanned |

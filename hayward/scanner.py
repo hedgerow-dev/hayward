@@ -626,6 +626,25 @@ def _scan_paths_parallel(
     return results
 
 
+class _HeaderTooLarge(tarfile.SubsequentHeaderError):
+    """tarfile turns this into a ReadError, which the tar walk reports as a coverage gap."""
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """Refuses a GNU long-name / long-link or pax header whose declared size is over
+    `max_header`, before tarfile reads that many bytes into memory (issue #10)."""
+
+    max_header = 1 << 20
+    _EXTENDED = frozenset({tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK,
+                           tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE})
+
+    def _proc_member(self, tarfile_obj):
+        if self.type in self._EXTENDED and self.size > self.max_header:
+            raise _HeaderTooLarge(f"an extended tar header declares {self.size:,} bytes, "
+                                  f"over the {self.max_header:,} byte limit")
+        return super()._proc_member(tarfile_obj)
+
+
 class ModelFileScanner:
     """Scans ML model files for backdoors and unsafe content."""
 
@@ -702,13 +721,20 @@ class ModelFileScanner:
             # stay compatible with its own config objects, so PyTorch 2.6's
             # safe-load default does not protect it.
             ".nemo": ModelFormat.NEMO,
-            # A plain (uncompressed) tar is a free rename target and reaches the
-            # same zip-slip and symlink-traversal sinks a `.nemo` does on
-            # extraction, and the tar scanner already reports both. Only `.tar`
-            # is routed here: the compressed forms (`.tgz`, `.tar.gz`) would add
-            # a decompression-bomb surface to the member walk that wants its own
-            # budget first, while an uncompressed tar has no such amplification.
+            # A tar is a free rename target and reaches the same zip-slip and
+            # symlink-traversal sinks a `.nemo` does on extraction, and the tar
+            # scanner reports both. The compressed forms are safe to route now
+            # that the member walk has a decompression budget (issue #10). The
+            # double-suffix forms are listed so directory discovery finds them;
+            # _scan_file_dispatch maps them to `.tar`, since Path.suffix sees only
+            # the last part.
             ".tar": ModelFormat.TAR,
+            ".tgz": ModelFormat.TAR,
+            ".tbz2": ModelFormat.TAR,
+            ".txz": ModelFormat.TAR,
+            ".tar.gz": ModelFormat.TAR,
+            ".tar.bz2": ModelFormat.TAR,
+            ".tar.xz": ModelFormat.TAR,
             ".safetensors": ModelFormat.SAFETENSORS,
             ".gguf": ModelFormat.GGUF,
             ".h5": ModelFormat.KERAS,
@@ -798,6 +824,9 @@ class ModelFileScanner:
         if lfs_finding is not None:
             return [lfs_finding]
 
+        if ext in (".gz", ".bz2", ".xz") and file_path.name.lower().endswith(
+                (".tar.gz", ".tar.bz2", ".tar.xz")):
+            ext = ".tar"
         fmt = self._format_map.get(ext, ModelFormat.UNKNOWN)
         other_pb = False
 
@@ -2597,6 +2626,19 @@ class ModelFileScanner:
     # bounds that walk against an archive padded with millions of tiny
     # entries. Real .nemo checkpoints hold a handful of files.
     MAX_TAR_MEMBERS = 1000
+    # Issue #10. Skipping a member of a compressed tar means decompressing it, so
+    # a small file declaring a huge member of zeros pins the CPU. The walk stops
+    # before passing this many decompressed bytes (the same limit as the 7z
+    # path). A plain tar skips by seeking, which is free, so it has no budget.
+    _TAR_MAX_DECOMPRESSED_BYTES = 500_000_000
+    # A GNU long-name or pax header has its declared size read into memory inside
+    # tarfile, before any per-member check here can run. Real ones are tiny.
+    _TAR_MAX_EXTENDED_HEADER_BYTES = 1 << 20
+    # Stopping early must not become a way to hide a payload behind padding. Real
+    # weights compress a little; a member that would decompress to this many
+    # times the whole file's size is a bomb, and is reported HIGH, not only as a
+    # coverage gap. An over-cap extended header is reported the same way.
+    _TAR_BOMB_RATIO = 100
     _TORCH_TAR_PICKLES = frozenset({"sys_info", "pickle", "storages", "tensors"})
 
     def _scan_tar_pickles(self, file_path: Path) -> list[Finding]:
@@ -2614,8 +2656,10 @@ class ModelFileScanner:
         still reported (MFV-ARCHIVE-001) as a signal the archive is crafted.
         """
         findings: list[Finding] = []
+        bounded = type("_BoundedTarInfo", (_BoundedTarInfo,),
+                       {"max_header": self._TAR_MAX_EXTENDED_HEADER_BYTES})
         try:
-            archive = tarfile.open(file_path, "r:*")
+            archive = tarfile.open(file_path, "r:*", tarinfo=bounded)
         except (tarfile.TarError, OSError, EOFError):
             # A tar-routed file (.nemo, .tar and friends) that does not open as
             # a tar is corrupt or extension-spoofed. scan_file's early return
@@ -2631,6 +2675,10 @@ class ModelFileScanner:
         try:
             with archive as tf:
                 hit_member_cap = False
+                hit_budget = False
+                # Anything but a plain file object decompresses as it reads
+                # (gzip, bz2, xz, and any codec a newer tarfile adds).
+                compressed = not isinstance(tf.fileobj, io.BufferedReader)
                 member_names: list[str] = []
                 link_members: list[tuple[str, str]] = []
                 # torch.load reads each of its members by name, and
@@ -2639,6 +2687,13 @@ class ModelFileScanner:
                 for index, member in enumerate(tf):
                     if index >= self.MAX_TAR_MEMBERS:
                         hit_member_cap = True
+                        break
+                    # Checked before this member is read or skipped, since either
+                    # decompresses up to its end.
+                    if compressed and member.offset_data + member.size > self._TAR_MAX_DECOMPRESSED_BYTES:
+                        hit_budget = True
+                        budget_member = member.name
+                        budget_end = member.offset_data + member.size
                         break
                     # member.name is the raw stored name; tarfile does not strip
                     # a "../" or leading "/" from it, so it is a direct zip-slip
@@ -2700,6 +2755,34 @@ class ModelFileScanner:
                         confidence=0.50,
                         metadata={"skipped_reason": "member_cap"},
                     ))
+                elif hit_budget:
+                    findings.append(Finding(
+                        rule_id="MFV-SKIP-002",
+                        message=f"Compressed tar: reading member {budget_member!r} would "
+                                f"decompress more than {self._TAR_MAX_DECOMPRESSED_BYTES:,} "
+                                f"bytes, so the walk stopped there. NOT a clean verdict for "
+                                f"that member or anything after it.",
+                        severity=Severity.LOW,
+                        category=Category.AI_ML,
+                        file_path=str(file_path),
+                        confidence=0.50,
+                        metadata={"skipped_reason": "decompression_budget",
+                                  "tar_member": budget_member},
+                    ))
+                    ratio = budget_end / max(file_path.stat().st_size, 1)
+                    if ratio > self._TAR_BOMB_RATIO:
+                        findings.append(Finding(
+                            rule_id="MFV-PICKLE-003",
+                            message=f"Compressed tar member {budget_member!r} would "
+                                    f"decompress to about {ratio:,.0f} times the size of the "
+                                    f"whole file: a decompression bomb, which also hides "
+                                    f"anything stored after it.",
+                            severity=Severity.HIGH,
+                            category=Category.AI_ML,
+                            file_path=str(file_path),
+                            confidence=0.80,
+                            metadata={"tar_member": budget_member, "ratio": round(ratio)},
+                        ))
                 else:
                     consumed = tf.offset
                     file_size = file_path.stat().st_size
@@ -2728,15 +2811,28 @@ class ModelFileScanner:
             # was found and say the rest was never looked at.
             findings.append(Finding(
                 rule_id="MFV-SKIP-002",
-                message=f"Tar container walk ended early ({type(exc).__name__}), so any "
-                        f"members past the failure point were never analysed. NOT a clean "
-                        f"verdict for the remainder of the archive.",
+                message=f"Tar container walk ended early ({type(exc).__name__}: "
+                        f"{str(exc)[:160]}), so any members past the failure point were "
+                        f"never analysed. NOT a clean verdict for the remainder of the archive.",
                 severity=Severity.LOW,
                 category=Category.AI_ML,
                 file_path=str(file_path),
                 confidence=0.50,
                 metadata={"skipped_reason": "tar_walk_failed", "error": type(exc).__name__},
             ))
+            # tarfile re-raises our refusal as a ReadError; the original is kept
+            # as the context. No real tool writes a path or pax record this big.
+            if isinstance(exc.__context__, _HeaderTooLarge):
+                findings.append(Finding(
+                    rule_id="MFV-PICKLE-003",
+                    message=f"Tar archive is crafted: {exc.__context__}. Members after "
+                            f"that header were not read.",
+                    severity=Severity.HIGH,
+                    category=Category.AI_ML,
+                    file_path=str(file_path),
+                    confidence=0.80,
+                    metadata={"oversized_tar_header": True},
+                ))
         return findings
 
     def _scan_tar_member(

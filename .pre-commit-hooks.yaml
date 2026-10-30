@@ -7,4 +7,4 @@
   language: python
   pass_filenames: true
   types: [file]
-  files: '(?i)\.(7z|bin|ckpt|gguf|h5|hdf5|joblib|json|keras|mar|nemo|npy|npz|onnx|pb|pickle|pkl|pmml|pt|pth|ptl|safetensors|skops|tar|tflite|th|zip)$'
+  files: '(?i)\.(7z|bin|ckpt|gguf|h5|hdf5|joblib|json|keras|mar|nemo|npy|npz|onnx|pb|pickle|pkl|pmml|pt|pth|ptl|safetensors|skops|tar|tar\.bz2|tar\.gz|tar\.xz|tbz2|tflite|tgz|th|txz|zip)$'

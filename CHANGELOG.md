@@ -4,6 +4,22 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- Walking a tar can no longer be made to pin the CPU (#10). A compressed tar now
+  has a 500 MB budget on decompressed bytes, checked before each member is read
+  or skipped, and a GNU long-name or pax header over 1 MB is refused before it is
+  read into memory. Either stops the walk with an `MFV-SKIP-002` coverage
+  finding, keeping what was already found.
+
+### Added
+
+- Compressed tars are scanned: `.tgz`, `.tbz2`, `.txz`, `.tar.gz`, `.tar.bz2`
+  and `.tar.xz`, now that the walk is bounded. The pre-commit hook's file
+  pattern includes them.
+
 ## 1.5.0 (2026-10-30)
 
 ### Added
