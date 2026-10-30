@@ -187,9 +187,11 @@ not fully read. `hayward verify` resolves the revision to a commit and fetches t
 receipt for it, then checks four things:
 
 - it was signed by the service's own workflow (`hedgerow-dev/hayward-verify`)
-  on its weekly schedule; a manual run or any other workflow is refused
-- it is under 30 days old; the service re-signs weekly, so an older verdict
-  means the repo is no longer being checked
+  on its weekly schedule, from that repo and owner by their numeric GitHub ids;
+  a manual run, any other workflow, or a renamed or recreated repo is refused
+- it was signed under 30 days ago, by the signing certificate's time (the
+  service re-signs weekly, so an older verdict means the repo is no longer
+  being checked)
 - it names this repo and this commit
 - its file hashes match the Hub's
 - with a directory, your downloaded files match it, and **every** file in the
@@ -215,8 +217,8 @@ check it. A verdict that covers no files is not a pass.
   or one not covered fails the command. `--allow-gaps`
   accepts them, still listed. This is the opposite of `scan`, on purpose.
 - Big SafeTensors files are checked by their header and shown as `(header read)`.
-- `--service`, `--identity`, `--issuer` and `--trigger` point it at a
-  self-hosted service.
+- `--service`, `--identity`, `--issuer`, `--trigger`, `--repository-id` and
+  `--owner-id` point it at a self-hosted service.
 
 A verdict is analysis evidence, not a safety certificate.
 

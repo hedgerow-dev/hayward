@@ -116,26 +116,41 @@ def _sigstore_sign(raw: bytes) -> str:
         raise SignatureError(f"signing failed: {exc}") from exc
 
 
-def _sigstore_open(raw: bytes, identity: str, issuer: str, trigger: str | None = None) -> bytes:
+def _sigstore_open(raw: bytes, identity: str, issuer: str, trigger: str | None = None,
+                   repository_id: str | None = None, owner_id: str | None = None) -> bytes:
     """Verify a bundle against the named signer; return the signed payload.
 
-    ``trigger``, for a GitHub Actions signer, is the event its run must have been
-    started by (e.g. "schedule"), read from the signing certificate.
+    For a GitHub Actions signer, ``trigger`` is the event its run must have been started
+    by (e.g. "schedule"), and ``repository_id`` / ``owner_id`` are the numeric ids its
+    repo and owner must have, read from the signing certificate, so a renamed or
+    recreated repo with the same name cannot sign.
     """
     from sigstore.errors import Error
     from sigstore.models import Bundle
     from sigstore.verify import Verifier, policy
 
-    rule = policy.Identity(identity=identity, issuer=issuer)
+    rules: list = [policy.Identity(identity=identity, issuer=issuer)]
     if trigger is not None:
-        rule = policy.AllOf([rule, policy.GitHubWorkflowTrigger(trigger)])
+        rules.append(policy.GitHubWorkflowTrigger(trigger))
+    if repository_id is not None:
+        rules.append(policy.OIDCSourceRepositoryIdentifier(repository_id))
+    if owner_id is not None:
+        rules.append(policy.OIDCSourceRepositoryOwnerIdentifier(owner_id))
     try:
-        payload_type, payload = Verifier.production().verify_dsse(Bundle.from_json(raw), rule)
+        payload_type, payload = Verifier.production().verify_dsse(Bundle.from_json(raw), policy.AllOf(rules))
     except Error as exc:
         raise SignatureError(str(exc)) from exc
     if payload_type != SIGNED_PAYLOAD_TYPE:
         raise SignatureError(f"the bundle signs {payload_type}, not an in-toto statement")
     return payload
+
+
+def _signed_at(raw: bytes) -> datetime:
+    """When a bundle was signed: its Fulcio certificate is issued at signing and lives
+    minutes. Only meaningful once _sigstore_open has verified the bundle."""
+    from sigstore.models import Bundle
+
+    return Bundle.from_json(raw).signing_certificate.not_valid_before_utc
 
 
 def verify(statement: dict, root: Path, model_files: list[Path]) -> list[str]:

@@ -19,7 +19,9 @@ within a major version.
   own workflow on its schedule, under 30 days old, naming this repo and commit,
   with hashes that match the Hub's, and, with DIR, every file matching that
   commit. Gaps fail unless `--allow-gaps`. No published verdict is not a pass.
-  Needs `hayward[sign]`.
+  The signer is pinned by its repo's and owner's numeric GitHub ids, not only
+  by name, and a verdict's age comes from its signing certificate, not from the
+  receipt. Needs `hayward[sign]`.
 - Receipts from `hayward hub` name their source (`predicate.source`: the repo
   and commit).
 - `hayward hub` fetches every file a directory scan would find: every `.json`
