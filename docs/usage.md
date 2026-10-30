@@ -169,6 +169,47 @@ A receipt is analysis evidence, not a safety certificate. Old receipts are never
 rewritten: rescan to get a new one, and treat the newest receipt for a digest as
 current.
 
+## Check a published verdict
+
+```bash
+pip install "hayward[sign]"
+hayward verify org/name                       # the commit main points at
+hayward verify org/name --revision v1.0 ./downloaded-snapshot
+```
+
+The hayward-verify service (verify.hedgerow.dev) scans popular Hub repos at pinned
+commits and publishes a signed scan receipt for each one it finds clean or could
+not fully read. `hayward verify` resolves the revision to a commit and fetches the
+receipt for it, then checks four things:
+
+- it was signed by the service's own workflow (`hedgerow-dev/hayward-verify`),
+  and nothing else is accepted
+- it names this repo and this commit
+- its file hashes match the Hub's
+- with a directory, your downloaded files match it, and **every** file in the
+  directory is the file at that commit (the Hub's SHA-256 for LFS files, the git
+  blob id for the rest), so a changed `.py` or config the scan never covered is
+  caught too. A Hugging Face cache snapshot works; files you did not download are
+  fine.
+
+It prints each file's verdict and every file in the repo the verdict does not
+cover, marking `.py` files as CODE: custom model code runs with
+`trust_remote_code=True` and Hayward does not vouch for it. Documentation,
+licences and images are not listed. It shows which Hayward version made the
+verdict and when, and says so when that is older than yours. It ends with the
+full commit id: load that exact revision, since a branch can move after you
+check it. A verdict that covers no files is not a pass.
+
+- **No published verdict is not a pass.** The repo may not have been scanned yet,
+  or may have been held back: the service never publishes a flagged repo, so
+  "nothing published" and "flagged" look the same. Exit code 1.
+- A file that was not fully checked (`not_verified`) or not covered does not fail
+  the command on its own, as with `scan`; add `--fail-on-coverage` to make it.
+- Big SafeTensors files are checked by their header and shown as `(header read)`.
+- `--service`, `--identity` and `--issuer` point it at a self-hosted service.
+
+A verdict is analysis evidence, not a safety certificate.
+
 ## Explain a pickle
 
 ```bash

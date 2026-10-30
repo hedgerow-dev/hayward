@@ -1,0 +1,202 @@
+"""``hayward verify org/name [DIR]``: check a Hub repo against its published, signed verdict.
+
+    hayward verify org/name [--revision REV] [DIR] [--fail-on-coverage]
+
+The hayward-verify service scans popular Hub repos at pinned commits and publishes a
+signed scan receipt for each one it finds clean or could not fully read; it never
+publishes a flagged repo. This command resolves the revision to a commit, fetches the
+receipt for that commit, checks that it was signed by the service's own workflow, that
+it names this repo and commit, and that its file hashes match the Hub's. With DIR, a
+downloaded snapshot, it also checks those files against the receipt.
+
+No published verdict is not a pass: the repo may not have been scanned yet, or may
+have been held back. It needs ``hayward[sign]`` and uses the network. A verdict is
+analysis evidence, not a safety certificate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+from . import __version__, hub, receipt
+
+SERVICE = "https://verify.hedgerow.dev"
+IDENTITY = "https://github.com/hedgerow-dev/hayward-verify/.github/workflows/scan.yml@refs/heads/main"
+ISSUER = "https://token.actions.githubusercontent.com"
+MAX_BUNDLE_BYTES = 16 * 1024 * 1024
+TIMEOUT_SECONDS = 30
+
+
+def bundle_url(service: str, repo: str, sha: str) -> str:
+    return f"{service.rstrip('/')}/v1/hf/{repo}/{sha}.sigstore.json"
+
+
+def _fetch(url: str) -> bytes | None:
+    """The bundle at ``url``, or None when nothing is published there."""
+    req = urllib.request.Request(url, headers={"User-Agent": f"hayward-verify/{__version__}"})  # noqa: S310 - https checked by the caller
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:  # noqa: S310 - same
+            if urllib.parse.urlsplit(resp.geturl()).scheme != "https":
+                raise ValueError("the service redirected off https")
+            data = resp.read(MAX_BUNDLE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    if len(data) > MAX_BUNDLE_BYTES:
+        raise ValueError("the published bundle is too large")
+    return data
+
+
+def check(statement: dict, repo: str, sha: str, hub_hashes: dict[str, str | None]) -> list[str]:
+    """Problems binding the receipt to this repo and commit; an empty list means it fits.
+
+    ``hub_hashes`` maps each file in the commit to the Hub's sha256 for it, or None for a
+    file the Hub keeps in git (it gives no sha256 for those).
+    """
+    source = statement["predicate"].get("source") or {}
+    expected = {"host": "huggingface.co", "repo": repo, "revision": sha}
+    if source != expected:
+        return [f"the verdict is for {source.get('repo')}@{str(source.get('revision'))[:12]}, "
+                f"not {repo}@{sha[:12]}"]
+    problems = []
+    for subject in statement["subject"]:
+        name = subject["name"]
+        if name not in hub_hashes:
+            problems.append(f"not in the repo at this commit: {name}")
+        elif hub_hashes[name] is not None and subject["digest"].get("sha256") != hub_hashes[name]:
+            problems.append(f"differs from the Hub's sha256: {name}")
+    return problems
+
+
+# Files no loader reads: documentation, licences and images. Everything else a repo
+# holds is reported when the verdict does not cover it.
+_DOC_SUFFIXES = (".md", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
+
+
+def _never_loaded(name: str) -> bool:
+    base = name.rsplit("/", 1)[-1]
+    return (base.lower().endswith(_DOC_SUFFIXES) or base == ".gitattributes"
+            or base.upper().startswith(("LICENSE", "LICENCE", "NOTICE")))
+
+
+def _older(version: str, than: str) -> bool:
+    """True when ``version`` is a plain x.y.z release older than ``than``."""
+    def parts(v: str) -> tuple[int, ...] | None:
+        bits = v.split(".")
+        return tuple(int(b) for b in bits) if all(b.isdigit() for b in bits) else None
+    a, b = parts(version), parts(than)
+    return a is not None and b is not None and a < b
+
+
+def check_snapshot(root: Path, hub_files: dict[str, dict]) -> list[str]:
+    """Every file under ``root`` must be the file at this commit: the Hub's sha256 for
+    LFS files, the git blob id for the rest. Files you did not download are fine.
+
+    Symlinks are followed, so a Hugging Face cache snapshot (links into ../blobs) works.
+    """
+    from .lock import _git_blob
+
+    problems = []
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if rel.split("/", 1)[0] in (".git", ".cache") or not path.is_file():
+            continue  # .cache: huggingface_hub's own bookkeeping in a --local-dir download
+        entry = hub_files.get(rel)
+        if entry is None:
+            problems.append(f"not in the repo at this commit: {rel}")
+            continue
+        lfs = (entry.get("lfs") or {}).get("sha256")
+        blob = entry.get("blobId")
+        if lfs:
+            same = hub._sha256(path) == lfs
+        else:
+            same = isinstance(blob, str) and _git_blob(path) == blob
+        if not same:
+            problems.append(f"differs from the commit: {rel}")
+    return problems
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="hayward verify", description=(__doc__ or "").splitlines()[0])
+    parser.add_argument("repo", help="the repo id, e.g. org/name")
+    parser.add_argument("directory", nargs="?", type=Path, help="a downloaded snapshot to check too")
+    parser.add_argument("--revision", default="main", help="branch, tag or commit (default main)")
+    parser.add_argument("--fail-on-coverage", action="store_true",
+                        help="also exit non-zero when a file was not fully checked or not covered")
+    parser.add_argument("--service", default=SERVICE, help="verdict service URL, for a self-hosted one")
+    parser.add_argument("--identity", default=IDENTITY, help="the signer the service's verdicts must carry")
+    parser.add_argument("--issuer", default=ISSUER, help="the OIDC issuer of that signer")
+    args = parser.parse_args(argv)
+    if not hub.REPO_RE.fullmatch(args.repo) or not hub.REVISION_RE.fullmatch(args.revision):
+        print(f"hayward verify: {args.repo!r} at {args.revision!r} is not a usable repo id and revision",
+              file=sys.stderr)
+        return 2
+    if urllib.parse.urlsplit(args.service).scheme != "https":
+        print("hayward verify: the service must be https", file=sys.stderr)
+        return 2
+    try:
+        return _run(args)
+    except ImportError:
+        print('hayward verify: checking signatures needs: pip install "hayward[sign]"', file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, receipt.SignatureError, hub.HubError,
+            urllib.error.URLError) as exc:
+        print(f"hayward verify: {exc}", file=sys.stderr)
+    return 2
+
+
+def _run(args: argparse.Namespace) -> int:
+    quoted = urllib.parse.quote(args.repo, safe="/")
+    info = hub._api_get(f"{hub.HUB}/api/models/{quoted}/revision/{urllib.parse.quote(args.revision)}?blobs=true")
+    sha = str(info.get("sha", ""))
+    if not hub.COMMIT_RE.fullmatch(sha):
+        raise hub.HubError("the Hub did not return a commit id for this repo")
+    hub_files = {str(s.get("rfilename", "")): s for s in info.get("siblings", [])}
+    hub_hashes = {name: (s.get("lfs") or {}).get("sha256") for name, s in hub_files.items()}
+    raw = _fetch(bundle_url(args.service, args.repo, sha))
+    if raw is None:
+        print(f"{args.repo}@{sha[:12]}: no published verdict. It may not have been scanned yet, or may "
+              f"have been held back. This is not a pass.")
+        return 1
+    statement = json.loads(receipt._sigstore_open(raw, args.identity, args.issuer))
+    receipt._require_receipt(statement)
+    problems = check(statement, args.repo, sha, hub_hashes)
+    if not statement["subject"]:
+        problems.append("the verdict covers no files")
+    if args.directory is not None and not problems:
+        # The receipt's own files, by sha256, and then every file in the snapshot
+        # against the commit, so a changed .py or config the scan never covered is
+        # caught too.
+        problems += receipt.verify(statement, args.directory, [])
+        problems += check_snapshot(args.directory, hub_files)
+
+    files = statement["predicate"]["files"]
+    uncovered = sorted(n for n in hub_files if n not in files and not _never_loaded(n))
+    scanner = statement["predicate"].get("scanner") or {}
+    print(f"{args.repo} at commit {sha}, signed by {args.identity}")
+    print(f"  scanned {statement['predicate'].get('scanned', '?')} with hayward {scanner.get('version', '?')}")
+    if _older(str(scanner.get("version", "")), __version__):
+        print(f"  note: that is older than this hayward ({__version__}); detections added since were not run")
+    for name, entry in sorted(files.items()):
+        note = f" ({entry['read']} read)" if entry.get("read") else ""
+        print(f"  {entry.get('verdict', '?'):<13} {name}{note}")
+    for name in uncovered:
+        kind = "not covered, CODE" if name.lower().endswith(".py") else "not covered"
+        print(f"  {kind:<13} {name}")
+    for problem in problems:
+        print(f"  problem: {problem}")
+
+    verdicts = [entry.get("verdict") for entry in files.values()]
+    gaps = verdicts.count("not_verified") + len(uncovered)
+    if problems or "flagged" in verdicts:
+        print(f"{args.repo}: does NOT match its published verdict")
+        return 1
+    print(f"{args.repo}: verdict verified ({verdicts.count('clean')} clean, {gaps} not fully checked). "
+          f"Load this exact commit: revision={sha}")
+    return 1 if args.fail_on_coverage and gaps else 0

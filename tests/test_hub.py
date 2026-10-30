@@ -395,3 +395,15 @@ def test_the_last_receipt_flag_is_the_one_used(monkeypatch, tmp_path, capsys):
     first, last = tmp_path / "a.json", tmp_path / "b.json"
     run([*BIG, "--receipt", str(first), "--receipt", str(last), "-f", "json", "-o", str(tmp_path / "x.json")], capsys)
     assert json.loads(last.read_text())["subject"][0]["digest"]["sha256"] == "c" * 64
+
+
+def test_a_hub_receipt_names_the_repo_and_commit(monkeypatch, tmp_path, capsys):
+    FakeHub(monkeypatch, {"model.pkl": CLEAN}, sha="d" * 40)
+    statement = _receipt(tmp_path, capsys)
+    assert statement["predicate"]["source"] == {"host": "huggingface.co", "repo": "org/name", "revision": "d" * 40}
+
+
+def test_a_chat_template_json_is_fetched(monkeypatch, capsys):
+    fake = FakeHub(monkeypatch, {"chat_template.json": b"{}", "other.json": b"{}", "model.pkl": CLEAN})
+    run(["org/name", "--quiet"], capsys)
+    assert sorted(fake.downloaded) == ["chat_template.json", "model.pkl"]

@@ -14,6 +14,15 @@ within a major version.
   files. Its tensor bytes are not searched for embedded binaries.
 - `hayward hub` reads a big `.safetensors` file's header by Range request, so a
   15 GB model is checked in seconds instead of being NOT SCANNED.
+- `hayward verify org/name [DIR]` checks a Hub repo against the signed verdict
+  the hayward-verify service publishes for its commit: signed by the service's
+  own workflow, naming this repo and commit, with hashes that match the Hub's,
+  and, with DIR, matching your download. No published verdict is not a pass.
+  Needs `hayward[sign]`.
+- Receipts from `hayward hub` name their source (`predicate.source`: the repo
+  and commit).
+- `hayward hub` also fetches `chat_template.json`, a chat-template injection
+  vector the local scanner already checks.
 
 ### Fixed
 
