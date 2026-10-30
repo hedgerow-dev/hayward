@@ -4,14 +4,14 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
-## Unreleased
+## 1.5.0 (2026-10-30)
 
 ### Added
 
 - `hayward hub org/name` fetches a Hugging Face repo's scannable files at a pinned
   commit and scans them, so a repo can be checked before it is downloaded into a
-  project. It uses the network; `hayward scan` still makes no network calls. A big zip checkpoint is read by Range request for its pickle
-  member only, so a multi-gigabyte `.pt` or `.bin` is checked by fetching a few
+  project. It uses the network; `hayward scan` still makes no network calls. A
+  big zip checkpoint is read by Range request for its pickle member only, so a multi-gigabyte `.pt` or `.bin` is checked by fetching a few
   kilobytes; the run says the tensor data was not read. Other files over
   `--max-file-mb` are listed as NOT SCANNED with the reason, never as clean. File
   names from the API are checked, Hub hashes are verified, and `HF_TOKEN` goes
@@ -22,6 +22,20 @@ within a major version.
   downloaded snapshot against it offline (missing, changed and extra files fail).
   It fails closed: code loaded from another repo, or an adapter's base model, is
   recorded as unresolved and the lock is marked `needs_review`.
+
+- `hayward explain FILE` shows what a pickle would do, as readable lines, one per
+  call, with a "why" line that uses the scanner's own allow and deny lists, so
+  `explain` and `scan` agree. Nothing is run. Known-safe calls and plain object
+  rebuilds are counted on one line unless `--all` is given. Reads bare pickles,
+  zip checkpoints and old tar checkpoints; names from the file are shown escaped.
+
+### Fixed
+
+- `distutils.spawn.spawn` (and `setuptools._distutils.spawn`, where `distutils`
+  resolves on Python 3.12+) is now denied. It runs a program, and a public
+  scanner-bypass proof of concept called it with a list argument that no argument
+  check reads as a command, so it came out as INFO. The reference corpus had the
+  same file labelled benign; it is now labelled malicious.
 
 ## 1.4.3 (2026-10-29)
 
