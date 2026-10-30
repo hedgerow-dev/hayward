@@ -29,9 +29,12 @@ def _str(s: str) -> bytes:
 
 
 def _gguf(tensors, kv=()):
-    """tensors: (name, dims, type_id, offset). kv: (key, list of strings)."""
+    """tensors: (name, dims, type_id, offset). kv: (key, string or list of strings)."""
     out = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(kv))
     for key, values in kv:
+        if isinstance(values, str):
+            out += _str(key) + struct.pack("<I", STRING) + _str(values)
+            continue
         out += _str(key) + struct.pack("<IIQ", ARRAY, STRING, len(values))
         out += b"".join(_str(v) for v in values)
     for name, dims, type_id, offset in tensors:
@@ -90,3 +93,21 @@ def test_a_payload_in_an_ordinary_metadata_key_still_fires(tmp_path):
 def test_a_named_chat_template_called_tokens_is_not_treated_as_vocab(tmp_path):
     kv = [("tokenizer.chat_template.tokens", ["{{ __import__('os') }}"])]
     assert "MFV-GGUF-002" in [r for r, _ in _serious(tmp_path, _gguf([], kv=kv))]
+
+
+# llama.cpp can select a named template (`tokenizer.chat_template.<name>`) and
+# render it, so MFV-GGUF-003 covers those the same as the default template.
+# This payload has none of MFV-GGUF-002's substrings, so only GGUF-003 sees it.
+_RCE_TEMPLATE = "{{ cycler.__init__.__globals__.os.popen('id').read() }}"
+
+
+def test_a_malicious_named_chat_template_fires(tmp_path):
+    kv = [("tokenizer.chat_template.tool_use", _RCE_TEMPLATE)]
+    found = _serious(tmp_path, _gguf([], kv=kv))
+    assert [r for r, _ in found] == ["MFV-GGUF-003"]
+    assert "tokenizer.chat_template.tool_use" in found[0][1]
+
+
+def test_a_benign_named_chat_template_is_clean(tmp_path):
+    template = "{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}{% endfor %}"
+    assert _serious(tmp_path, _gguf([], kv=[("tokenizer.chat_template.tool_use", template)])) == []
