@@ -111,3 +111,15 @@ def test_a_malicious_named_chat_template_fires(tmp_path):
 def test_a_benign_named_chat_template_is_clean(tmp_path):
     template = "{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}{% endfor %}"
     assert _serious(tmp_path, _gguf([], kv=[("tokenizer.chat_template.tool_use", template)])) == []
+
+
+def test_a_big_vocabulary_is_read_to_the_end(tmp_path):
+    # Gemma 4 and Qwen 3.8 vocabularies run 10 to 15 MB of metadata, past the old
+    # 10 MB window, which left every key after them unchecked (MFV-GGUF-004).
+    vocab = [f"tok{i:07d}" for i in range(1_000_000)]  # about 18 MB
+    kv = [("tokenizer.ggml.tokens", vocab), ("general.notes", ["import subprocess"])]
+    p = tmp_path / "model.gguf"
+    p.write_bytes(_gguf([], kv=kv))
+    rules = [f.rule_id for f in ModelFileScanner().scan_file(p)]
+    assert "MFV-GGUF-002" in rules
+    assert "MFV-GGUF-004" not in rules
