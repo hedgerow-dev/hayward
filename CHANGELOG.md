@@ -4,6 +4,15 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- The GitHub Action's `attest: true` now signs the receipt when the scan fails
+  the build, as documented. In 1.9.0 the signing steps were skipped after a
+  failing scan, because a composite action adds `success()` to any condition
+  without a status function. Found by running the action on a real runner.
+
 ## 1.9.0 (2026-10-30)
 
 ### Added
