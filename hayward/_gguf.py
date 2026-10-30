@@ -103,7 +103,9 @@ GGUF_MAGIC = b"GGUF"
 # sweep found this was 10 of 17 actionable findings across 1,974 real files.
 GGML_MAGICS = (b"lmgg", b"fmgg", b"tjgg")   # ggml, ggmf, ggjt
 
-GGUF_METADATA_SCAN_BYTES = 10_000_000
+# Big vocabularies (Gemma 4, Qwen 3.8) put 10 to 15 MB of metadata ahead of the
+# keys after them, so the window leaves room well past that.
+GGUF_METADATA_SCAN_BYTES = 64_000_000
 
 # Standard GGUF `general.*` keys documented as free-text/descriptive (per the
 # GGUF KV spec) -- exempt from the dangerous-substring content check below,

@@ -13,6 +13,10 @@ within a major version.
   code-execution constructs, not just `tokenizer.chat_template`. llama.cpp can
   select and render a named template, so a payload there was missed before.
   The finding names the key it came from.
+- GGUF metadata is content-checked up to 64 MB, up from 10 MB. Big
+  vocabularies (Gemma 4, Qwen 3.8) run 10 to 15 MB, so every key after them was
+  left unchecked with an `MFV-GGUF-004` coverage note. In a sample of 108
+  popular GGUF files this went from 10 partly scanned files to none.
 
 ## 1.7.1 (2026-10-30)
 
