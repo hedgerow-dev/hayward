@@ -18,7 +18,18 @@ within a major version.
 
 - Compressed tars are scanned: `.tgz`, `.tbz2`, `.txz`, `.tar.gz`, `.tar.bz2`
   and `.tar.xz`, now that the walk is bounded. The pre-commit hook's file
-  pattern includes them.
+  pattern includes them, and `hayward hub` fetches them.
+
+### Changed
+
+- Constructors of plain values (`int`, `float`, `bool`, `str`, `bytes`,
+  `range`, in both the `builtins` and `__builtin__` spellings) are on the
+  known-safe list, like `list`, `dict` and `set` already were. They no longer
+  add an INFO "unrecognized global" to ordinary files. `getattr`, `type` and
+  `eval` stay off the list.
+- The package's own comments and docstrings describe attacks in words instead
+  of quoting payloads, so other scanners stop flagging Hayward itself (#17). A
+  test keeps it that way.
 
 ## 1.5.0 (2026-10-30)
 
