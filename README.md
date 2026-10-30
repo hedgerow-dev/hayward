@@ -39,6 +39,10 @@ A scan checks a file before you load it. The guard checks it while you do:
 import hayward.guard  # pickle.load, joblib.load, numpy.load and torch.load now refuse dangerous calls
 ```
 
+It also stops `from_pretrained(..., trust_remote_code=True)` from running a
+repo's own Python code, unless you name the repo with
+`hayward.guard.install(remote_code=["org/name"])`.
+
 Each load is scanned first, then every function the file asks for is checked
 before it runs. The default mode raises the bar but is not a sandbox. For
 files you do not trust, `hayward.guard.install(strict=True)` refuses anything

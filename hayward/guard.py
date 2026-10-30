@@ -13,6 +13,11 @@ the bytes. A global the CLI's pickle classifier denies raises
 `UnsafeModelError` there, before it is imported; so does one whose imported
 object is a denied callable under another name (`logging.os`, an alias).
 
+Remote code is the exception to that: while the guard is installed, code
+transformers runs from a model repo (trust_remote_code=True) is refused
+before it runs, at any time, unless `install(remote_code=[...])` names the
+repo.
+
 Outside a guarded load the hook does nothing, so `pickle.loads`,
 multiprocessing and other in-process unpickling are untouched. That also
 means `pickle.loads`, an `Unpickler` used directly, dill's and cloudpickle's
@@ -33,7 +38,8 @@ the format of the loader reading it, not as its name says. Coverage findings
 (MFV-SKIP-*) from the scan warn rather than block: the load-time check still
 covers that file. A stream that cannot seek is not pre-scanned.
 
-`install(fail_on=..., mode=..., max_size=..., prescan=..., strict=...)`
+`install(fail_on=..., mode=..., max_size=..., prescan=..., strict=...,
+remote_code=...)`
 changes the settings, `uninstall()` restores the loaders and turns the hook
 off (an audit hook cannot be removed), and `HAYWARD_GUARD=off` makes the
 import a no-op. Warn mode warns and loads.
@@ -77,6 +83,9 @@ _strict = False
 # In strict mode these are refused whatever `fail_on` says: each reports a
 # global that is not on the known-safe list.
 _STRICT_RULES = frozenset({"MFV-PICKLE-001", "MFV-PICKLE-004", "MFV-PICKLE-005"})
+# Repos (org/name) and local folder names whose remote code may run, each as
+# the tuple of path parts transformers files it under, see _module_parts.
+_remote_code: frozenset[tuple[str, ...]] = frozenset()
 _hook_on = False  # the audit hook stays registered once added; this turns it off
 _hook_added = False
 _patched: list[tuple[object, str, object]] = []
@@ -285,7 +294,51 @@ def _refused_global(module, name) -> tuple[str, str] | None:
     return None
 
 
+def _module_parts(name: str) -> tuple[str, ...]:
+    """The folders transformers files `name`'s code under: each part made a
+    valid identifier the way its _sanitize_module_name does."""
+    parts = []
+    for part in name.split("/"):
+        part = part.replace(".", "_dot_").replace("-", "_hyphen_")
+        parts.append("_" + part if part[:1].isdigit() else part)
+    return tuple(parts)
+
+
+def _check_remote_code(code) -> None:
+    """transformers runs a repo's own .py files (trust_remote_code=True) from
+    its dynamic-module cache, laid out as transformers_modules/<org>/<name>/
+    <commit>/ for a Hub repo and transformers_modules/<folder>/<hash>/ for a
+    local one. The exec audit event fires before any of that code runs."""
+    filename = getattr(code, "co_filename", "")
+    if not isinstance(filename, str) or "transformers_modules" not in filename:
+        return
+    parts = Path(filename).parts
+    if "transformers_modules" not in parts[:-1]:
+        return
+    if not code.co_names:
+        return  # the empty package __init__.py files transformers writes
+    folders = parts[len(parts) - 1 - parts[::-1].index("transformers_modules") + 1:-1]
+    # The last folder is the commit or content hash; what precedes it names the repo.
+    if folders[:-1] in _remote_code:
+        return
+    repo = "/".join(folders[:-1]) or filename
+    _enforce([Finding(
+        rule_id="MFV-HF-002",
+        message=f"transformers is about to run Python code from the model repo {repo} "
+                f"({parts[-1]}), loaded with trust_remote_code=True. To allow this "
+                f"repo, call hayward.guard.install(remote_code=[...]) with its id.",
+        severity=Severity.HIGH,
+        category=Category.INJECTION,
+        file_path=filename,
+        cwe_ids=[94],
+        metadata={"at": "load time", "repo": repo},
+    )], repo)
+
+
 def _audit(event: str, args: tuple) -> None:
+    if event == "exec" and _hook_on:
+        _check_remote_code(args[0])
+        return
     if event != "pickle.find_class" or not _hook_on:
         return
     labels = getattr(_local, "labels", None)
@@ -419,7 +472,7 @@ _hook = _ImportHook()
 
 def install(
     fail_on: str = "high", mode: str = "block", max_size: int | None = None,
-    prescan: bool = True, strict: bool = False,
+    prescan: bool = True, strict: bool = False, remote_code: tuple[str, ...] | list[str] = (),
 ) -> None:
     """Turn on the load-time check and patch the supported loaders. Calling it
     again replaces the settings.
@@ -431,17 +484,25 @@ def install(
     load-time check alone. `prescan=False` keeps only the load-time check.
     `strict=True` also refuses every global that is not on the scanner's
     known-safe list, at load time and in the pre-scan, whatever `fail_on` is.
+    `remote_code` names the repos (`org/name`) or local model folders whose own
+    Python code transformers may run with trust_remote_code=True; any other
+    is refused as MFV-HF-002.
     """
-    global _limit, _mode, _max_size, _prescan, _strict, _hook_on, _hook_added
+    global _limit, _mode, _max_size, _prescan, _strict, _hook_on, _hook_added, _remote_code
     if fail_on not in _THRESHOLDS:
         raise ValueError(f"fail_on must be one of {', '.join(_THRESHOLDS)}")
     if mode not in ("block", "warn"):
         raise ValueError("mode must be 'block' or 'warn'")
     if max_size is not None and max_size <= 0:
         raise ValueError("max_size must be a positive byte count")
+    if isinstance(remote_code, str):
+        raise ValueError("remote_code must be a list of repo ids, not one string")
     uninstall()
     _limit, _mode, _max_size, _prescan = _THRESHOLDS[fail_on], mode, max_size, prescan
     _strict = bool(strict)
+    # transformers 4.x filed the name as is; newer releases sanitize it.
+    _remote_code = frozenset(form for name in remote_code
+                             for form in (tuple(name.strip("/").split("/")), _module_parts(name.strip("/"))))
     _memo.clear()  # a different cap can change a file's findings
     for name in _TARGETS:
         if name in sys.modules:

@@ -1140,3 +1140,82 @@ class TestStrict:
         # A whole nn.Module names its classes, which are not on the list.
         with pytest.raises(guard.UnsafeModelError):
             torch.load(module, weights_only=False)
+
+
+# ---- remote code: transformers runs a repo's .py files from transformers_modules ----
+
+
+def _run_remote_module(root, parts: list[str], source: str = "RAN = 40 + 2\n"):
+    """Run a file the way transformers' get_class_in_module does: from its
+    dynamic-module cache, through spec_from_file_location and exec_module."""
+    import importlib.util
+
+    folder = root.joinpath("transformers_modules", *parts)
+    folder.mkdir(parents=True)
+    path = folder / "modeling_toy.py"
+    path.write_text(source)
+    spec = importlib.util.spec_from_file_location("transformers_modules_test_toy", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestRemoteCode:
+    def test_remote_code_is_refused_by_default(self, tmp_path):
+        guard.install()
+        with pytest.raises(guard.UnsafeModelError) as exc:
+            _run_remote_module(tmp_path, ["org", "repo", "abc123"])
+        assert "MFV-HF-002" in exc.value.rule_ids
+        assert "org/repo" in str(exc.value)
+
+    def test_an_allowed_repo_runs(self, tmp_path):
+        guard.install(remote_code=["org/repo"])
+        assert _run_remote_module(tmp_path, ["org", "repo", "abc123"]).RAN == 42
+
+    def test_an_allowed_repo_matches_transformers_sanitized_names(self, tmp_path):
+        # transformers writes my-org/model.v2 as my_hyphen_org/model_dot_v2.
+        guard.install(remote_code=["my-org/model.v2"])
+        assert _run_remote_module(tmp_path, ["my_hyphen_org", "model_dot_v2", "abc123"]).RAN == 42
+
+    def test_an_allowed_repo_matches_the_unsanitized_layout_too(self, tmp_path):
+        # transformers 4.x kept the name as is.
+        guard.install(remote_code=["my-org/model.v2"])
+        assert _run_remote_module(tmp_path, ["my-org", "model.v2", "abc123"]).RAN == 42
+
+    def test_a_single_string_is_rejected(self):
+        with pytest.raises(ValueError):
+            guard.install(remote_code="org/repo")
+
+    def test_allowing_one_repo_does_not_allow_another(self, tmp_path):
+        guard.install(remote_code=["org/repo"])
+        with pytest.raises(guard.UnsafeModelError):
+            _run_remote_module(tmp_path, ["org", "other", "abc123"])
+
+    def test_a_local_folder_is_allowed_by_its_name(self, tmp_path):
+        # A local model folder lands as transformers_modules/<folder name>/<hash>.
+        guard.install(remote_code=["my_model"])
+        assert _run_remote_module(tmp_path, ["my_model", "0f3a"]).RAN == 42
+
+    def test_warn_mode_warns_and_runs(self, tmp_path):
+        guard.install(mode="warn")
+        with pytest.warns(UserWarning, match="MFV-HF-002"):
+            assert _run_remote_module(tmp_path, ["org", "repo", "abc123"]).RAN == 42
+
+    def test_threshold_above_high_lets_it_run(self, tmp_path):
+        guard.install(fail_on="critical")
+        assert _run_remote_module(tmp_path, ["org", "repo", "abc123"]).RAN == 42
+
+    def test_uninstalled_guard_does_not_refuse(self, tmp_path):
+        guard.install()
+        guard.uninstall()
+        assert _run_remote_module(tmp_path, ["org", "repo", "abc123"]).RAN == 42
+
+    def test_other_code_is_untouched(self, tmp_path):
+        guard.install()
+        path = tmp_path / "ordinary.py"
+        path.write_text("RAN = 42\n")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ordinary_test_mod", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.RAN == 42
