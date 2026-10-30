@@ -99,7 +99,7 @@ CRITICAL.
 | `MFV-EXEC-001` | HIGH | 506 | A loadable binary (PE, ELF, Mach-O) is embedded. No serialisation format writes one |
 | `MFV-CONFUSE-001` | HIGH | - | Extension implies one format, magic bytes say another |
 | `MFV-SKIP-001` | LOW | - | File exceeds the 500MB cap and cannot be streamed (ZIP and Keras HDF5 can) |
-| `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed |
+| `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed. Includes a compressed tar that would decompress more than 500 MB, and a long-name or pax header over 1 MB |
 | `MFV-SKIP-003` | LOW | - | Content could not be verified |
 | `MFV-7Z-001` | INFO | - | A `.7z` archive is present and no extractor is available |
 | `MFV-LFS-001` | INFO | - | The file is a Git LFS pointer: a placeholder for content stored elsewhere, so the real bytes were never fetched and nothing was scanned |
