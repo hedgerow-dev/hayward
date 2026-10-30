@@ -284,6 +284,11 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
         from .hub import main as hub_main
 
         return hub_main(args_list[1:])
+    if args_list[:1] == ["verify"]:
+        # Uses the network: the Hub API and the verdict service.
+        from .verify import main as verify_main
+
+        return verify_main(args_list[1:])
     if args_list[:1] == ["receipt"]:
         from .receipt import main as receipt_main
 

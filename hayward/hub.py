@@ -47,7 +47,7 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # Of the .json files only these carry something the scanner reads (auto_map,
 # trust_remote_code, chat templates), so the rest are not worth downloading.
-CONFIG_NAMES = frozenset({"config.json", "tokenizer_config.json"})
+CONFIG_NAMES = frozenset({"config.json", "tokenizer_config.json", "chat_template.json"})
 
 # Range reads: only the zip checkpoints torch.save writes.
 RANGE_SUFFIXES = frozenset({".pt", ".pth", ".bin", ".ckpt", ".ptl", ".th"})
@@ -362,8 +362,8 @@ def main(argv: list[str]) -> int:
         if receipt_path is not None:
             receipt_path.unlink(missing_ok=True)
         code = scan_main(["scan", tmp, *scan_flags], label=f"hf://{args.repo}@{got['sha'][:12]}")
-    if receipt_path is not None and receipt_path.is_file() and got["partial"]:
-        _use_hub_hashes(receipt_path, got["partial"])
+    if receipt_path is not None and receipt_path.is_file():
+        _finish_receipt(receipt_path, args.repo, got["sha"], got["partial"])
     for read in ("pickle members", "header"):
         names = [name for name, _, what, _ in got["partial"] if what == read]
         if names:
@@ -388,12 +388,14 @@ def _receipt_path(scan_flags: list[str]) -> Path | None:
     return found
 
 
-def _use_hub_hashes(path: Path, partial: list[tuple[str, int, str, str | None]]) -> None:
-    """Record each file read in part under the Hub's sha256, since the local copy is not the file.
+def _finish_receipt(path: Path, repo: str, sha: str, partial: list[tuple[str, int, str, str | None]]) -> None:
+    """Name the repo and commit the receipt is for, and record each file read in part
+    under the Hub's sha256, since the local copy is not the file.
 
     A file with no Hub sha256 is left out of the receipt, which cannot name its bytes.
     """
     statement = json.loads(path.read_text(encoding="utf-8"))
+    statement["predicate"]["source"] = {"host": "huggingface.co", "repo": repo, "revision": sha}
     files = statement["predicate"]["files"]
     by_name = {name: (read, sha) for name, _, read, sha in partial}
     subjects = []

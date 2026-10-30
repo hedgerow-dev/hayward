@@ -116,15 +116,21 @@ def _sigstore_sign(raw: bytes) -> str:
         raise SignatureError(f"signing failed: {exc}") from exc
 
 
-def _sigstore_open(raw: bytes, identity: str, issuer: str) -> bytes:
-    """Verify a bundle against the named signer; return the signed payload."""
+def _sigstore_open(raw: bytes, identity: str, issuer: str, trigger: str | None = None) -> bytes:
+    """Verify a bundle against the named signer; return the signed payload.
+
+    ``trigger``, for a GitHub Actions signer, is the event its run must have been
+    started by (e.g. "schedule"), read from the signing certificate.
+    """
     from sigstore.errors import Error
     from sigstore.models import Bundle
     from sigstore.verify import Verifier, policy
 
+    rule = policy.Identity(identity=identity, issuer=issuer)
+    if trigger is not None:
+        rule = policy.AllOf([rule, policy.GitHubWorkflowTrigger(trigger)])
     try:
-        payload_type, payload = Verifier.production().verify_dsse(
-            Bundle.from_json(raw), policy.Identity(identity=identity, issuer=issuer))
+        payload_type, payload = Verifier.production().verify_dsse(Bundle.from_json(raw), rule)
     except Error as exc:
         raise SignatureError(str(exc)) from exc
     if payload_type != SIGNED_PAYLOAD_TYPE:
