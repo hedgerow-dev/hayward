@@ -35,6 +35,9 @@ ISSUER = "https://token.actions.githubusercontent.com"
 # Only the scheduled run signs: a manual re-run, or any other workflow run on main,
 # carries a different trigger in its certificate and is refused.
 TRIGGER = "schedule"
+# The signing repo and its owner by numeric id, which survive no rename or recreation.
+REPOSITORY_ID = "1440229852"
+OWNER_ID = "289219779"
 MAX_AGE_DAYS = 30  # the service re-signs weekly; older means it stopped or the repo was dropped
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
 TIMEOUT_SECONDS = 30
@@ -160,6 +163,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--identity", default=IDENTITY, help="the signer the service's verdicts must carry")
     parser.add_argument("--issuer", default=ISSUER, help="the OIDC issuer of that signer")
     parser.add_argument("--trigger", default=TRIGGER, help="the GitHub event the signing run must come from")
+    parser.add_argument("--repository-id", default=REPOSITORY_ID, help="the signing repo's numeric GitHub id")
+    parser.add_argument("--owner-id", default=OWNER_ID, help="the signing repo owner's numeric GitHub id")
     args = parser.parse_args(argv)
     if not hub.REPO_RE.fullmatch(args.repo) or not hub.REVISION_RE.fullmatch(args.revision):
         print(f"hayward verify: {args.repo!r} at {args.revision!r} is not a usable repo id and revision",
@@ -191,10 +196,13 @@ def _run(args: argparse.Namespace) -> int:
         print(f"{args.repo}@{sha[:12]}: no published verdict. It may not have been scanned yet, or may "
               f"have been held back. This is not a pass.")
         return 1
-    statement = json.loads(receipt._sigstore_open(raw, args.identity, args.issuer, args.trigger))
+    statement = json.loads(receipt._sigstore_open(raw, args.identity, args.issuer, args.trigger,
+                                                  args.repository_id, args.owner_id))
     receipt._require_receipt(statement)
     problems = check(statement, args.repo, sha, hub_hashes)
-    age = _age_days(statement["predicate"].get("scanned"))
+    # Age from the signing certificate, which Sigstore vouches for, not from the
+    # receipt's own `scanned` field.
+    age = _age_days(receipt._signed_at(raw).isoformat())
     if age is None or age > MAX_AGE_DAYS:
         problems.append(f"the verdict is {'of unknown age' if age is None else f'{age} days old'}; "
                         f"over {MAX_AGE_DAYS} days does not count. Wait for the next rescan.")

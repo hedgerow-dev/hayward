@@ -47,17 +47,25 @@ def service(monkeypatch):
         assert url.startswith("https://huggingface.co/api/models/org/name/revision/")
         return {"sha": SHA, "siblings": state["siblings"]}
 
-    def open_bundle(raw, identity, issuer, trigger=None):
-        state["signer"] = (identity, issuer, trigger)
+    def open_bundle(raw, identity, issuer, trigger=None, repository_id=None, owner_id=None):
+        state["signer"] = (identity, issuer, trigger, repository_id, owner_id)
         return json.loads(raw)["payload"].encode()
+
+    def signed_at(raw):
+        # The fake bundle carries its signing time; a real one has it in the certificate.
+        return datetime.fromisoformat(json.loads(raw)["signed_at"])
 
     monkeypatch.setattr(verify, "_fetch", fetch)
     monkeypatch.setattr(hub, "_api_get", api_get)
     monkeypatch.setattr(receipt, "_sigstore_open", open_bundle)
+    monkeypatch.setattr(receipt, "_signed_at", signed_at)
 
-    def publish(st, siblings):
+    def publish(st, siblings, signed_days_ago=None):
         url = verify.bundle_url(verify.SERVICE, "org/name", SHA)
-        state["published"][url] = json.dumps({"mediaType": "x", "payload": json.dumps(st)}).encode()
+        signed = st["predicate"].get("scanned") if signed_days_ago is None else (
+            datetime.now(timezone.utc) - timedelta(days=signed_days_ago)).isoformat()
+        state["published"][url] = json.dumps({"mediaType": "x", "payload": json.dumps(st),
+                                              "signed_at": signed}).encode()
         state["siblings"] = siblings
 
     state["publish"] = publish
@@ -76,8 +84,8 @@ def test_a_published_clean_verdict_verifies(service, capsys):
     assert cli.main(["verify", "org/name"]) == 0
     out = capsys.readouterr().out
     assert "clean" in out and "model.safetensors" in out
-    # only the service's own workflow, and only its scheduled run
-    assert service["signer"] == (verify.IDENTITY, verify.ISSUER, "schedule")
+    # only the service's own workflow, its scheduled run, from its repo and owner by id
+    assert service["signer"] == (verify.IDENTITY, verify.ISSUER, "schedule", verify.REPOSITORY_ID, verify.OWNER_ID)
 
 
 def test_no_published_verdict_is_not_a_pass(service, capsys):
@@ -125,12 +133,11 @@ def test_a_verdict_over_30_days_old_does_not_count(service, capsys):
     assert "31 days old" in capsys.readouterr().out
 
 
-def test_a_verdict_with_no_scan_time_does_not_count(service, capsys):
-    st = statement(FILES)
-    del st["predicate"]["scanned"]
-    service["publish"](st, SIBLINGS)
+def test_age_comes_from_the_signature_not_the_receipt(service, capsys):
+    # A receipt can claim any scan date; the signing certificate's time is what counts.
+    service["publish"](statement(FILES, days_old=0), SIBLINGS, signed_days_ago=40)
     assert cli.main(["verify", "org/name"]) == 1
-    assert "unknown age" in capsys.readouterr().out
+    assert "40 days old" in capsys.readouterr().out
 
 
 def _snapshot(tmp_path):
