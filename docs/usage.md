@@ -168,12 +168,19 @@ window is byte-identical to one written from the command line.
       "metadata": {}
     }
   ],
-  "coverage_gaps": []
+  "coverage_gaps": [],
+  "verdicts": {"/srv/models/model.pt": "flagged"}
 }
 ```
 
 `coverage_gaps` lists files that were not fully read. See
 [coverage](coverage.md).
+
+`verdicts` gives each file with findings one verdict, separate from severity:
+`flagged` (a detection at LOW or above), `not_verified` (only coverage gaps,
+so the file was not fully read) or `clean` (only INFO notes). A detection wins
+over a coverage gap. A file with no findings is clean and is not listed. In
+SARIF output each result carries its file's verdict as `properties.verdict`.
 
 ## Continuous integration
 
