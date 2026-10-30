@@ -75,6 +75,10 @@ network, and nothing is loaded or run. Any other flag goes to `scan`.
 
 - Files come from one pinned commit, the one the Hub reports for `--revision`
   (default `main`). A file with a Hub hash is checked against it after download.
+- It fetches what a directory scan would find: the weights, every `.json`
+  config, `.jinja` chat templates and tokenizer data (`merges.txt`, `vocab.txt`,
+  `tokenizer.model`), so a hub scan covers the same files as scanning a
+  download. `.py` files are not scanned: custom code is never vouched for.
 - Files over `--max-file-mb` (default 50) are not fetched whole. A **zip
   checkpoint** (what `torch.save` writes: `.pt`, `.pth`, `.bin`, `.ckpt`) is read
   by Range request for its pickle member only, which is the part that can run
@@ -194,8 +198,9 @@ receipt for it, then checks four things:
   caught too. A Hugging Face cache snapshot works; files you did not download are
   fine.
 
-It prints each file's verdict and every file in the repo the verdict does not
-cover, marking `.py` files as CODE: custom model code runs with
+It prints each file's verdict and every file the verdict does not cover (with a
+directory, only the files you downloaded: download what you will load, and
+verify that), marking `.py` files as CODE: custom model code runs with
 `trust_remote_code=True` and Hayward does not vouch for it. Documentation,
 licences and images are not listed. It shows which Hayward version made the
 verdict and when, and says so when that is older than yours. It ends with the

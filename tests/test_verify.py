@@ -211,3 +211,24 @@ def test_a_verdict_from_an_older_hayward_says_so(service, capsys):
     service["publish"](st, SIBLINGS)
     assert cli.main(["verify", "org/name"]) == 0
     assert "older than this hayward" in capsys.readouterr().out
+
+
+def test_with_a_snapshot_only_downloaded_files_can_be_gaps(service, tmp_path, capsys):
+    snap, st, siblings = _snapshot(tmp_path)
+    service["publish"](st, siblings)
+    # The repo also holds a TF weight file the verdict does not cover; it was not downloaded.
+    siblings.append({"rfilename": "tf_model.h5", "lfs": {"sha256": "3" * 64}})
+    (snap / "modeling_x.py").unlink()
+    (snap / "generation_config.json").unlink()
+    assert cli.main(["verify", "org/name", str(snap)]) == 0
+    assert "tf_model.h5" not in capsys.readouterr().out
+    assert cli.main(["verify", "org/name"]) == 1  # without a snapshot, the whole repo counts
+
+
+def test_a_covered_file_you_did_not_download_is_fine(service, tmp_path, capsys):
+    snap, st, siblings = _snapshot(tmp_path)
+    service["publish"](st, siblings)
+    for name in ("config.json", "modeling_x.py", "generation_config.json"):
+        (snap / name).unlink()  # downloaded only the weights
+    assert cli.main(["verify", "org/name", str(snap)]) == 0
+    assert "not downloaded" in capsys.readouterr().out
