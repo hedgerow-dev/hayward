@@ -55,6 +55,8 @@ Exit status), so a failing scan still records its findings on the Security tab.
 | `fail-on`          | no       | `high`           | Lowest severity that fails the build: `critical`, `high`, `medium`, `low`, `info`, or `never`.          |
 | `fail-on-coverage` | no       | `false`          | Set to `true` to also fail when a file could not be fully read.                                         |
 | `lock`             | no       | (empty)          | A `hayward lock` file. The path must match it exactly, or the build fails before the scan. See below.   |
+| `receipt`          | no       | (empty)          | Path for a scan receipt (hayward 1.9.0 or later). See below.                                            |
+| `attest`           | no       | `false`          | Set to `true` to sign the receipt with GitHub artifact attestations. See below.                         |
 | `output`           | no       | `hayward.sarif`  | Path for the SARIF report.                                                                              |
 | `version`          | no       | (empty)          | Version of the `hayward` package to install from PyPI. See Version below.                               |
 
@@ -75,11 +77,39 @@ what those files do.
           lock: models/my-model.lock.json
 ```
 
+### Signed scan receipts
+
+With `receipt`, the scan also writes an in-toto statement of each file's hash
+and what the scanner found (see [usage](usage.md#scan-receipts)). With
+`attest: true` as well, the action signs it with
+[`actions/attest`](https://github.com/actions/attest): keyless Sigstore, stored
+with the repository's attestations. Signing runs even when the scan fails the
+build, since a receipt for a flagged file is still evidence. The job needs two
+permissions:
+
+```yaml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hedgerow-dev/hayward@v1
+        with:
+          path: models
+          receipt: hayward.receipt.json
+          attest: "true"
+```
+
+Check a signed receipt later with
+`gh attestation verify models/model.safetensors --repo OWNER/REPO --predicate-type https://hedgerow.dev/hayward/scan-receipt/v1`.
+
 ## Outputs
 
-| Output  | Description                              |
-| ------- | ---------------------------------------- |
-| `sarif` | Path to the SARIF report from the scan.  |
+| Output    | Description                                        |
+| --------- | -------------------------------------------------- |
+| `sarif`   | Path to the SARIF report from the scan.            |
+| `receipt` | Path to the scan receipt, when one was requested.  |
 
 ## Exit status
 

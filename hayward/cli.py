@@ -17,6 +17,7 @@ is the one case where a passing build tells you nothing.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -283,6 +284,10 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
         from .hub import main as hub_main
 
         return hub_main(args_list[1:])
+    if args_list[:1] == ["receipt"]:
+        from .receipt import main as receipt_main
+
+        return receipt_main(args_list[1:])
     if args_list[:1] == ["lock"]:
         # Uses the network to read the repo listing; --verify works offline.
         from .lock import main as lock_main
@@ -369,6 +374,11 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
         "--cache", type=Path, metavar="FILE",
         help="content-hash scan cache; a re-run skips files whose bytes are "
              "unchanged since the cache was written",
+    )
+    scan.add_argument(
+        "--receipt", type=Path, metavar="FILE",
+        help="also write an unsigned in-toto scan receipt: each file's hash and "
+             "what the scanner found, before --policy and --allowlist",
     )
     scan.add_argument(
         "--progress", action="store_true",
@@ -471,6 +481,24 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
         # indistinguishable from that.
         print(f"hayward: scan crashed: {exc}", file=sys.stderr)
         return 2
+
+    if args.receipt is not None:
+        # Written from the scanner's own findings, before --policy and
+        # --allowlist: the receipt is evidence, not an acceptance decision.
+        if root is None:
+            print("hayward: --receipt needs targets under one common directory", file=sys.stderr)
+            return 2
+        from hayward.receipt import build as build_receipt
+
+        files = _collect_files(targets, scanner, args.exclude, root)
+        settings = {"check_signatures": args.check_signatures, "max_scan_bytes": scanner.MAX_SCAN_BYTES}
+        try:
+            args.receipt.write_text(
+                json.dumps(build_receipt(files, root, findings, settings), indent=1) + "\n",
+                encoding="utf-8")
+        except OSError as exc:
+            print(f"hayward: receipt: {exc}", file=sys.stderr)
+            return 2
 
     if cache is not None:
         # A save failure is a persistence problem, not a scan problem: warn but

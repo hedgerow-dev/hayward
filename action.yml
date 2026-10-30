@@ -30,6 +30,21 @@ inputs:
       missing, changed or extra file fails the build before the scan runs.
     required: false
     default: ""
+  receipt:
+    description: >-
+      Optional path for a scan receipt (hayward 1.9.0 or later): an in-toto
+      statement of each scanned file's hash and what the scanner found. Not a
+      safety certificate.
+    required: false
+    default: ""
+  attest:
+    description: >-
+      Set to "true" to sign the receipt with GitHub artifact attestations
+      (Sigstore, keyless). Needs `receipt`, and the job needs the permissions
+      `id-token: write` and `attestations: write`. Runs even when the scan
+      fails the build, since a receipt for a flagged file is still evidence.
+    required: false
+    default: "false"
   output:
     description: Path for the SARIF report.
     required: false
@@ -46,6 +61,9 @@ outputs:
   sarif:
     description: Path to the SARIF report written by the scan.
     value: ${{ inputs.output }}
+  receipt:
+    description: Path to the scan receipt, when one was requested.
+    value: ${{ inputs.receipt }}
 
 runs:
   using: composite
@@ -81,15 +99,59 @@ runs:
       run: hayward lock --verify "$LOCK_FILE" "$SCAN_PATH"
 
     - name: Run scan
+      id: scan
       shell: bash
       env:
         SCAN_PATH: ${{ inputs.path }}
         SCAN_OUTPUT: ${{ inputs.output }}
         FAIL_ON: ${{ inputs.fail-on }}
         FAIL_ON_COVERAGE: ${{ inputs.fail-on-coverage }}
+        RECEIPT: ${{ inputs.receipt }}
       run: |
+        # Only a receipt this scan wrote may be signed, never one already in
+        # the checkout.
+        if [ -n "$RECEIPT" ]; then
+          rm -f -- "$RECEIPT"
+        fi
         args=(scan "$SCAN_PATH" -f sarif -o "$SCAN_OUTPUT" --fail-on "$FAIL_ON")
         if [ "$FAIL_ON_COVERAGE" = "true" ]; then
           args+=(--fail-on-coverage)
         fi
+        if [ -n "$RECEIPT" ]; then
+          args+=(--receipt "$RECEIPT")
+        fi
         hayward "${args[@]}"
+
+    # actions/attest builds and signs the in-toto statement itself, from a
+    # predicate file and a checksums file of the subjects, so both are cut from
+    # the receipt. Paths come in through the environment, like the steps above.
+    - name: Prepare the receipt for signing
+      if: ${{ (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') && inputs.attest == 'true' && inputs.receipt != '' && hashFiles(inputs.receipt) != '' }}
+      shell: bash
+      env:
+        RECEIPT: ${{ inputs.receipt }}
+      run: |
+        python - "$RECEIPT" "$RUNNER_TEMP/hayward-predicate.json" "$RUNNER_TEMP/hayward-subjects.txt" <<'PY'
+        import json, sys
+        import re
+        statement = json.load(open(sys.argv[1], encoding="utf-8"))
+        lines = []
+        for subject in statement["subject"]:
+            digest, name = subject["digest"]["sha256"], subject["name"]
+            # One subject per line: a control character in a file name would
+            # add a line, and so a subject the scan never saw.
+            if not re.fullmatch(r"[0-9a-f]{64}", digest) or any(ord(c) < 32 or ord(c) == 127 for c in name):
+                sys.exit(f"hayward: refusing to sign a receipt with an unusual subject: {name!r}")
+            lines.append(f"{digest}  {name}\n")
+        json.dump(statement["predicate"], open(sys.argv[2], "w", encoding="utf-8"))
+        with open(sys.argv[3], "w", encoding="utf-8") as out:
+            out.writelines(lines)
+        PY
+
+    - name: Sign the receipt
+      if: ${{ (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') && inputs.attest == 'true' && inputs.receipt != '' && hashFiles(inputs.receipt) != '' }}
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-checksums: ${{ runner.temp }}/hayward-subjects.txt
+        predicate-type: https://hedgerow.dev/hayward/scan-receipt/v1
+        predicate-path: ${{ runner.temp }}/hayward-predicate.json

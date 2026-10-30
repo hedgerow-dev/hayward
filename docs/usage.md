@@ -107,6 +107,38 @@ would load from outside the repo is recorded as unresolved and the lock is marke
 `needs_review` (exit code 1): an `auto_map` entry that loads code from another
 repo (`other/repo--module.Class`), or an adapter's base model. A lock pins what
 will be loaded; it does not say the files are safe. Scan them as well.
+
+## Scan receipts
+
+```bash
+hayward scan ./models --receipt receipt.intoto.json
+hayward receipt verify receipt.intoto.json ./models
+```
+
+`--receipt` writes an unsigned [in-toto](https://in-toto.io) statement. Its
+subjects are the scanned files with their SHA-256 digests. Its predicate
+(`https://hedgerow.dev/hayward/scan-receipt/v1`) records the Hayward version and
+settings, the scan time, and for each file its verdict, the rules that fired and
+its coverage gaps (what was not fully read). It is taken from the scanner's own
+findings, before `--policy` and `--allowlist`, so your acceptance decisions stay
+separate from what the scanner saw.
+
+`receipt verify` checks a directory against it, offline: a file that is missing
+or changed fails, and so does a model file the receipt does not cover. Verify
+the same directory you scanned.
+
+Hayward does not sign receipts. Sign one with GitHub artifact attestations (the
+action's `attest` input) or with cosign:
+
+```bash
+cosign attest-blob --type https://hedgerow.dev/hayward/scan-receipt/v1 \
+  --predicate <(jq .predicate receipt.intoto.json) models/model.safetensors
+```
+
+A receipt is analysis evidence, not a safety certificate. Old receipts are never
+rewritten: rescan to get a new one, and treat the newest receipt for a digest as
+current.
+
 ## Explain a pickle
 
 ```bash
