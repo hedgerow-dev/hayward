@@ -93,3 +93,24 @@ COVERAGE_RULE_IDS = frozenset({
 def is_coverage_gap(finding: Finding) -> bool:
     """True when the finding reports that analysis did not complete."""
     return finding.rule_id in COVERAGE_RULE_IDS
+
+
+def file_verdicts(findings: list[Finding]) -> dict[str, str]:
+    """One verdict per file that has findings (issue #14).
+
+    "flagged" is a detection at LOW or above, and wins over a coverage gap.
+    "not_verified" means the only findings are coverage gaps. "clean" means at
+    most INFO notes. A file with no findings at all is clean and not listed.
+    """
+    rank = {"clean": 0, "not_verified": 1, "flagged": 2}
+    verdicts: dict[str, str] = {}
+    for finding in findings:
+        if is_coverage_gap(finding):
+            verdict = "not_verified"
+        elif finding.severity != Severity.INFO:
+            verdict = "flagged"
+        else:
+            verdict = "clean"
+        current = verdicts.get(finding.file_path, "clean")
+        verdicts[finding.file_path] = max(current, verdict, key=rank.__getitem__)
+    return verdicts

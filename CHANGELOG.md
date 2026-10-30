@@ -4,6 +4,14 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- A verdict per file, separate from severity (#14): `flagged`, `not_verified`
+  or `clean`. JSON reports carry it as `verdicts`, and each SARIF result as
+  `properties.verdict`. `--fail-on` and `--fail-on-coverage` are unchanged.
+
 ## 1.7.2 (2026-10-30)
 
 ### Fixed

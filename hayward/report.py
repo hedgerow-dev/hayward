@@ -21,7 +21,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hayward.findings import Finding, is_coverage_gap
+from hayward.findings import Finding, file_verdicts, is_coverage_gap
 
 _ORDER = ("critical", "high", "medium", "low", "info")
 
@@ -76,6 +76,7 @@ def to_json(findings: list[Finding], root: Path | None, version: str) -> str:
         "counts": _counts(findings),
         "findings": [f.to_dict() for f in _ordered(findings)],
         "coverage_gaps": [f.file_path for f in findings if is_coverage_gap(f)],
+        "verdicts": file_verdicts(findings),
     }, indent=2)
 
 
@@ -246,6 +247,7 @@ def to_sarif(findings: list[Finding], root: Path | None, version: str) -> str:
     rules: list[dict[str, object]] = []
     rule_index: dict[str, int] = {}
     results: list[dict[str, object]] = []
+    verdicts = file_verdicts(findings)
     for finding in _ordered(findings):
         index = rule_index.get(finding.rule_id)
         if index is None:
@@ -266,6 +268,7 @@ def to_sarif(findings: list[Finding], root: Path | None, version: str) -> str:
                     },
                 },
             }],
+            "properties": {"verdict": verdicts[finding.file_path]},
         })
     return json.dumps({
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
