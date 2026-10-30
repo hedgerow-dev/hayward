@@ -966,6 +966,19 @@ class ModelFileScanner:
             if other_pb:
                 return []  # as before: an unrelated protobuf, not worth a skip
 
+            # Same again for SafeTensors: everything a loader acts on (dtypes,
+            # shapes, offsets, metadata) is in the first 8 + header_size bytes,
+            # and the rest is raw tensor bytes no loader executes. Most real
+            # models are SafeTensors files of several GB, which were all being
+            # reported as never scanned. The header is capped at the format's
+            # own 100 MB limit, which _scan_safetensors enforces.
+            if fmt == ModelFormat.SAFETENSORS:
+                with open(file_path, "rb") as handle:
+                    head = handle.read(8)
+                    declared = struct.unpack("<Q", head)[0] if len(head) == 8 else 0
+                    head += handle.read(min(declared, 100_000_000))
+                return self._scan_safetensors(file_path, head, file_size=file_size)
+
             # Same argument for HDF5. A Keras .h5 keeps its architecture in a
             # `model_config` attribute of a few kilobytes; the rest is weights.
             # Two MalHug models, MustEr/vgg_official and vgg16_light, are 553MB
@@ -1896,9 +1909,16 @@ class ModelFileScanner:
 
     # ── SafeTensors scanning ──────────────────────────────────────
 
-    def _scan_safetensors(self, file_path: Path, data: bytes) -> list[Finding]:
-        """Validate SafeTensors format integrity."""
+    def _scan_safetensors(self, file_path: Path, data: bytes,
+                          file_size: int | None = None) -> list[Finding]:
+        """Validate SafeTensors format integrity.
+
+        ``data`` is the whole file, or, for a file over the scan cap, just its
+        8-byte length and header, with ``file_size`` the size on disk.
+        """
         findings: list[Finding] = []
+        if file_size is None:
+            file_size = len(data)
 
         if len(data) < 8:
             return [Finding(
@@ -1950,7 +1970,7 @@ class ModelFileScanner:
             )]
 
         layout_problems = _check_safetensors_layout(
-            header, len(data) - 8 - int(header_size))
+            header, file_size - 8 - int(header_size))
         if layout_problems:
             findings.append(Finding(
                 rule_id="MFV-ST-006",

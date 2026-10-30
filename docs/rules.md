@@ -98,7 +98,7 @@ CRITICAL.
 |------|----------|-----|------------|
 | `MFV-EXEC-001` | HIGH | 506 | A loadable binary (PE, ELF, Mach-O) is embedded. No serialisation format writes one |
 | `MFV-CONFUSE-001` | HIGH | - | Extension implies one format, magic bytes say another |
-| `MFV-SKIP-001` | LOW | - | File exceeds the 500MB cap and cannot be streamed (ZIP and Keras HDF5 can) |
+| `MFV-SKIP-001` | LOW | - | File exceeds the 500MB cap and cannot be streamed (ZIP, Keras HDF5 and SafeTensors can) |
 | `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed. Includes a compressed tar that would decompress more than 500 MB, and a long-name or pax header over 1 MB |
 | `MFV-SKIP-003` | LOW | - | Content could not be verified |
 | `MFV-7Z-001` | INFO | - | A `.7z` archive is present and no extractor is available |
@@ -127,7 +127,9 @@ Known blind spots as of 2026-08-05:
 - **Files over 500MB are read only when the format allows it without loading
   the whole file.** ZIP containers are streamed member by member, and HDF5 is
   streamed to its `model_config` attribute, so oversized `.pt` and Keras `.h5`
-  models are both scanned. Any other format over the cap reports
+  models are both scanned. An oversized SafeTensors file is checked by its
+  header (everything a loader acts on); its tensor bytes are not searched for
+  embedded binaries. Any other format over the cap reports
   `MFV-SKIP-001` and is not read.
 - **`.7z` archives need a system `7zz` or `7z` on PATH.** py7zr is LGPL-2.1 and
   cannot be bundled. With an extractor present the archive is unpacked to a

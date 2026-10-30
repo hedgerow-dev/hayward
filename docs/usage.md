@@ -78,13 +78,19 @@ network, and nothing is loaded or run. Any other flag goes to `scan`.
 - Files over `--max-file-mb` (default 50) are not fetched whole. A **zip
   checkpoint** (what `torch.save` writes: `.pt`, `.pth`, `.bin`, `.ckpt`) is read
   by Range request for its pickle member only, which is the part that can run
-  code. The run says so on stderr; the tensor data is not read and the partial
-  read cannot be checked against the Hub's file hash. At most 64 MB is fetched
-  per file and 16 pickle members are read.
+  code. A **`.safetensors`** file is read for its header only, which holds
+  everything a loader acts on (dtypes, shapes, offsets, metadata). The run says
+  so on stderr; the tensor data is not read and the partial read cannot be
+  checked against the Hub's file hash. At most 64 MB is fetched per file and 16
+  pickle members are read.
 - Anything else over the cap is named on stderr as `NOT SCANNED`, with the
-  reason: an older non-zip checkpoint, a `.safetensors`, `.gguf` or `.onnx`
-  file, a zip that will not parse. A clean result does not cover those files;
-  raise `--max-file-mb` to fetch them whole.
+  reason: an older non-zip checkpoint, a `.gguf` or `.onnx` file, a zip that
+  will not parse. A clean result does not cover those files; raise
+  `--max-file-mb` to fetch them whole.
+- With `--receipt`, a file read in part is recorded under the Hub's own SHA-256
+  for it, marked `"read": "header"` or `"read": "pickle members"` and
+  `"hash_source": "hub"`, so the receipt names the real file and verifies
+  against a full download. One with no Hub hash is left out of the receipt.
 - A private or gated repo needs `HF_TOKEN` in the environment. It is sent only to
   `huggingface.co`, and not on to the CDN it redirects to.
 - The report names the target `hf://org/name@commit`. The temp folder is deleted.

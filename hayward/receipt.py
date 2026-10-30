@@ -58,6 +58,9 @@ def build(files: list[Path], root: Path, findings: list[Finding], settings: dict
             "rules": sorted({f.rule_id for f in own if not is_coverage_gap(f)}),
             "coverage_gaps": sorted({f.rule_id for f in own if is_coverage_gap(f)}),
         }
+        # Over the cap, the scanner reads a SafeTensors file by its header only.
+        if path.suffix.lower() == ".safetensors" and path.stat().st_size > settings.get("max_scan_bytes", 0):
+            entries[name]["read"] = "header"
     return {
         "_type": STATEMENT_TYPE,
         "subject": subjects,

@@ -218,10 +218,10 @@ def test_a_big_legacy_tar_is_not_scanned_and_says_why(monkeypatch, capsys):
 
 
 def test_other_big_formats_are_not_range_read(monkeypatch, capsys):
-    fake = FakeHub(monkeypatch, {"model.safetensors": b"x" * FILLER})
+    fake = FakeHub(monkeypatch, {"model.gguf": b"x" * FILLER})
     _, _, err = run(BIG, capsys)
     assert fake.range_calls == 0
-    assert "NOT SCANNED" in err and "model.safetensors" in err
+    assert "NOT SCANNED" in err and "model.gguf" in err
 
 
 def test_a_pickle_member_over_the_budget_is_not_scanned(monkeypatch, capsys):
@@ -303,3 +303,95 @@ def test_compressed_tars_with_a_double_suffix_are_fetched(monkeypatch, capsys):
     fake = FakeHub(monkeypatch, {"data.tar.gz": b"x", "b.tar.xz": b"x", "c.tgz": b"x", "notes.gz": b"x"})
     run(["org/name", "--quiet"], capsys)
     assert sorted(fake.downloaded) == ["b.tar.xz", "c.tgz", "data.tar.gz"]
+
+
+# ---- big SafeTensors: only the header is fetched ----------------------------------------
+
+import json  # noqa: E402
+import struct  # noqa: E402
+
+GB = 3 * 1024 ** 3
+
+
+def safetensors(metadata=None):
+    """The header of a 3 GB SafeTensors file, plus a few bytes of its data."""
+    header = {"w": {"dtype": "U8", "shape": [0], "data_offsets": [0, 0]}}
+    if metadata:
+        header["__metadata__"] = metadata
+    for _ in range(2):  # the data size depends on the header length, which depends on it
+        raw = json.dumps(header).encode()
+        data_bytes = GB - 8 - len(raw)
+        header["w"].update(shape=[data_bytes], data_offsets=[0, data_bytes])
+    raw = json.dumps(header).encode()
+    assert 8 + len(raw) + header["w"]["data_offsets"][1] == GB
+    return struct.pack("<Q", len(raw)) + raw + b"\0" * 4096
+
+
+def big_safetensors_hub(monkeypatch, data: bytes, lfs=True):
+    sha = {"model.safetensors": "b" * 64} if lfs else {}
+    return FakeHub(monkeypatch, {"model.safetensors": data}, sizes={"model.safetensors": GB}, lfs=sha)
+
+
+def test_a_big_safetensors_file_is_read_by_its_header(monkeypatch, capsys):
+    fake = big_safetensors_hub(monkeypatch, safetensors())
+    code, _, err = run(BIG, capsys)
+    assert code == 0
+    assert fake.downloaded == []
+    assert 0 < fake.range_bytes < 10_000
+    assert "NOT SCANNED" not in err and "header" in err and "model.safetensors" in err
+
+
+def test_a_big_safetensors_file_with_bad_metadata_is_caught(monkeypatch, capsys):
+    big_safetensors_hub(monkeypatch, safetensors(metadata={"__reduce__": "os.system"}))
+    code, out, _ = run(BIG, capsys)
+    assert code == 1 and "MFV-ST-005" in out
+
+
+def _receipt(tmp_path, capsys):
+    out = tmp_path / "r.json"
+    run([*BIG, "--receipt", str(out), "-f", "json", "-o", str(tmp_path / "rep.json")], capsys)
+    return json.loads(out.read_text())
+
+
+def test_a_receipt_uses_the_hubs_hash_for_a_header_read_file(monkeypatch, tmp_path, capsys):
+    big_safetensors_hub(monkeypatch, safetensors())
+    statement = _receipt(tmp_path, capsys)
+    assert statement["subject"] == [{"name": "model.safetensors", "digest": {"sha256": "b" * 64}}]
+    entry = statement["predicate"]["files"]["model.safetensors"]
+    assert entry["read"] == "header" and entry["hash_source"] == "hub"
+
+
+def test_a_receipt_uses_the_hubs_hash_for_a_range_read_checkpoint(monkeypatch, tmp_path, capsys):
+    FakeHub(monkeypatch, {"model.pt": zip_checkpoint(CLEAN)}, lfs={"model.pt": "c" * 64})
+    statement = _receipt(tmp_path, capsys)
+    assert statement["subject"] == [{"name": "model.pt", "digest": {"sha256": "c" * 64}}]
+    assert statement["predicate"]["files"]["model.pt"]["read"] == "pickle members"
+
+
+def test_a_partly_read_file_with_no_hub_hash_is_left_out_of_the_receipt(monkeypatch, tmp_path, capsys):
+    FakeHub(monkeypatch, {"model.pt": zip_checkpoint(CLEAN), "small.pkl": CLEAN})
+    statement = _receipt(tmp_path, capsys)
+    assert [s["name"] for s in statement["subject"]] == ["small.pkl"]
+    assert "model.pt" not in statement["predicate"]["files"]
+
+
+def test_a_malformed_hub_hash_is_not_put_in_a_receipt(monkeypatch, tmp_path, capsys):
+    FakeHub(monkeypatch, {"model.pt": zip_checkpoint(CLEAN), "small.pkl": CLEAN}, lfs={"model.pt": "not-a-hash\n"})
+    statement = _receipt(tmp_path, capsys)
+    assert [s["name"] for s in statement["subject"]] == ["small.pkl"]
+
+
+def test_a_stale_receipt_is_never_rewritten(monkeypatch, tmp_path, capsys):
+    stale = tmp_path / "r.json"
+    stale.write_text("not a receipt")
+    FakeHub(monkeypatch, {"model.pt": zip_checkpoint(CLEAN)}, lfs={"model.pt": "c" * 64})
+    monkeypatch.setattr(hub, "scan_main", lambda argv, label=None: 2)  # the scan fails before writing
+    run([*BIG, "--receipt", str(stale)], capsys)
+    assert not stale.exists()
+
+
+def test_the_last_receipt_flag_is_the_one_used(monkeypatch, tmp_path, capsys):
+    FakeHub(monkeypatch, {"model.pt": zip_checkpoint(CLEAN)}, lfs={"model.pt": "c" * 64})
+    first, last = tmp_path / "a.json", tmp_path / "b.json"
+    run([*BIG, "--receipt", str(first), "--receipt", str(last), "-f", "json", "-o", str(tmp_path / "x.json")], capsys)
+    assert json.loads(last.read_text())["subject"][0]["digest"]["sha256"] == "c" * 64
