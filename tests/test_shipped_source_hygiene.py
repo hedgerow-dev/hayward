@@ -13,7 +13,7 @@ PATTERNS = [
     re.compile(r"(curl|wget)[^\n]*\|\s*(ba)?sh"),   # download piped into a shell
     re.compile(r"/etc/(passwd|shadow)"),            # reading a system credential file
     re.compile(r"rm -rf /"),
-    re.compile(r"bash -i|/dev/tcp/|nc -e"),         # reverse shells
+    re.compile(r"bash -i|/dev/tcp/|\bnc -e"),         # reverse shells
 ]
 
 

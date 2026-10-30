@@ -783,7 +783,7 @@ class PickleResolvedCall:
     """A REDUCE/NEWOBJ/NEWOBJ_EX/INST/OBJ call site whose callable resolved
     to a known `module.name` global AND whose argument(s) resolved entirely
     to literal constants already on the simulated stack -- e.g. the concrete
-    the download-and-run shell command actually passed to `os.system`, not merely the fact
+    download-and-run shell command actually passed to `os.system`, not merely the fact
     that `os.system` is referenced somewhere in the stream. This is the
     fickling-style argument-level evidence layered on top of the existing
     global-reference walk.
@@ -1743,6 +1743,9 @@ _PICKLE_ALLOWED_STRING_ARG_OK: frozenset[str] = frozenset({
     # hex form, Fraction('1/3') (how Python 3.10 pickles one), a timezone's
     # name, and path segments, absolute ones included.
     "decimal.Decimal", "uuid.UUID", "fractions.Fraction",
+    # int('42'), float('1.5'), str('x'), bytes('abc', 'utf-8'): text in, a value out.
+    "builtins.int", "builtins.float", "builtins.str", "builtins.bytes",
+    "__builtin__.int", "__builtin__.float", "__builtin__.str", "__builtin__.bytes",
     "datetime.timezone",
     "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
     "pathlib.PosixPath", "pathlib.WindowsPath",
