@@ -4,6 +4,16 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- The load guard refuses remote code. With `trust_remote_code=True`,
+  transformers runs a model repo's own Python files; once `hayward.guard` is
+  imported, that code is refused before it runs (`MFV-HF-002`) unless
+  `install(remote_code=["org/name"])` names the repo. This changes what
+  `import hayward.guard` does for anyone loading remote code today.
+
 ## 1.6.0 (2026-10-30)
 
 ### Fixed

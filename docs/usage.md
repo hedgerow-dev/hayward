@@ -335,6 +335,23 @@ CRITICAL, so outside strict mode `fail_on="never"` lets it load, like warn
 mode without the warning. `HAYWARD_GUARD=off` makes the import a no-op, for
 CI that already scans.
 
+### Remote code
+
+With `trust_remote_code=True`, transformers runs the model repo's own `.py`
+files. The guard refuses that code before it runs, as `MFV-HF-002`, for any
+`from_pretrained` call, unless you name the repo:
+
+```python
+hayward.guard.install(remote_code=["org/name"])  # a Hub repo
+hayward.guard.install(remote_code=["my_model"])  # a local model folder, by its name
+```
+
+Naming a repo allows its code at any revision, so pin `revision=` as well, or
+check the snapshot with `hayward lock --verify`. Like other findings, it
+follows `fail_on` and `mode`: it is HIGH, so `fail_on="critical"` lets it run
+and warn mode warns. Strict mode refuses it whatever `fail_on` is. A one-part
+name such as `my_model` matches a local folder of that name wherever it is.
+
 ### Default mode raises the bar; it is not a sandbox
 
 By default the guard refuses denied callables and anything the scan rates
@@ -378,6 +395,9 @@ name-shape rule for scikit-learn and SciPy.
 - `torch.load(weights_only=True)` uses torch's own restricted unpickler; the
   scan still runs, the load-time check does not.
 - In default mode, work a pickle hands to another thread.
+- Remote code that is not run by transformers from its `transformers_modules`
+  cache, such as diffusers' custom pipelines, and remote code transformers
+  already imported before the guard was installed.
 - A stream that cannot seek is not scanned first; the load-time check still
   applies. A file the scan could not fully read (a coverage finding,
   `MFV-SKIP-*`) warns and loads, with the load-time check still on.
