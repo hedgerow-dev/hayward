@@ -54,8 +54,26 @@ Exit status), so a failing scan still records its findings on the Security tab.
 | `path`             | yes      |                  | File or directory of model files to scan.                                                               |
 | `fail-on`          | no       | `high`           | Lowest severity that fails the build: `critical`, `high`, `medium`, `low`, `info`, or `never`.          |
 | `fail-on-coverage` | no       | `false`          | Set to `true` to also fail when a file could not be fully read.                                         |
+| `lock`             | no       | (empty)          | A `hayward lock` file. The path must match it exactly, or the build fails before the scan. See below.   |
 | `output`           | no       | `hayward.sarif`  | Path for the SARIF report.                                                                              |
 | `version`          | no       | (empty)          | Version of the `hayward` package to install from PyPI. See Version below.                               |
+
+### Verify against a lock
+
+With `lock`, the action first runs `hayward lock --verify` on `path`: every file
+in the lock must be present with the same hash, and nothing else may be there,
+so an extra `.py` or a swapped weight file fails the build before anything is
+scanned. Make the lock with `hayward lock org/name -o hayward.lock.json` (hayward
+1.5.0 or later) and commit it next to the workflow. A lock that needs review
+never verifies. A lock pins what is loaded; the scan that follows still checks
+what those files do.
+
+```yaml
+      - uses: hedgerow-dev/hayward@v1
+        with:
+          path: models/my-model
+          lock: models/my-model.lock.json
+```
 
 ## Outputs
 

@@ -36,6 +36,17 @@ jobs:
               def __reduce__(self):
                   return (os.system, ("echo pwned",))
           (root / "bad" / "evil.pkl").write_bytes(pickle.dumps(Evil()))
+          # A lock for the clean folder, and a copy of it with one extra file.
+          import hashlib, json, shutil
+          data = (root / "clean" / "model.safetensors").read_bytes()
+          lock = {"format": "hayward-lock/1", "profile": "transformers.from_pretrained",
+                  "repo": "selftest/clean", "revision": "0" * 40, "status": "complete",
+                  "requires_trust_remote_code": False, "code_files": [], "unresolved": [],
+                  "files": [{"path": "model.safetensors", "size": len(data),
+                             "sha256": hashlib.sha256(data).hexdigest()}]}
+          (root / "clean.lock.json").write_text(json.dumps(lock))
+          shutil.copytree(root / "clean", root / "tampered")
+          (root / "tampered" / "modeling_extra.py").write_text("print('not in the lock')")
           PY
 
       - name: Clean scan should pass
@@ -55,6 +66,31 @@ jobs:
           assert d["runs"][0]["results"] == [], d["runs"][0]["results"]
           print("clean SARIF OK")
           PY
+
+      - name: A folder that matches its lock should pass
+        uses: ./
+        with:
+          path: fixtures/clean
+          lock: fixtures/clean.lock.json
+          output: locked.sarif
+
+      - name: A folder with a file outside the lock should fail
+        id: tampered
+        continue-on-error: true
+        uses: ./
+        with:
+          path: fixtures/tampered
+          lock: fixtures/clean.lock.json
+          output: tampered.sarif
+
+      - name: The lock check failed the build
+        env:
+          OUTCOME: ${{ steps.tampered.outcome }}
+        run: |
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "expected the lock check to fail on an extra file, got: $OUTCOME"
+            exit 1
+          fi
 
       - name: Malicious scan should fail the build
         id: scan
