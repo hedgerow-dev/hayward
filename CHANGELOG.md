@@ -4,6 +4,19 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- Scan receipts (#38). `hayward scan --receipt FILE` writes an unsigned in-toto
+  statement: each scanned file's SHA-256, plus the Hayward version, settings,
+  and each file's verdict, rules and coverage gaps. It is taken before
+  `--policy` and `--allowlist`. `hayward receipt verify FILE DIR` checks a
+  directory against it offline. The GitHub Action gains `receipt` and
+  `attest` inputs; `attest: true` signs the receipt with `actions/attest`
+  (keyless Sigstore). A receipt is analysis evidence, not a safety
+  certificate.
+
 ## 1.8.0 (2026-10-30)
 
 ### Added
