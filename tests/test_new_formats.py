@@ -469,7 +469,7 @@ class TestGgufLayoutArithmetic:
 
     def test_too_many_dims(self, tmp_path):
         findings = self._scan(tmp_path, self._gguf(
-            tensors=[(b"t", [1, 1, 1, 1, 1], 0, 0)],
+            tensors=[(b"t", [1] * 9, 0, 0)],  # 5 is real (ComfyUI-GGUF); over 8 is not
         ))
         assert any(f.rule_id == "MFV-GGUF-005" for f in findings)
 
