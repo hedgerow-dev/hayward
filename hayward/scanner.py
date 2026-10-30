@@ -25,7 +25,6 @@ from __future__ import annotations
 import ast
 import bz2
 import contextlib
-import gzip
 import io
 import json
 import logging
@@ -2635,6 +2634,11 @@ class ModelFileScanner:
     # A GNU long-name or pax header has its declared size read into memory inside
     # tarfile, before any per-member check here can run. Real ones are tiny.
     _TAR_MAX_EXTENDED_HEADER_BYTES = 1 << 20
+    # Stopping early must not become a way to hide a payload behind padding. Real
+    # weights compress a little; a member that would decompress to this many
+    # times the whole file's size is a bomb, and is reported HIGH, not only as a
+    # coverage gap. An over-cap extended header is reported the same way.
+    _TAR_BOMB_RATIO = 100
     _TORCH_TAR_PICKLES = frozenset({"sys_info", "pickle", "storages", "tensors"})
 
     def _scan_tar_pickles(self, file_path: Path) -> list[Finding]:
@@ -2672,7 +2676,9 @@ class ModelFileScanner:
             with archive as tf:
                 hit_member_cap = False
                 hit_budget = False
-                compressed = isinstance(tf.fileobj, (gzip.GzipFile, bz2.BZ2File, lzma.LZMAFile))
+                # Anything but a plain file object decompresses as it reads
+                # (gzip, bz2, xz, and any codec a newer tarfile adds).
+                compressed = not isinstance(tf.fileobj, io.BufferedReader)
                 member_names: list[str] = []
                 link_members: list[tuple[str, str]] = []
                 # torch.load reads each of its members by name, and
@@ -2687,6 +2693,7 @@ class ModelFileScanner:
                     if compressed and member.offset_data + member.size > self._TAR_MAX_DECOMPRESSED_BYTES:
                         hit_budget = True
                         budget_member = member.name
+                        budget_end = member.offset_data + member.size
                         break
                     # member.name is the raw stored name; tarfile does not strip
                     # a "../" or leading "/" from it, so it is a direct zip-slip
@@ -2762,6 +2769,20 @@ class ModelFileScanner:
                         metadata={"skipped_reason": "decompression_budget",
                                   "tar_member": budget_member},
                     ))
+                    ratio = budget_end / max(file_path.stat().st_size, 1)
+                    if ratio > self._TAR_BOMB_RATIO:
+                        findings.append(Finding(
+                            rule_id="MFV-PICKLE-003",
+                            message=f"Compressed tar member {budget_member!r} would "
+                                    f"decompress to about {ratio:,.0f} times the size of the "
+                                    f"whole file: a decompression bomb, which also hides "
+                                    f"anything stored after it.",
+                            severity=Severity.HIGH,
+                            category=Category.AI_ML,
+                            file_path=str(file_path),
+                            confidence=0.80,
+                            metadata={"tar_member": budget_member, "ratio": round(ratio)},
+                        ))
                 else:
                     consumed = tf.offset
                     file_size = file_path.stat().st_size
@@ -2799,6 +2820,19 @@ class ModelFileScanner:
                 confidence=0.50,
                 metadata={"skipped_reason": "tar_walk_failed", "error": type(exc).__name__},
             ))
+            # tarfile re-raises our refusal as a ReadError; the original is kept
+            # as the context. No real tool writes a path or pax record this big.
+            if isinstance(exc.__context__, _HeaderTooLarge):
+                findings.append(Finding(
+                    rule_id="MFV-PICKLE-003",
+                    message=f"Tar archive is crafted: {exc.__context__}. Members after "
+                            f"that header were not read.",
+                    severity=Severity.HIGH,
+                    category=Category.AI_ML,
+                    file_path=str(file_path),
+                    confidence=0.80,
+                    metadata={"oversized_tar_header": True},
+                ))
         return findings
 
     def _scan_tar_member(

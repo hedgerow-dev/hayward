@@ -120,3 +120,34 @@ def test_a_pickle_renamed_tgz_is_still_caught(tmp_path):
     # Not a tar at all: falls through to the content sniff, like a renamed .tar.
     findings = scan(tmp_path, "model.tgz", EVAL)
     assert denied(findings)
+
+
+# ---- stopping early must not hide a payload at a low severity ------------------------------
+
+def high(findings):
+    return [f for f in findings if f.rule_id == "MFV-PICKLE-003"]
+
+
+def test_a_bomb_member_that_hides_a_payload_is_high(tmp_path, monkeypatch):
+    monkeypatch.setattr(ModelFileScanner, "_TAR_MAX_DECOMPRESSED_BYTES", 1_000_000)
+    data = gzip.compress(tar_bytes([("model_config.yaml", ZEROS), ("model_weights.ckpt", EVAL)]))
+    findings = scan(tmp_path, "model.nemo", data)
+    assert high(findings) and "bomb" in high(findings)[0].message
+
+
+def test_a_large_member_that_does_not_compress_is_only_a_coverage_gap(tmp_path, monkeypatch):
+    # Real weights barely compress, so a big member is not by itself a bomb.
+    import random
+    monkeypatch.setattr(ModelFileScanner, "_TAR_MAX_DECOMPRESSED_BYTES", 1_000_000)
+    noise = random.Random(1).randbytes(2_000_000)
+    data = gzip.compress(tar_bytes([("model_weights.ckpt", noise)]))
+    findings = scan(tmp_path, "model.nemo", data)
+    assert "decompression_budget" in reasons(findings) and not high(findings)
+
+
+def test_an_oversized_header_is_high(tmp_path, monkeypatch):
+    monkeypatch.setattr(ModelFileScanner, "_TAR_MAX_EXTENDED_HEADER_BYTES", 4096)
+    data = tar_bytes([("first.txt", b"hello"), ("a/" * 5000 + "x.ckpt", b"data"),
+                      ("model_weights.ckpt", EVAL)], fmt=tarfile.GNU_FORMAT)
+    findings = scan(tmp_path, "model.nemo", data)
+    assert high(findings) and "crafted" in high(findings)[0].message
