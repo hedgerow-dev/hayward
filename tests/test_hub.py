@@ -297,3 +297,9 @@ def test_fetch_range_refuses_anything_but_the_exact_range_over_https(monkeypatch
     _range_response(monkeypatch, resp)
     with pytest.raises(hub.RangeSkip):
         hub._fetch_range("https://huggingface.co/x", 10, 14, 100)
+
+
+def test_compressed_tars_with_a_double_suffix_are_fetched(monkeypatch, capsys):
+    fake = FakeHub(monkeypatch, {"data.tar.gz": b"x", "b.tar.xz": b"x", "c.tgz": b"x", "notes.gz": b"x"})
+    run(["org/name", "--quiet"], capsys)
+    assert sorted(fake.downloaded) == ["b.tar.xz", "c.tgz", "data.tar.gz"]

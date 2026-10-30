@@ -1675,7 +1675,7 @@ class ModelFileScanner:
 
         # Pair each classified ref with the first resolved literal-argument
         # call found for it (if any) -- concrete evidence like
-        # os.system('curl ... | sh') is far stronger triage signal than the
+        # os.system with a download-and-run command is far stronger triage signal than the
         # bare callable name, but a ref that was only ever *referenced*
         # (never reduced/called, or reduced with a non-literal/dynamic
         # argument) still falls back to reporting the callable alone,
@@ -3147,7 +3147,7 @@ class ModelFileScanner:
         Conservative by construction, mirroring MFV-ARCHIVE-001: a non-link
         member never reaches here, and `_unsafe_name_reason` returns None for a
         safe in-tree relative target such as `weights/shard1`, so only a
-        hostile target fires. An absolute target with no `..` (`/etc/passwd`)
+        hostile target fires. An absolute target with no `..` (a system file path)
         still fires, because `_unsafe_name_reason` flags a leading `/`.
         """
         problems: list[str] = []

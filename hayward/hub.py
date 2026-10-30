@@ -221,7 +221,8 @@ def _scannable_suffixes() -> frozenset[str]:
 
 def _wanted(name: str, suffixes: frozenset[str]) -> bool:
     base = name.rsplit("/", 1)[-1]
-    return base in CONFIG_NAMES or Path(base).suffix.lower() in suffixes
+    # endswith, not Path.suffix, so the multi-part forms (.tar.gz) match too.
+    return base in CONFIG_NAMES or base.lower().endswith(tuple(suffixes))
 
 
 def _safe_relative(name: str) -> bool:

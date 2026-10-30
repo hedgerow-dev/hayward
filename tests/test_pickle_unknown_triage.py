@@ -1169,3 +1169,17 @@ class TestDistutilsSpawn:
         assert denied, [(f.rule_id, f.severity) for f in findings]
         assert denied[0].severity == Severity.CRITICAL
         assert "distutils.spawn.spawn" in denied[0].message
+
+
+class TestPlainBuiltinValueTypes:
+    """Constructors of plain values build data and run nothing. They used to come out as
+    an INFO "unrecognized global" while their siblings (list, dict, set) were allowed."""
+
+    @pytest.mark.parametrize("name", ["int", "float", "bool", "str", "bytes", "range"])
+    @pytest.mark.parametrize("module", ["builtins", "__builtin__"])
+    def test_value_constructors_are_allowed(self, module, name):
+        assert _classify_pickle_global(f"{module}.{name}") == "allowed"
+
+    @pytest.mark.parametrize("name", ["getattr", "type", "print", "vars", "globals"])
+    def test_callables_that_reach_other_code_stay_unknown_or_denied(self, name):
+        assert _classify_pickle_global(f"builtins.{name}") != "allowed"
