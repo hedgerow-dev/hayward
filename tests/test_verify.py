@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -20,13 +21,14 @@ CLEAN = pickle.dumps({"w": [1, 2]}, protocol=4)
 SHARD = "f" * 64  # the Hub's LFS sha256 for a big file
 
 
-def statement(files: dict, *, repo="org/name", revision=SHA, digests=None):
+def statement(files: dict, *, repo="org/name", revision=SHA, digests=None, days_old=1):
     digests = digests or {}
+    scanned = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat(timespec="seconds")
     return {
         "_type": receipt.STATEMENT_TYPE,
         "predicateType": receipt.PREDICATE_TYPE,
         "subject": [{"name": n, "digest": {"sha256": digests.get(n, SHARD)}} for n in files],
-        "predicate": {"scanner": {"name": "hayward", "version": "test", "settings": {}},
+        "predicate": {"scanner": {"name": "hayward", "version": "test", "settings": {}}, "scanned": scanned,
                       "source": {"host": "huggingface.co", "repo": repo, "revision": revision},
                       "note": receipt.NOTE, "files": files},
     }
@@ -45,8 +47,8 @@ def service(monkeypatch):
         assert url.startswith("https://huggingface.co/api/models/org/name/revision/")
         return {"sha": SHA, "siblings": state["siblings"]}
 
-    def open_bundle(raw, identity, issuer):
-        state["signer"] = (identity, issuer)
+    def open_bundle(raw, identity, issuer, trigger=None):
+        state["signer"] = (identity, issuer, trigger)
         return json.loads(raw)["payload"].encode()
 
     monkeypatch.setattr(verify, "_fetch", fetch)
@@ -74,7 +76,8 @@ def test_a_published_clean_verdict_verifies(service, capsys):
     assert cli.main(["verify", "org/name"]) == 0
     out = capsys.readouterr().out
     assert "clean" in out and "model.safetensors" in out
-    assert service["signer"] == (verify.IDENTITY, verify.ISSUER)  # only the service's own workflow
+    # only the service's own workflow, and only its scheduled run
+    assert service["signer"] == (verify.IDENTITY, verify.ISSUER, "schedule")
 
 
 def test_no_published_verdict_is_not_a_pass(service, capsys):
@@ -103,17 +106,31 @@ def test_a_hash_that_differs_from_the_hub_is_refused(service, capsys):
 def test_a_model_file_the_verdict_does_not_cover_is_named(service, capsys):
     siblings = [*SIBLINGS, {"rfilename": "extra.bin", "lfs": {"sha256": "2" * 64}}]
     service["publish"](statement(FILES), siblings)
-    assert cli.main(["verify", "org/name"]) == 0  # a coverage gap, like `scan`
+    assert cli.main(["verify", "org/name"]) == 1  # strict: a gap is not a pass
     out = capsys.readouterr().out
-    assert "not covered" in out and "extra.bin" in out
-    assert cli.main(["verify", "org/name", "--fail-on-coverage"]) == 1
+    assert "not covered" in out and "extra.bin" in out and "--allow-gaps" in out
+    assert cli.main(["verify", "org/name", "--allow-gaps"]) == 0
 
 
-def test_a_not_verified_file_fails_only_with_fail_on_coverage(service):
+def test_a_not_verified_file_fails_unless_gaps_are_allowed(service):
     files = dict(FILES, **{"config.json": {"verdict": "not_verified", "rules": [], "coverage_gaps": ["MFV-SKIP-003"]}})
     service["publish"](statement(files), SIBLINGS)
-    assert cli.main(["verify", "org/name"]) == 0
-    assert cli.main(["verify", "org/name", "--fail-on-coverage"]) == 1
+    assert cli.main(["verify", "org/name"]) == 1
+    assert cli.main(["verify", "org/name", "--allow-gaps"]) == 0
+
+
+def test_a_verdict_over_30_days_old_does_not_count(service, capsys):
+    service["publish"](statement(FILES, days_old=31), SIBLINGS)
+    assert cli.main(["verify", "org/name"]) == 1
+    assert "31 days old" in capsys.readouterr().out
+
+
+def test_a_verdict_with_no_scan_time_does_not_count(service, capsys):
+    st = statement(FILES)
+    del st["predicate"]["scanned"]
+    service["publish"](st, SIBLINGS)
+    assert cli.main(["verify", "org/name"]) == 1
+    assert "unknown age" in capsys.readouterr().out
 
 
 def _snapshot(tmp_path):
@@ -140,7 +157,7 @@ def _snapshot(tmp_path):
 def test_a_downloaded_snapshot_is_checked_against_the_verdict(service, tmp_path):
     snap, st, siblings = _snapshot(tmp_path)
     service["publish"](st, siblings)
-    assert cli.main(["verify", "org/name", str(snap)]) == 0
+    assert cli.main(["verify", "org/name", str(snap), "--allow-gaps"]) == 0
     (snap / "model.pkl").write_bytes(CLEAN + b"x")
     assert cli.main(["verify", "org/name", str(snap)]) == 1
 
@@ -164,7 +181,7 @@ def test_a_file_added_to_the_snapshot_is_caught(service, tmp_path, capsys):
 def test_uncovered_code_is_named_and_docs_are_not_counted(service, tmp_path, capsys):
     _, st, siblings = _snapshot(tmp_path)
     service["publish"](st, siblings)
-    assert cli.main(["verify", "org/name"]) == 0
+    assert cli.main(["verify", "org/name", "--allow-gaps"]) == 0
     out = capsys.readouterr().out
     assert "not covered, CODE modeling_x.py" in out
     assert "generation_config.json" in out

@@ -16,8 +16,9 @@ within a major version.
   15 GB model is checked in seconds instead of being NOT SCANNED.
 - `hayward verify org/name [DIR]` checks a Hub repo against the signed verdict
   the hayward-verify service publishes for its commit: signed by the service's
-  own workflow, naming this repo and commit, with hashes that match the Hub's,
-  and, with DIR, matching your download. No published verdict is not a pass.
+  own workflow on its schedule, under 30 days old, naming this repo and commit,
+  with hashes that match the Hub's, and, with DIR, every file matching that
+  commit. Gaps fail unless `--allow-gaps`. No published verdict is not a pass.
   Needs `hayward[sign]`.
 - Receipts from `hayward hub` name their source (`predicate.source`: the repo
   and commit).

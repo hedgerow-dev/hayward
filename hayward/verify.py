@@ -1,13 +1,15 @@
 """``hayward verify org/name [DIR]``: check a Hub repo against its published, signed verdict.
 
-    hayward verify org/name [--revision REV] [DIR] [--fail-on-coverage]
+    hayward verify org/name [--revision REV] [DIR] [--allow-gaps]
 
 The hayward-verify service scans popular Hub repos at pinned commits and publishes a
 signed scan receipt for each one it finds clean or could not fully read; it never
 publishes a flagged repo. This command resolves the revision to a commit, fetches the
-receipt for that commit, checks that it was signed by the service's own workflow, that
-it names this repo and commit, and that its file hashes match the Hub's. With DIR, a
-downloaded snapshot, it also checks those files against the receipt.
+receipt for that commit, checks that it was signed by the service's own workflow on its
+schedule, that it is under 30 days old, that it names this repo and commit, and that its
+file hashes match the Hub's. With DIR, a downloaded snapshot, every file there must be
+the file at that commit. A file the verdict does not fully cover fails it, unless
+--allow-gaps.
 
 No published verdict is not a pass: the repo may not have been scanned yet, or may
 have been held back. It needs ``hayward[sign]`` and uses the network. A verdict is
@@ -22,6 +24,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, hub, receipt
@@ -29,6 +32,10 @@ from . import __version__, hub, receipt
 SERVICE = "https://verify.hedgerow.dev"
 IDENTITY = "https://github.com/hedgerow-dev/hayward-verify/.github/workflows/scan.yml@refs/heads/main"
 ISSUER = "https://token.actions.githubusercontent.com"
+# Only the scheduled run signs: a manual re-run, or any other workflow run on main,
+# carries a different trigger in its certificate and is refused.
+TRIGGER = "schedule"
+MAX_AGE_DAYS = 30  # the service re-signs weekly; older means it stopped or the repo was dropped
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
 TIMEOUT_SECONDS = 30
 
@@ -86,6 +93,16 @@ def _never_loaded(name: str) -> bool:
             or base.upper().startswith(("LICENSE", "LICENCE", "NOTICE")))
 
 
+def _age_days(scanned: object) -> int | None:
+    try:
+        when = datetime.fromisoformat(str(scanned))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None
+    return (datetime.now(timezone.utc) - when).days
+
+
 def _older(version: str, than: str) -> bool:
     """True when ``version`` is a plain x.y.z release older than ``than``."""
     def parts(v: str) -> tuple[int, ...] | None:
@@ -128,11 +145,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("repo", help="the repo id, e.g. org/name")
     parser.add_argument("directory", nargs="?", type=Path, help="a downloaded snapshot to check too")
     parser.add_argument("--revision", default="main", help="branch, tag or commit (default main)")
-    parser.add_argument("--fail-on-coverage", action="store_true",
-                        help="also exit non-zero when a file was not fully checked or not covered")
+    parser.add_argument("--allow-gaps", action="store_true",
+                        help="pass even when a file was not fully checked or not covered by the verdict")
     parser.add_argument("--service", default=SERVICE, help="verdict service URL, for a self-hosted one")
     parser.add_argument("--identity", default=IDENTITY, help="the signer the service's verdicts must carry")
     parser.add_argument("--issuer", default=ISSUER, help="the OIDC issuer of that signer")
+    parser.add_argument("--trigger", default=TRIGGER, help="the GitHub event the signing run must come from")
     args = parser.parse_args(argv)
     if not hub.REPO_RE.fullmatch(args.repo) or not hub.REVISION_RE.fullmatch(args.revision):
         print(f"hayward verify: {args.repo!r} at {args.revision!r} is not a usable repo id and revision",
@@ -164,9 +182,13 @@ def _run(args: argparse.Namespace) -> int:
         print(f"{args.repo}@{sha[:12]}: no published verdict. It may not have been scanned yet, or may "
               f"have been held back. This is not a pass.")
         return 1
-    statement = json.loads(receipt._sigstore_open(raw, args.identity, args.issuer))
+    statement = json.loads(receipt._sigstore_open(raw, args.identity, args.issuer, args.trigger))
     receipt._require_receipt(statement)
     problems = check(statement, args.repo, sha, hub_hashes)
+    age = _age_days(statement["predicate"].get("scanned"))
+    if age is None or age > MAX_AGE_DAYS:
+        problems.append(f"the verdict is {'of unknown age' if age is None else f'{age} days old'}; "
+                        f"over {MAX_AGE_DAYS} days does not count. Wait for the next rescan.")
     if not statement["subject"]:
         problems.append("the verdict covers no files")
     if args.directory is not None and not problems:
@@ -197,6 +219,10 @@ def _run(args: argparse.Namespace) -> int:
     if problems or "flagged" in verdicts:
         print(f"{args.repo}: does NOT match its published verdict")
         return 1
+    if gaps and not args.allow_gaps:
+        print(f"{args.repo}: {gaps} file(s) not fully checked, so this is not a pass "
+              f"(--allow-gaps to accept them)")
+        return 1
     print(f"{args.repo}: verdict verified ({verdicts.count('clean')} clean, {gaps} not fully checked). "
           f"Load this exact commit: revision={sha}")
-    return 1 if args.fail_on_coverage and gaps else 0
+    return 0
