@@ -48,6 +48,10 @@ dev = [
 # `hayward mcp`: the official MCP Python SDK (MIT). Optional, so the core
 # install keeps its single dependency.
 mcp = ["mcp>=2.3,<3"]
+# `hayward receipt sign` and signed `receipt verify`: sigstore-python
+# (Apache-2.0; its dependencies are Apache-2.0, MIT or BSD). Optional for the
+# same reason.
+sign = ["sigstore>=4.5,<5"]
 
 [project.urls]
 Homepage = "https://github.com/hedgerow-dev/hayward"
