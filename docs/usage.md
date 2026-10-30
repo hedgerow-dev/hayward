@@ -127,8 +127,32 @@ separate from what the scanner saw.
 or changed fails, and so does a model file the receipt does not cover. Verify
 the same directory you scanned.
 
-Hayward does not sign receipts. Sign one with GitHub artifact attestations (the
-action's `attest` input) or with cosign:
+### Signing a receipt
+
+With the optional extra, Hayward signs a receipt with Sigstore and verifies the
+signature:
+
+```bash
+pip install "hayward[sign]"
+hayward receipt sign receipt.intoto.json          # writes receipt.intoto.json.sigstore.json
+hayward receipt verify receipt.intoto.json.sigstore.json ./models \
+  --identity https://github.com/ORG/REPO/.github/workflows/scan.yml@refs/heads/main \
+  --issuer https://token.actions.githubusercontent.com
+```
+
+In CI with a workload identity (GitHub Actions with `id-token: write`, GitLab
+and others) signing is automatic. On a laptop it opens a browser to log in, and
+because **signing writes that login's email to Sigstore's public transparency
+log, permanently**, it asks first (`--yes` skips the question).
+
+A signed receipt only verifies with `--identity` and `--issuer`: a valid
+signature from just anyone proves nothing. The output is a standard Sigstore
+bundle, so a receipt signed by the action's `attest` input (download it with
+`gh attestation download`) verifies the same way, and `cosign` and
+`gh attestation verify` can check Hayward's bundles. Only signing and signed
+verification use the network.
+
+You can also sign with cosign:
 
 ```bash
 cosign attest-blob --type https://hedgerow.dev/hayward/scan-receipt/v1 \

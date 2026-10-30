@@ -4,6 +4,18 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- Signing receipts outside GitHub (#38, phase 2). With the optional
+  `hayward[sign]` extra (sigstore-python), `hayward receipt sign` writes a
+  Sigstore bundle over the exact receipt bytes, and `hayward receipt verify`
+  checks a bundle with a required `--identity` and `--issuer` before checking
+  the files. In CI signing uses the workload identity; on a laptop it asks
+  first, since the login's email goes into Sigstore's public log. Bundles from
+  the action's `attest` input verify the same way.
+
 ## 1.9.1 (2026-10-30)
 
 ### Fixed

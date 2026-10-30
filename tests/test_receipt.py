@@ -124,3 +124,139 @@ def test_a_malformed_digest_is_a_mismatch_not_a_crash(tmp_path):
     statement["subject"][0]["digest"] = "not an object"
     out.write_text(json.dumps(statement))
     assert cli.main(["receipt", "verify", str(out), str(d)]) == 1
+
+
+# ---- phase 2: signing with sigstore (hayward[sign]) ------------------------------------
+# The two functions that call sigstore are replaced here, so these tests need neither
+# the extra nor the network. The real calls are exercised by a live run in CI.
+
+import importlib.util  # noqa: E402
+
+import pytest  # noqa: E402
+
+from hayward import receipt  # noqa: E402
+
+BUNDLE_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
+
+
+def _fake_bundle(payload: bytes) -> bytes:
+    return json.dumps({"mediaType": BUNDLE_TYPE, "fake_payload": payload.decode()}).encode()
+
+
+@pytest.fixture
+def fake_sigstore(monkeypatch):
+    signed = {}
+
+    def sign(raw: bytes) -> str:
+        signed["raw"] = raw
+        return _fake_bundle(raw).decode()
+
+    def open_bundle(raw: bytes, identity: str, issuer: str) -> bytes:
+        if identity != "ci@example.com" or issuer != "https://issuer.example":
+            raise receipt.SignatureError("the signer is not the one named")
+        return json.loads(raw)["fake_payload"].encode()
+
+    monkeypatch.setattr(receipt, "_sigstore_sign", sign)
+    monkeypatch.setattr(receipt, "_sigstore_open", open_bundle)
+    monkeypatch.setattr(receipt, "_ambient_credential", lambda: True)
+    return signed
+
+
+def test_sign_writes_a_bundle_over_the_exact_receipt_bytes(tmp_path, fake_sigstore):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    assert cli.main(["receipt", "sign", str(out)]) == 0
+    bundle = tmp_path / "receipt.intoto.json.sigstore.json"
+    assert json.loads(bundle.read_text())["mediaType"] == BUNDLE_TYPE
+    assert fake_sigstore["raw"] == out.read_bytes()
+
+
+def test_a_signed_receipt_verifies_with_the_right_signer(tmp_path, fake_sigstore):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    cli.main(["receipt", "sign", str(out), "-o", str(tmp_path / "b.json")])
+    assert cli.main(["receipt", "verify", str(tmp_path / "b.json"), str(d),
+                     "--identity", "ci@example.com", "--issuer", "https://issuer.example"]) == 0
+
+
+def test_the_wrong_signer_fails(tmp_path, fake_sigstore, capsys):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    cli.main(["receipt", "sign", str(out), "-o", str(tmp_path / "b.json")])
+    assert cli.main(["receipt", "verify", str(tmp_path / "b.json"), str(d),
+                     "--identity", "someone@else.com", "--issuer", "https://issuer.example"]) == 2
+    assert "not the one named" in capsys.readouterr().err
+
+
+def test_a_signed_receipt_still_checks_the_files(tmp_path, fake_sigstore):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    cli.main(["receipt", "sign", str(out), "-o", str(tmp_path / "b.json")])
+    (d / "clean.pkl").write_bytes(EVAL)
+    assert cli.main(["receipt", "verify", str(tmp_path / "b.json"), str(d),
+                     "--identity", "ci@example.com", "--issuer", "https://issuer.example"]) == 1
+
+
+def test_a_bundle_needs_a_named_signer(tmp_path, fake_sigstore, capsys):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    cli.main(["receipt", "sign", str(out), "-o", str(tmp_path / "b.json")])
+    assert cli.main(["receipt", "verify", str(tmp_path / "b.json"), str(d)]) == 2
+    assert "--identity" in capsys.readouterr().err
+
+
+def test_naming_a_signer_for_an_unsigned_receipt_fails(tmp_path, fake_sigstore, capsys):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    assert cli.main(["receipt", "verify", str(out), str(d),
+                     "--identity", "ci@example.com", "--issuer", "https://issuer.example"]) == 2
+    assert "not signed" in capsys.readouterr().err
+
+
+def test_signing_on_a_laptop_asks_first_because_the_log_is_public(tmp_path, fake_sigstore, monkeypatch, capsys):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    monkeypatch.setattr(receipt, "_ambient_credential", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+    assert cli.main(["receipt", "sign", str(out)]) == 2
+    assert "public" in capsys.readouterr().err
+    assert "raw" not in fake_sigstore
+
+
+def test_sign_refuses_something_that_is_not_a_receipt(tmp_path, fake_sigstore):
+    bad = tmp_path / "x.json"
+    bad.write_text(json.dumps({"_type": "https://in-toto.io/Statement/v1", "predicateType": "other"}))
+    assert cli.main(["receipt", "sign", str(bad)]) == 2
+
+
+@pytest.mark.skipif(importlib.util.find_spec("sigstore") is not None, reason="the extra is installed")
+def test_without_the_extra_signing_says_how_to_get_it(tmp_path, capsys):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    assert cli.main(["receipt", "sign", str(out)]) == 2
+    assert 'hayward[sign]' in capsys.readouterr().err
+
+
+def test_signing_with_no_terminal_to_ask_on_does_not_sign(tmp_path, fake_sigstore, monkeypatch):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    monkeypatch.setattr(receipt, "_ambient_credential", lambda: False)
+
+    def no_terminal(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_terminal)
+    assert cli.main(["receipt", "sign", str(out)]) == 2
+    assert "raw" not in fake_sigstore
+
+
+def test_a_ci_identity_problem_is_reported_not_a_crash(tmp_path, fake_sigstore, monkeypatch, capsys):
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+
+    def broken():
+        raise receipt.SignatureError("no usable CI identity: missing id-token permission")
+
+    monkeypatch.setattr(receipt, "_ambient_credential", broken)
+    assert cli.main(["receipt", "sign", str(out)]) == 2
+    assert "id-token" in capsys.readouterr().err
