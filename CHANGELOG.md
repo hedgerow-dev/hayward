@@ -4,6 +4,16 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- `MFV-GGUF-003` now checks named chat templates
+  (`tokenizer.chat_template.<name>`, for example `.tool_use`) for Jinja2
+  code-execution constructs, not just `tokenizer.chat_template`. llama.cpp can
+  select and render a named template, so a payload there was missed before.
+  The finding names the key it came from.
+
 ## 1.7.1 (2026-10-30)
 
 ### Fixed

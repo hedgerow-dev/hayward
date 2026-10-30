@@ -2172,13 +2172,19 @@ class ModelFileScanner:
         # templates collide with the signatures in both places (measured:
         # unsloth's DeepSeek-V4 template trips "os." on the word
         # "scenarios.", both in prose and inside a {{ '...' }} literal).
-        chat_template = kv.get("tokenizer.chat_template")
-        if isinstance(chat_template, str):
+        #
+        # Named templates (`tokenizer.chat_template.<name>`, e.g. `.tool_use`)
+        # can be selected and rendered by llama.cpp too, so they get the same check.
+        for key, chat_template in kv.items():
+            if key != "tokenizer.chat_template" and not key.startswith("tokenizer.chat_template."):
+                continue
+            if not isinstance(chat_template, str):
+                continue
             ssti_hit = _jinja_ssti_signature(chat_template)
             if ssti_hit is not None:
                 findings.append(Finding(
                     rule_id="MFV-GGUF-003",
-                    message=f"GGUF tokenizer.chat_template contains a code-execution construct "
+                    message=f"GGUF {key} contains a code-execution construct "
                             f"({ssti_hit!r}) inside Jinja2 template syntax. "
                             f"CVE-2026-5760: Malicious model weights/metadata can inject template code for RCE.",
                     severity=Severity.CRITICAL,
