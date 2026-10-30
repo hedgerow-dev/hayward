@@ -90,6 +90,11 @@ COVERAGE_RULE_IDS = frozenset({
 })
 
 
+# Rules that mean "this file makes the loader run the repo's own code". Reported as
+# their own verdict, since legitimate models do this; see file_verdicts.
+REMOTE_CODE_RULE_IDS = frozenset({"MFV-HF-002"})
+
+
 def is_coverage_gap(finding: Finding) -> bool:
     """True when the finding reports that analysis did not complete."""
     return finding.rule_id in COVERAGE_RULE_IDS
@@ -98,15 +103,20 @@ def is_coverage_gap(finding: Finding) -> bool:
 def file_verdicts(findings: list[Finding]) -> dict[str, str]:
     """One verdict per file that has findings (issue #14).
 
-    "flagged" is a detection at LOW or above, and wins over a coverage gap.
-    "not_verified" means the only findings are coverage gaps. "clean" means at
-    most INFO notes. A file with no findings at all is clean and not listed.
+    "flagged" is a detection at LOW or above, and wins over everything else.
+    "remote_code" means the file makes the loader import the repo's own Python
+    (MFV-HF-002): how many legitimate models work, so not a detection, but code
+    nobody vouched for. "not_verified" means the only findings are coverage gaps.
+    "clean" means at most INFO notes. A file with no findings at all is clean and
+    not listed.
     """
-    rank = {"clean": 0, "not_verified": 1, "flagged": 2}
+    rank = {"clean": 0, "not_verified": 1, "remote_code": 2, "flagged": 3}
     verdicts: dict[str, str] = {}
     for finding in findings:
         if is_coverage_gap(finding):
             verdict = "not_verified"
+        elif finding.rule_id in REMOTE_CODE_RULE_IDS:
+            verdict = "remote_code"
         elif finding.severity != Severity.INFO:
             verdict = "flagged"
         else:

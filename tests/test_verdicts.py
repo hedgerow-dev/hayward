@@ -49,3 +49,22 @@ def test_sarif_results_carry_the_file_verdict():
     assert by_rule_file[("MFV-SKIP-003", "broken.pkl")] == "not_verified"
     assert by_rule_file[("MFV-SKIP-003", "bad.pkl")] == "flagged"
     assert by_rule_file[("MFV-PICKLE-004", "noted.pkl")] == "clean"
+
+
+# ---- remote code is its own verdict ------------------------------------------------------
+# MFV-HF-002 says a repo makes transformers import its own Python files. That is how
+# many legitimate models work (Phi-3.5), so it is reported as remote_code rather than
+# flagged: the code is not vouched for, but nothing in the file is a known attack.
+
+def test_remote_code_alone_is_its_own_verdict():
+    assert file_verdicts([_f("MFV-HF-002", Severity.HIGH, "config.json")]) == {"config.json": "remote_code"}
+
+
+def test_an_attack_beside_remote_code_is_still_flagged():
+    findings = [_f("MFV-HF-002", Severity.HIGH, "c.json"), _f("MFV-HF-001", Severity.CRITICAL, "c.json")]
+    assert file_verdicts(findings) == {"c.json": "flagged"}
+
+
+def test_remote_code_outranks_a_coverage_gap():
+    findings = [_f("MFV-HF-002", Severity.HIGH, "c.json"), _f("MFV-SKIP-003", Severity.LOW, "c.json")]
+    assert file_verdicts(findings) == {"c.json": "remote_code"}
