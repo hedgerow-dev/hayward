@@ -85,3 +85,8 @@ def test_an_overrunning_tensor_still_fires(tmp_path):
 def test_a_payload_in_an_ordinary_metadata_key_still_fires(tmp_path):
     rules = [r for r, _ in _serious(tmp_path, _gguf([], kv=[("general.notes", ["import subprocess"])]))]
     assert "MFV-GGUF-002" in rules
+
+
+def test_a_named_chat_template_called_tokens_is_not_treated_as_vocab(tmp_path):
+    kv = [("tokenizer.chat_template.tokens", ["{{ __import__('os') }}"])]
+    assert "MFV-GGUF-002" in [r for r, _ in _serious(tmp_path, _gguf([], kv=kv))]

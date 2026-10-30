@@ -2134,7 +2134,7 @@ class ModelFileScanner:
             # An architecture can keep its vocabulary under its own prefix
             # (`<arch>.tokenizer.tokens`); it is the same data as tokenizer.ggml.tokens.
             parts = key.split(".")
-            if key in _GGUF_FREETEXT_KEYS or ("tokenizer" in parts[:-1] and parts[-1] in ("tokens", "merges")):
+            if key in _GGUF_FREETEXT_KEYS or (parts[-2:-1] == ["tokenizer"] and parts[-1] in ("tokens", "merges")):
                 continue
             values = value if isinstance(value, list) else [value]
             for v in values:
