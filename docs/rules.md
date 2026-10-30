@@ -107,7 +107,7 @@ CRITICAL.
 ## Provenance (opt-in)
 
 Emitted only under `--check-signatures`. Detection and structural reporting
-only: this scanner does no network I/O and no cryptographic verification, so a
+only: scanning does no network I/O and no cryptographic verification, so a
 present signature is reported, never trusted. Presence is not proof of
 authenticity.
 

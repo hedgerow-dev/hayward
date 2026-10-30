@@ -63,9 +63,12 @@ def _colour_enabled(args: argparse.Namespace, stream: TextIO) -> bool:
     return stream.isatty()
 
 
-def _render_text(findings: list[Finding], root: Path | None, colour: bool) -> str:
+def _render_text(
+    findings: list[Finding], root: Path | None, colour: bool, label: str | None = None,
+) -> str:
     if not findings:
-        return f"No findings in {root}" if root is not None else "No findings"
+        shown = label or root
+        return f"No findings in {shown}" if shown is not None else "No findings"
 
     lines: list[str] = []
     for finding in sorted(findings, key=lambda f: (f.severity_order, f.file_path)):
@@ -271,7 +274,20 @@ def _run_scan(
     return findings
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
+    """`label` names the target in the report when it is a temp folder (hayward hub)."""
+    args_list = sys.argv[1:] if argv is None else argv
+    if args_list[:1] == ["hub"]:
+        # Uses the network (so does creating a lock). Handled before argparse so its own
+        # flags and every `scan` flag can follow the repo id.
+        from .hub import main as hub_main
+
+        return hub_main(args_list[1:])
+    if args_list[:1] == ["lock"]:
+        # Uses the network to read the repo listing; --verify works offline.
+        from .lock import main as lock_main
+
+        return lock_main(args_list[1:])
     parser = argparse.ArgumentParser(
         prog="hayward",
         description=(
@@ -368,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     sub.add_parser("mcp", help="run a stdio MCP server for coding agents")
+    sub.add_parser("hub", help="fetch and scan a Hugging Face Hub repo (uses the network)")
+    sub.add_parser("lock", help="pin a Hub repo's files for loading, or --verify a snapshot against a lock")
     explain = sub.add_parser(
         "explain", help="show what a pickle-based file would do, as readable lines (nothing is run)")
     explain.add_argument("path", type=Path, help="a pickle, a zip checkpoint, or an old tar checkpoint")
@@ -506,10 +524,10 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.format == "text" and not args.output:
-        print(_render_text(findings, root, colour=_colour_enabled(args, sys.stdout)))
+        print(_render_text(findings, root, colour=_colour_enabled(args, sys.stdout), label=label))
     else:
         if args.format == "text":
-            report = _render_text(findings, root, colour=False)
+            report = _render_text(findings, root, colour=False, label=label)
         else:
             report = render(args.format, findings, root, __version__)
         if args.output:
