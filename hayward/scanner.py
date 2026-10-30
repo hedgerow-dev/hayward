@@ -675,6 +675,17 @@ class ModelFileScanner:
     # cheap and false-positive-safe: `_scan_json_config` fires only on those
     # three fields, so an unrelated `package.json` yields nothing.
     _CONFIG_EXTENSIONS: frozenset[str] = frozenset({".json"})
+    # transformers writes and renders `chat_template.jinja` the same way as the
+    # `chat_template` field of tokenizer_config.json.
+    _TEMPLATE_EXTENSIONS: frozenset[str] = frozenset({".jinja"})
+    # Tokenizer data a model repo ships. The tokenizer libraries that read these
+    # run no code, so the check is that each is what its name says (the content
+    # sniff every unrecognised extension gets), not a pickle or archive renamed.
+    # Named exactly: `.txt` and `.model` are far too common to discover by suffix.
+    _TOKENIZER_DATA_NAMES: frozenset[str] = frozenset({
+        "merges.txt", "vocab.txt", "tokenizer.model", "spiece.model", "spm.model",
+        "sentencepiece.bpe.model",
+    })
 
     def __init__(self):
         self._archive_depth = 0
@@ -1025,6 +1036,9 @@ class ModelFileScanner:
         # named `*.json`, and sniffing every '{'-led blob in a tree as a model
         # config would false-positive on the unrelated JSON that litters a
         # repo (package manifests, tokenizer vocab, dataset shards).
+        if ext in self._TEMPLATE_EXTENSIONS:
+            return self._scan_jinja_template(file_path, data.decode("utf-8", errors="replace"))
+
         if ext == ".json":
             try:
                 # json.loads takes bytes directly and auto-detects the UTF
@@ -1476,8 +1490,11 @@ class ModelFileScanner:
         # accepts, including the ambiguous ones it resolves by content sniff --
         # otherwise a pytorch_model.bin is scannable when named directly but
         # invisible to a directory scan, which is how the tool is actually run.
-        for ext in (*self._format_map, *self._AMBIGUOUS_EXTENSIONS, *self._CONFIG_EXTENSIONS):
-            for f in root.rglob(f"*{ext}"):
+        patterns = [f"*{ext}" for ext in (*self._format_map, *self._AMBIGUOUS_EXTENSIONS,
+                                           *self._CONFIG_EXTENSIONS, *self._TEMPLATE_EXTENSIONS)]
+        patterns += sorted(self._TOKENIZER_DATA_NAMES)
+        for pattern in patterns:
+            for f in root.rglob(pattern):
                 # rglob matches directories too. Model caches routinely name a
                 # directory after the file it holds (`<repo>--model.joblib/`),
                 # so without this every such directory was handed to scan_file,
@@ -2237,6 +2254,24 @@ class ModelFileScanner:
         return findings
 
     # ── HuggingFace / transformers JSON config scanning ───────────
+
+    def _scan_jinja_template(self, file_path: Path, template: str) -> list[Finding]:
+        """A standalone chat template (`chat_template.jinja`): the MFV-HF-001 check."""
+        ssti_hit = _jinja_ssti_signature(template)
+        if ssti_hit is None:
+            return []
+        return [Finding(
+            rule_id="MFV-HF-001",
+            message=f"Chat template contains a code-execution construct ({ssti_hit!r}) "
+                    f"inside Jinja2 template syntax. transformers renders this template "
+                    f"on load, so a malicious template is server-side template injection "
+                    f"for RCE: the MFV-HF-001 threat in a standalone .jinja file.",
+            severity=Severity.CRITICAL,
+            category=Category.SSTI,
+            file_path=str(file_path),
+            confidence=0.80,
+            cwe_ids=[94, 1336],
+        )]
 
     def _scan_json_config(self, file_path: Path, config: dict) -> list[Finding]:
         """Inspect a transformers ``*.json`` config for its two RCE vectors.

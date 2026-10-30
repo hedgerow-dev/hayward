@@ -112,6 +112,17 @@ def _older(version: str, than: str) -> bool:
     return a is not None and b is not None and a < b
 
 
+def _snapshot_names(root: Path) -> set[str]:
+    """Every file under ``root`` as a repo-relative name, following symlinks."""
+    names = set()
+    for path in root.rglob("*"):
+        rel = path.relative_to(root).as_posix()
+        # .cache: huggingface_hub's own bookkeeping in a --local-dir download
+        if rel.split("/", 1)[0] not in (".git", ".cache") and path.is_file():
+            names.add(rel)
+    return names
+
+
 def check_snapshot(root: Path, hub_files: dict[str, dict]) -> list[str]:
     """Every file under ``root`` must be the file at this commit: the Hub's sha256 for
     LFS files, the git blob id for the rest. Files you did not download are fine.
@@ -121,10 +132,8 @@ def check_snapshot(root: Path, hub_files: dict[str, dict]) -> list[str]:
     from .lock import _git_blob
 
     problems = []
-    for path in sorted(root.rglob("*")):
-        rel = path.relative_to(root).as_posix()
-        if rel.split("/", 1)[0] in (".git", ".cache") or not path.is_file():
-            continue  # .cache: huggingface_hub's own bookkeeping in a --local-dir download
+    for rel in sorted(_snapshot_names(root)):
+        path = root / rel
         entry = hub_files.get(rel)
         if entry is None:
             problems.append(f"not in the repo at this commit: {rel}")
@@ -192,14 +201,16 @@ def _run(args: argparse.Namespace) -> int:
     if not statement["subject"]:
         problems.append("the verdict covers no files")
     if args.directory is not None and not problems:
-        # The receipt's own files, by sha256, and then every file in the snapshot
-        # against the commit, so a changed .py or config the scan never covered is
-        # caught too.
-        problems += receipt.verify(statement, args.directory, [])
+        # Every file in the snapshot must be the file at this commit, so a changed
+        # .py or config the scan never covered is caught too. The verdict is already
+        # bound to the commit, so a covered file you did not download is fine.
         problems += check_snapshot(args.directory, hub_files)
 
     files = statement["predicate"]["files"]
-    uncovered = sorted(n for n in hub_files if n not in files and not _never_loaded(n))
+    # With a snapshot, only the files you downloaded (what you will load) can be gaps;
+    # without one, every file in the repo can.
+    in_scope = _snapshot_names(args.directory) if args.directory is not None else set(hub_files)
+    uncovered = sorted(n for n in hub_files if n in in_scope and n not in files and not _never_loaded(n))
     scanner = statement["predicate"].get("scanner") or {}
     print(f"{args.repo} at commit {sha}, signed by {args.identity}")
     print(f"  scanned {statement['predicate'].get('scanned', '?')} with hayward {scanner.get('version', '?')}")
@@ -211,10 +222,14 @@ def _run(args: argparse.Namespace) -> int:
     for name in uncovered:
         kind = "not covered, CODE" if name.lower().endswith(".py") else "not covered"
         print(f"  {kind:<13} {name}")
+    left_out = [n for n in hub_files if n not in in_scope and n not in files and not _never_loaded(n)]
+    if left_out:
+        print(f"  ({len(left_out)} other file(s) in the repo were not downloaded and are not checked; "
+              f"load only what you verified)")
     for problem in problems:
         print(f"  problem: {problem}")
 
-    verdicts = [entry.get("verdict") for entry in files.values()]
+    verdicts = [entry.get("verdict") for name, entry in files.items() if name in in_scope]
     gaps = verdicts.count("not_verified") + len(uncovered)
     if problems or "flagged" in verdicts:
         print(f"{args.repo}: does NOT match its published verdict")

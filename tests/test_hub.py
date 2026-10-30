@@ -64,10 +64,12 @@ def run(argv, capsys):
 def test_only_scannable_files_are_fetched(monkeypatch, capsys):
     fake = FakeHub(monkeypatch, {
         "model.pkl": CLEAN, "README.md": b"hi", "config.json": b"{}", "tokenizer_config.json": b"{}",
-        "other.json": b"{}", "weights.safetensors": b"x", "cat.png": b"x",
+        "generation_config.json": b"{}", "weights.safetensors": b"x", "cat.png": b"x",
+        "chat_template.jinja": b"{{ m }}", "merges.txt": b"a b", "notes.txt": b"x", "modeling_x.py": b"x",
     })
     run(["org/name", "--quiet"], capsys)
-    assert sorted(fake.downloaded) == ["config.json", "model.pkl", "tokenizer_config.json", "weights.safetensors"]
+    assert sorted(fake.downloaded) == ["chat_template.jinja", "config.json", "generation_config.json",
+                                       "merges.txt", "model.pkl", "tokenizer_config.json", "weights.safetensors"]
 
 
 def test_a_malicious_checkpoint_fails_the_scan(monkeypatch, capsys):
@@ -404,6 +406,6 @@ def test_a_hub_receipt_names_the_repo_and_commit(monkeypatch, tmp_path, capsys):
 
 
 def test_a_chat_template_json_is_fetched(monkeypatch, capsys):
-    fake = FakeHub(monkeypatch, {"chat_template.json": b"{}", "other.json": b"{}", "model.pkl": CLEAN})
+    fake = FakeHub(monkeypatch, {"chat_template.json": b"{}", "model.pkl": CLEAN})
     run(["org/name", "--quiet"], capsys)
     assert sorted(fake.downloaded) == ["chat_template.json", "model.pkl"]

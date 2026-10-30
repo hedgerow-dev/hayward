@@ -22,8 +22,16 @@ within a major version.
   Needs `hayward[sign]`.
 - Receipts from `hayward hub` name their source (`predicate.source`: the repo
   and commit).
-- `hayward hub` also fetches `chat_template.json`, a chat-template injection
-  vector the local scanner already checks.
+- `hayward hub` fetches every file a directory scan would find: every `.json`
+  config (not only config.json and tokenizer_config.json), `.jinja` chat
+  templates and tokenizer data, so a hub scan covers the same files as a
+  scanned download.
+- `chat_template.jinja` (what recent transformers writes) is checked for
+  template injection (`MFV-HF-001`), and directory scans find it and the
+  tokenizer data files (`merges.txt`, `vocab.txt`, `tokenizer.model`), which are
+  checked to be what their name says.
+- `hayward verify` with a directory counts gaps only among the files you
+  downloaded.
 
 ### Fixed
 

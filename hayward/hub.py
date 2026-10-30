@@ -45,9 +45,6 @@ REPO_RE = re.compile(r"\w[\w.-]{0,95}/\w[\w.-]{0,95}", re.ASCII)
 REVISION_RE = re.compile(r"\w[\w.-]{0,99}", re.ASCII)
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
-# Of the .json files only these carry something the scanner reads (auto_map,
-# trust_remote_code, chat templates), so the rest are not worth downloading.
-CONFIG_NAMES = frozenset({"config.json", "tokenizer_config.json", "chat_template.json"})
 
 # Range reads: only the zip checkpoints torch.save writes.
 RANGE_SUFFIXES = frozenset({".pt", ".pth", ".bin", ".ckpt", ".ptl", ".th"})
@@ -236,14 +233,18 @@ def _range_safetensors_header(url: str, size: int, dest: Path) -> None:
 
 
 def _scannable_suffixes() -> frozenset[str]:
+    # Everything a directory scan would find, so a hub scan covers the same files
+    # as scanning a downloaded copy: every config, template and tokenizer file
+    # transformers reads, not only the weights.
     scanner = ModelFileScanner()
-    return frozenset((*scanner._format_map, *scanner._AMBIGUOUS_EXTENSIONS))
+    return frozenset((*scanner._format_map, *scanner._AMBIGUOUS_EXTENSIONS,
+                      *scanner._CONFIG_EXTENSIONS, *scanner._TEMPLATE_EXTENSIONS))
 
 
 def _wanted(name: str, suffixes: frozenset[str]) -> bool:
     base = name.rsplit("/", 1)[-1]
     # endswith, not Path.suffix, so the multi-part forms (.tar.gz) match too.
-    return base in CONFIG_NAMES or base.lower().endswith(tuple(suffixes))
+    return base in ModelFileScanner._TOKENIZER_DATA_NAMES or base.lower().endswith(tuple(suffixes))
 
 
 def _safe_relative(name: str) -> bool:

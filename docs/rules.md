@@ -64,7 +64,7 @@ CRITICAL.
 
 | Rule | Severity | CWE | Fires when |
 |------|----------|-----|------------|
-| `MFV-HF-001` | CRITICAL | 94, 1336 | A `.json` config's `chat_template` contains a code-execution construct in Jinja2 code position (the `MFV-GGUF-003` threat in JSON) |
+| `MFV-HF-001` | CRITICAL | 94, 1336 | A `.json` config's `chat_template`, or a standalone `.jinja` chat template, contains a code-execution construct in Jinja2 code position (the `MFV-GGUF-003` threat in JSON) |
 | `MFV-HF-002` | HIGH | 94 | A `.json` config declares `auto_map` (custom modules the loader imports and runs) or ships `trust_remote_code: true` |
 
 ## Other formats
