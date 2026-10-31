@@ -324,10 +324,9 @@ def _run_sha256(args: argparse.Namespace) -> int:
     for entry in entries:
         verdict = entry.get("verdict")
         note = f" ({_printable(entry['read'])} read)" if entry.get("read") else ""
-        scanner = entry.get("scanner") or {}
         line = (f"  {_printable(verdict)}{note}  {_printable(entry.get('repo'))}@"
                 f"{_printable(entry.get('commit'))[:12]}  {_printable(entry.get('name'))}"
-                f"  hayward {_printable(scanner.get('version', '?'))}")
+                f"  hayward {_printable(entry.get('scanner', '?'))}")
         if entry.get("hash_source") == "hub":
             line += "  (hash from the Hub)"
         if verdict == "remote_code":
