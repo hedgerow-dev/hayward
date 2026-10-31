@@ -38,11 +38,12 @@ the format of the loader reading it, not as its name says. Coverage findings
 (MFV-SKIP-*) from the scan warn rather than block: the load-time check still
 covers that file. A stream that cannot seek is not pre-scanned.
 
-With `install(verified=True)` each file a loader reads by path is first looked
-up by its SHA-256 in the signed verdict log (`hayward verify --sha256`). A file
-the log vouches for skips the static scan; anything else is scanned as usual,
-with a warning, and `verified="strict"` refuses it instead. The load-time check
-runs either way.
+With `install(verified=True)` the bytes a loader is about to read (a file by
+path, or a seekable stream) are first looked up by SHA-256 in the signed verdict
+log (`hayward verify --sha256`). Anything the log does not vouch for gets a
+warning, and `verified="strict"` refuses it. Vouching skips no check: the
+service may have read the file as another format, in part, or with older rules,
+so the static scan and the load-time check still run.
 
 `install(fail_on=..., mode=..., max_size=..., prescan=..., strict=...,
 remote_code=..., verified=...)`
@@ -59,6 +60,7 @@ import hashlib
 import os
 import pickle
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -212,28 +214,28 @@ def _not_vouched(digest: str) -> str | None:
     from hayward import receipt, verify
 
     errors = (OSError, ValueError, KeyError, TypeError, AttributeError, receipt.SignatureError)
-    if "checkpoint" not in _log:
-        _log["shards"] = {}
+    log = _log  # install() may clear it on another thread: work on what was there
+    if "checkpoint" not in log:
         try:
-            _log["checkpoint"] = verify.fetch_checkpoint()
+            found, error = verify.fetch_checkpoint(), None
         except ImportError:
-            _log["checkpoint"] = None
-            _log["error"] = 'the verdict log could not be checked: it needs pip install "hayward[sign]"'
+            found, error = None, 'the verdict log could not be checked: it needs pip install "hayward[sign]"'
         except errors as exc:
-            _log["checkpoint"] = None
-            _log["error"] = f"the verdict log could not be checked ({exc})"
-    if _log["checkpoint"] is None:
-        return _log["error"]
-    n, statement, signed_at = _log["checkpoint"]
+            found, error = None, f"the verdict log could not be checked ({verify._printable(exc)})"
+        log.update(checkpoint=found, error=error, shards={})
+    if log.get("checkpoint") is None:
+        return log.get("error") or "the verdict log could not be checked"
+    n, statement, signed_at = log["checkpoint"]
     if datetime.now(timezone.utc) - signed_at > verify.MAX_CHECKPOINT_AGE:
         return f"its newest checkpoint was signed over {verify.MAX_CHECKPOINT_AGE.days} days ago"
+    shards = log.setdefault("shards", {})
     prefix = digest[:2]
-    if prefix not in _log["shards"]:
+    if prefix not in shards:
         try:
-            _log["shards"][prefix] = verify.fetch_shard(statement, n, prefix)
+            shards[prefix] = verify.fetch_shard(statement, n, prefix)
         except errors as exc:
-            _log["shards"][prefix] = f"the verdict log could not be checked ({exc})"
-    shard = _log["shards"][prefix]
+            shards[prefix] = f"the verdict log could not be checked ({verify._printable(exc)})"
+    shard = shards[prefix]
     if isinstance(shard, str):
         return shard
     entries = shard.get(digest) or []
@@ -244,28 +246,48 @@ def _not_vouched(digest: str) -> str | None:
     return None
 
 
-def _vouched(source, takes_path: bool, label: str) -> str | None:
-    """With install(verified=...): the resolved path when the verdict log vouches for
-    the file a loader is about to read, so the pre-scan can be skipped. Otherwise None
-    after a warning, or UnsafeModelError in strict mode."""
+def _source_sha256(source, takes_path: bool) -> tuple[str | None, str | None]:
+    """(sha256 of what the loader will read, None) or (None, why it cannot be hashed)."""
     if takes_path and isinstance(source, (str, bytes, os.PathLike)):
         path = _resolve(source)
         try:
-            digest = _file_sha256(path)
-        except OSError:
-            return None  # the loader raises its own error for a missing file
+            if not stat.S_ISREG(os.stat(path).st_mode):
+                # A pipe or device could serve the hash one stream and the loader another.
+                return None, "it is not a regular file"
+            return _file_sha256(path), None
+        except OSError as exc:
+            return None, f"it could not be read ({exc.strerror or 'error'})"
+    seekable = getattr(source, "seekable", None)
+    if hasattr(source, "read") and seekable is not None and seekable():
+        # What the loader reads: the rest of the stream from where it stands.
+        start = source.tell()
+        h = hashlib.sha256()
+        try:
+            for block in iter(lambda: source.read(1 << 20), b""):
+                h.update(block)
+        finally:
+            source.seek(start)
+        return h.hexdigest(), None
+    return None, "it is read from a stream that cannot be looked up by hash"
+
+
+def _require_vouched(source, takes_path: bool, label: str) -> None:
+    """With install(verified=...): look the bytes a loader is about to read up in the
+    verdict log. Not vouched for: UnsafeModelError in strict mode, else a warning.
+    Vouching skips nothing: the pre-scan and the load-time check still run, since the
+    service may have read the file as another format, in part, or with older rules."""
+    digest, reason = _source_sha256(source, takes_path)
+    if digest is not None:
         reason = _not_vouched(digest)
         if reason is None:
-            return path
-    else:
-        reason = "it is read from a stream, which cannot be looked up by hash"
+            return
     if _verified == "strict":
         raise UnsafeModelError(label, [], f"hayward refused {label}: it is not vouched for by the "
                                           f"verdict log, because {reason}.")
+    then = "scanning it locally" if _prescan else "only the load-time check applies"
     # stacklevel 3 points the warning at the caller of the patched loader.
-    warnings.warn(f"hayward: {label} is not vouched for by the verdict log, because {reason}; "
-                  f"checking it locally instead.", stacklevel=3)
-    return None
+    warnings.warn(f"hayward: {label} is not vouched for by the verdict log, because {reason}; {then}.",
+                  stacklevel=3)
 
 
 def _rereads_scanned_source(source, scanned: list) -> bool:
@@ -505,9 +527,9 @@ def _wrap(module_name: str, original, param: str, suffix: str | None):
         label = _label(source, labels)
         if scanned and _rereads_scanned_source(source, scanned):
             return original(*args, **kwargs)
-        key = _vouched(source, takes_path, label) if _verified else None
-        if key is None and _prescan:
-            key = _check(source, suffix, takes_path, label)
+        if _verified:
+            _require_vouched(source, takes_path, label)
+        key = _check(source, suffix, takes_path, label) if _prescan else None
         scanned.append(key)
         labels.append(label)
         try:
@@ -584,11 +606,10 @@ def install(
     `remote_code` names the repos (`org/name`) or local model folders whose own
     Python code transformers may run with trust_remote_code=True; any other
     is refused as MFV-HF-002.
-    `verified=True` looks each file a loader reads by path up in the signed verdict
-    log (as `hayward verify --sha256` does): a file it vouches for skips the pre-scan,
-    and anything else is checked locally as usual, with a warning. `verified="strict"`
-    refuses anything the log does not vouch for. The load-time check runs either way.
-    It needs hayward[sign] and the network.
+    `verified=True` looks the bytes each loader reads up in the signed verdict log
+    (as `hayward verify --sha256` does) and warns about anything it does not vouch
+    for; `verified="strict"` refuses it. Every other check still runs. It needs
+    hayward[sign] and the network.
     """
     global _limit, _mode, _max_size, _prescan, _strict, _hook_on, _hook_added, _remote_code, _verified
     if fail_on not in _THRESHOLDS:

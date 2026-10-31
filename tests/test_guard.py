@@ -1279,14 +1279,17 @@ def _count_scans(monkeypatch) -> list[str]:
     return seen
 
 
-def test_a_vouched_file_loads_without_a_local_scan(tmp_path, log, monkeypatch):
+def test_a_vouched_file_loads_quietly_and_is_still_scanned(tmp_path, log, monkeypatch):
+    # The service may have read it as another format, in part, or with older rules.
     import joblib
     path, digest = _joblib_file(tmp_path)
     log["entries"][digest] = CLEAN
     scans = _count_scans(monkeypatch)
-    guard.install(verified=True)
-    assert joblib.load(path) == BENIGN
-    assert scans == []
+    guard.install(verified="strict")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert joblib.load(path) == BENIGN
+    assert scans
 
 
 def test_a_file_without_a_verdict_is_scanned_locally_with_a_warning(tmp_path, log, monkeypatch):
@@ -1386,14 +1389,66 @@ def test_the_log_and_the_hash_are_looked_up_once(tmp_path, log, monkeypatch):
     assert log["fetches"] == 1 and len(hashed) == 1
 
 
-def test_a_stream_cannot_be_looked_up(log):
-    data = io.BytesIO(pickle.dumps(BENIGN))
-    guard.install(verified=True)
-    with pytest.warns(UserWarning, match="stream"):
-        assert pickle.load(data) == BENIGN
+def test_a_seekable_stream_is_looked_up_by_what_is_left_to_read(log):
+    body = pickle.dumps(BENIGN)
+    log["entries"][hashlib.sha256(body).hexdigest()] = CLEAN
+    data = io.BytesIO(b"header" + body)
+    data.seek(6)
     guard.install(verified="strict")
-    with pytest.raises(guard.UnsafeModelError, match="stream"):
-        pickle.load(io.BytesIO(pickle.dumps(BENIGN)))
+    assert pickle.load(data) == BENIGN
+
+
+class _Unseekable(io.RawIOBase):
+    def __init__(self, body: bytes):
+        self._inner = io.BytesIO(body)
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        return self._inner.readinto(b)
+
+
+def test_a_stream_that_cannot_seek_is_not_vouched_for(log):
+    body = pickle.dumps(BENIGN)
+    log["entries"][hashlib.sha256(body).hexdigest()] = CLEAN
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="cannot be looked up"):
+        pickle.load(_Unseekable(body))
+
+
+def test_strict_refuses_a_file_it_could_not_hash(tmp_path, log, monkeypatch):
+    import joblib
+    path, digest = _joblib_file(tmp_path)
+    log["entries"][digest] = CLEAN
+
+    def gone(path):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(guard, "_hash_file", gone)
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="could not be read"):
+        joblib.load(path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
+def test_strict_refuses_a_pipe(tmp_path, log):
+    # A pipe could serve the hash one stream and the loader another.
+    import joblib
+    pytest.importorskip("joblib")
+    fifo = tmp_path / "model.joblib"
+    os.mkfifo(fifo)
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="not a regular file"):
+        joblib.load(str(fifo))
+
+
+def test_without_a_prescan_the_warning_says_only_the_load_time_check_applies(tmp_path, log):
+    import joblib
+    path, _ = _joblib_file(tmp_path)
+    guard.install(verified=True, prescan=False)
+    with pytest.warns(UserWarning, match="only the load-time check applies"):
+        assert joblib.load(path) == BENIGN
 
 
 def test_strict_lets_a_vouched_file_load_through_nested_loaders(tmp_path, log):

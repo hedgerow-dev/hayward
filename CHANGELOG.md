@@ -8,11 +8,10 @@ within a major version.
 
 ### Added
 
-- `hayward.guard.install(verified=True)` looks each file a guarded loader reads
-  up in the signed verdict log by its SHA-256. A file the log vouches for (every
-  current verdict clean, no gaps) skips the pre-scan; anything else is scanned
-  locally with a warning. `verified="strict"` refuses anything not vouched for.
-  The load-time check runs either way. Needs `hayward[sign]`.
+- `hayward.guard.install(verified=True)` looks the bytes each guarded loader
+  reads up in the signed verdict log by SHA-256 and warns about anything it does
+  not vouch for (every current verdict clean, no gaps). `verified="strict"`
+  refuses it. Every other check still runs. Needs `hayward[sign]`.
 
 ### Fixed
 
