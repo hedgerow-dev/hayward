@@ -4,6 +4,14 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- `hayward verify --sha256` crashed on every published verdict: the service
+  writes each entry's scanner as a version string, and the client read it as
+  an object. It now prints the version.
+
 ## 1.12.0 (2026-10-31)
 
 ### Added

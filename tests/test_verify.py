@@ -257,7 +257,7 @@ HASH = "ab" + "1" * 62
 
 def _entry(**over):
     entry = {"receipt": "9" * 64, "repo": "org/name", "commit": SHA, "name": "model.safetensors",
-             "scanned": "2026-10-31T00:00:00+00:00", "scanner": {"name": "hayward", "version": "1.11.1"},
+             "scanned": "2026-10-31T00:00:00+00:00", "scanner": "1.11.1",
              "verdict": "clean", "rules": [], "coverage_gaps": []}
     entry.update(over)
     return entry
