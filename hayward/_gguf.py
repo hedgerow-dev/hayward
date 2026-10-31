@@ -52,6 +52,7 @@ _GGUF_JINJA_BLOCK_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.DOTALL)
 # prose inside a {{ '...' }} literal), so literals are blanked before the
 # signature match. {{ os.system('id') }} still matches via `os.` in code
 # position; {{ ''.__class__ }} still matches via `__class__`.
+_JINJA_BARE_ATTR_CALL_RE = re.compile(r"(?<![\w.])attr\s*\(")
 _GGUF_JINJA_STRING_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 
 
@@ -77,10 +78,14 @@ def _jinja_ssti_signature(template: str) -> str | None:
         "",
         " ".join(m.group(0) for m in _GGUF_JINJA_BLOCK_RE.finditer(template)),
     )
-    return next(
-        (sig for sig in _GGUF_CHAT_TEMPLATE_SSTI_SIGNATURES if sig in executable),
-        None,
-    )
+    for sig in _GGUF_CHAT_TEMPLATE_SSTI_SIGNATURES:
+        # `attr(` is also the tail of `selectattr(` and `rejectattr(`, ordinary
+        # filters real chat templates use; only a bare `attr(` is the filter.
+        if sig == "attr(" and not _JINJA_BARE_ATTR_CALL_RE.search(executable):
+            continue
+        if sig in executable:
+            return sig
+    return None
 
 
 # ── GGUF metadata parsing ───────────────────────────────────────────

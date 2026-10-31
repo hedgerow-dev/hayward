@@ -151,10 +151,9 @@ _SAFETENSORS_DTYPE_SIZES: dict[str, int] = {
     "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
 }
 
-# A single tensor larger than 4GB is the integer-overflow shape in C-side
-# loaders; aggregate sizes past the file are the OOB
-# shape (its MFV014). Both are replayed here as arithmetic, not thresholds.
-_SAFETENSORS_MAX_TENSOR_BYTES = 1 << 32
+# A tensor's size is checked against its shape and the data section, not a
+# fixed cap: real models ship single tensors far past 4GB (DeepSeek's 98 GB
+# embedding table), and one that fits its file is not an overflow.
 
 
 def _unsafe_name_reason(name: str) -> str | None:
@@ -231,11 +230,6 @@ def _check_safetensors_layout(header: object, data_section_len: int) -> list[str
                     f"tensor {name!r}: shape x dtype = {elements * dtype_size} bytes "
                     f"but its span is {span}"
                 )
-        if span > _SAFETENSORS_MAX_TENSOR_BYTES:
-            problems.append(
-                f"tensor {name!r} is {span} bytes (>4GB, integer-overflow shape "
-                f"in C loaders)"
-            )
         if end > data_section_len:
             problems.append(
                 f"tensor {name!r} ends at {end}, past the {data_section_len}-byte "

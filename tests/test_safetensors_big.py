@@ -73,3 +73,19 @@ def test_a_local_receipt_says_a_big_file_was_read_by_its_header(tmp_path):
     files = json.loads(out.read_text())["predicate"]["files"]
     assert files["big.safetensors"]["read"] == "header"
     assert "read" not in files["small.safetensors"]
+
+
+def test_a_real_tensor_over_4gb_is_not_an_exploit(tmp_path, scan):
+    # DeepSeek ships a 98 GB embedding table in one tensor; it fits its file, so it
+    # is a big model, not an overflow.
+    span = 5 * (1 << 30)
+    path = tmp_path / "model.safetensors"
+    _write(path, {"embed.weight": {"dtype": "U8", "shape": [span], "data_offsets": [0, span]}}, span)
+    assert [f.rule_id for f in scan(path) if f.rule_id == "MFV-ST-006"] == []
+
+
+def test_a_tensor_over_4gb_that_runs_past_the_file_is_still_caught(tmp_path, scan):
+    span = 5 * (1 << 30)
+    path = tmp_path / "model.safetensors"
+    _write(path, {"embed.weight": {"dtype": "U8", "shape": [span], "data_offsets": [0, span]}}, 1024)
+    assert "MFV-ST-006" in [f.rule_id for f in scan(path)]

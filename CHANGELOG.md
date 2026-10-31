@@ -4,6 +4,16 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- Two false alarms found by scanning popular Hub repos. `MFV-HF-001` and
+  `MFV-GGUF-003` no longer read `selectattr(` and `rejectattr(`, ordinary Jinja
+  filters, as the `attr` filter. `MFV-ST-006` no longer flags a single tensor
+  over 4 GB: real models ship far bigger ones (DeepSeek, 98 GB). A tensor must
+  still match its shape and dtype and fit its file.
+
 ## 1.11.1 (2026-10-31)
 
 ### Changed

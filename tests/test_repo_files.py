@@ -48,3 +48,16 @@ def test_a_directory_scan_finds_templates_and_tokenizer_data(tmp_path):
         (tmp_path / name).write_text("x")
     found = sorted(p.name for p in ModelFileScanner().discover_files(tmp_path))
     assert found == ["chat_template.jinja", "merges.txt", "tokenizer.model", "vocab.txt"]
+
+
+@pytest.mark.parametrize("template", [
+    "{% set t = msg['content'] | selectattr('type', 'equalto', 'text') | list %}{{ t }}",
+    "{% for m in messages | rejectattr('role', 'equalto', 'system') %}{{ m['content'] }}{% endfor %}",
+])
+def test_selectattr_and_rejectattr_are_ordinary_filters(tmp_path, template):
+    assert scan(tmp_path, "chat_template.jinja", template.encode()) == []
+
+
+@pytest.mark.parametrize("template", ["{{ ''|attr('__class__') }}", "{{ attr(x, '__globals__') }}"])
+def test_the_attr_filter_still_fires(tmp_path, template):
+    assert "MFV-HF-001" in scan(tmp_path, "chat_template.jinja", template.encode())
