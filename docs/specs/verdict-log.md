@@ -1,6 +1,6 @@
 # Hayward verdict log: spec
 
-Status: draft for Kenneth, 2026-10-31. Spec only, nothing built.
+Status: accepted by Kenneth, 2026-10-31. Spec only, nothing built.
 
 ## 1. Problem
 
@@ -76,7 +76,7 @@ Also rejected: **keep per-repo bundles and add a hash index.** Smallest change, 
 
 - **Signer**: the scheduled `scan.yml` run, pinned exactly as today (identity, issuer, `schedule` trigger, repo id, owner id).
 - **Rotation**: identities are keyless, so rotation means a new workflow path or repo. The client carries a list of accepted signers; a new one ships in a Hayward release while the old one stays for one overlap period, then is removed. Sigstore root rotation is handled by sigstore-python's TUF updates.
-- **Stale vs current**: a checkpoint older than N days does not count. Today N is 30 for receipts; with a checkpoint every 6 hours, a much shorter N is possible (decision 3 below). The receipt's own age stops mattering: a receipt is current while a fresh checkpoint lists it.
+- **Stale vs current**: a checkpoint older than N days does not count. Today N is 30 for receipts; with a checkpoint every 6 hours, a much shorter N is used: 3 days (decision 3 below). The receipt's own age stops mattering: a receipt is current while a fresh checkpoint lists it.
 - **New rules**: each checkpoint records its scanner version. When a release adds rules, the service rescans everything current before listing it under the new version. A file the new version flags is dropped from the next checkpoint (withdrawn) and enters private review. Old receipts stay in the archive, not current.
 
 ### 4.4 Storage and query
@@ -121,11 +121,11 @@ Pilot (top 100, every 6 hours): **$0**. Storage grows only when a repo gets a ne
 
 Whole Hub, new uploads only (**estimate**): 4,700 repos x 15 to 25 s is about 20 to 33 runner-hours a day, still $0 on a public repo but needs sharding to fit job limits. Storage depends on receipt size, which is **not measured**; measure it in step 2 below. The full existing Hub backlog is not counted; the inventory script can count it.
 
-## 5. Decisions for Kenneth
+## 5. Decisions (Kenneth, 2026-10-31: all three accepted as recommended)
 
-1. **Move signing to one checkpoint per run?** Per-repo bundles stay for 1.11 clients until they expire. **Recommend yes**: it fixes Rekor volume, freshness and withdrawal in one step.
-2. **Withheld marker scope?** Repo commit only (no files, hashes or rules), or also list file hashes. **Recommend repo commit only**: hashes would point at the flagged file in public.
-3. **How fresh must a checkpoint be?** **Recommend 3 days**: survives a missed run or two of the 6-hourly job, withdraws a bad verdict within days instead of 30.
+1. **Signing moves to one checkpoint per run.** Per-repo bundles stay for 1.11 clients until they expire. It fixes Rekor volume, freshness and withdrawal in one step.
+2. **The withheld marker names the repo commit only**: no files, hashes or rules, since hashes would point at the flagged file in public.
+3. **A checkpoint counts for 3 days.** That survives a missed run or two of the 6-hourly job and withdraws a bad verdict within days instead of 30.
 
 ## 6. First milestone (one week)
 
