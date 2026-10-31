@@ -1459,8 +1459,18 @@ class ModelFileScanner:
         except RecursionError:
             fields = []
         if fields:
-            node_like = sum(1 for fn, wt, _ in fields if fn == 1 and wt == 2)
-            if node_like > 5:
+            node_like = [value for fn, wt, value in fields if fn == 1 and wt == 2]
+            if len(node_like) > 5:
+                # A SentencePiece model (tokenizer.model) repeats field 1 too, once
+                # per vocabulary piece, and its vocabulary holds code words like
+                # "ReadFile". Its piece carries a float score (field 2, fixed32);
+                # a NodeDef's field 2 is its op name, a string.
+                try:
+                    first = list(_iter_protobuf_fields(node_like[0]))
+                except RecursionError:
+                    first = []
+                if any(fn == 2 and wt == 5 for fn, wt, _ in first):
+                    return None
                 return ModelFormat.TF_SAVEDMODEL
             if any(fn == 7 and wt == 2 for fn, wt, _ in fields):
                 return ModelFormat.ONNX

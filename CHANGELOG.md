@@ -20,6 +20,11 @@ within a major version.
   filters, as the `attr` filter. `MFV-ST-006` no longer flags a single tensor
   over 4 GB: real models ship far bigger ones (DeepSeek, 98 GB). A tensor must
   still match its shape and dtype and fit its file.
+- A SentencePiece `tokenizer.model` is no longer read as a TensorFlow graph.
+  Both repeat one protobuf field many times, and Gemma's vocabulary holds code
+  words such as `ReadFile`, so every Gemma-family tokenizer raised
+  `MFV-TF-001`. A SentencePiece piece carries a float score; a graph node never
+  does.
 
 ## 1.11.1 (2026-10-31)
 

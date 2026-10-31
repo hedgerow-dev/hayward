@@ -61,3 +61,25 @@ def test_selectattr_and_rejectattr_are_ordinary_filters(tmp_path, template):
 @pytest.mark.parametrize("template", ["{{ ''|attr('__class__') }}", "{{ attr(x, '__globals__') }}"])
 def test_the_attr_filter_still_fires(tmp_path, template):
     assert "MFV-HF-001" in scan(tmp_path, "chat_template.jinja", template.encode())
+
+
+def _sentencepiece(pieces: list[str]) -> bytes:
+    """A SentencePiece ModelProto: one field-1 message per piece, holding the piece
+    (field 1), its score as a float (field 2, fixed32) and its type (field 3)."""
+    import struct
+
+    def field(num: int, payload: bytes) -> bytes:
+        return bytes([num << 3 | 2, len(payload)]) + payload
+
+    out = b""
+    for piece in pieces:
+        body = field(1, piece.encode()) + bytes([2 << 3 | 5]) + struct.pack("<f", -1.5) + bytes([3 << 3, 1])
+        out += field(1, body)
+    return out
+
+
+def test_a_sentencepiece_vocab_with_code_words_is_not_a_tensorflow_graph(tmp_path):
+    # Gemma's vocabulary holds code tokens such as "ReadFile"; the file repeats
+    # field 1 once per piece, as a TF GraphDef does once per node.
+    pieces = ["<pad>", "<eos>", "<bos>", "the", "ReadFile", "WriteFile", "PyFunc", "hello"]
+    assert scan(tmp_path, "tokenizer.model", _sentencepiece(pieces)) == []
