@@ -180,7 +180,6 @@ from hayward._tensors import _ONNX_ABSOLUTE_PATH_RE as _ONNX_ABSOLUTE_PATH_RE
 from hayward._tensors import _ONNX_EXTERNAL_DATA_KEYS as _ONNX_EXTERNAL_DATA_KEYS
 from hayward._tensors import _ONNX_REMOTE_LOCATION_RE as _ONNX_REMOTE_LOCATION_RE
 from hayward._tensors import _SAFETENSORS_DTYPE_SIZES as _SAFETENSORS_DTYPE_SIZES
-from hayward._tensors import _SAFETENSORS_MAX_TENSOR_BYTES as _SAFETENSORS_MAX_TENSOR_BYTES
 from hayward._tensors import _ST_METADATA_DANGEROUS_KEY_RE as _ST_METADATA_DANGEROUS_KEY_RE
 from hayward._tensors import _TFLITE_MAGIC as _TFLITE_MAGIC
 from hayward._tensors import _TFLITE_MAX_DIMS_PRODUCT_32 as _TFLITE_MAX_DIMS_PRODUCT_32

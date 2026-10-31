@@ -13,6 +13,14 @@ within a major version.
   every current verdict for those bytes. It passes only if all are clean with
   no coverage gaps (`--allow-gaps` as for a repo). No entry is not a pass.
 
+### Fixed
+
+- Two false alarms found by scanning popular Hub repos. `MFV-HF-001` and
+  `MFV-GGUF-003` no longer read `selectattr(` and `rejectattr(`, ordinary Jinja
+  filters, as the `attr` filter. `MFV-ST-006` no longer flags a single tensor
+  over 4 GB: real models ship far bigger ones (DeepSeek, 98 GB). A tensor must
+  still match its shape and dtype and fit its file.
+
 ## 1.11.1 (2026-10-31)
 
 ### Changed
