@@ -38,8 +38,14 @@ the format of the loader reading it, not as its name says. Coverage findings
 (MFV-SKIP-*) from the scan warn rather than block: the load-time check still
 covers that file. A stream that cannot seek is not pre-scanned.
 
+With `install(verified=True)` each file a loader reads by path is first looked
+up by its SHA-256 in the signed verdict log (`hayward verify --sha256`). A file
+the log vouches for skips the static scan; anything else is scanned as usual,
+with a warning, and `verified="strict"` refuses it instead. The load-time check
+runs either way.
+
 `install(fail_on=..., mode=..., max_size=..., prescan=..., strict=...,
-remote_code=...)`
+remote_code=..., verified=...)`
 changes the settings, `uninstall()` restores the loaders and turns the hook
 off (an audit hook cannot be removed), and `HAYWARD_GUARD=off` makes the
 import a no-op. Warn mode warns and loads.
@@ -49,6 +55,7 @@ from __future__ import annotations
 
 import _compat_pickle
 import functools
+import hashlib
 import os
 import pickle
 import shutil
@@ -58,6 +65,7 @@ import threading
 import types
 import warnings
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from hayward._pickle_engine import _classify_pickle_global, _laundered_denied_ref
@@ -80,6 +88,12 @@ _mode = "block"
 _max_size: int | None = None  # None keeps the scanner's own 500MB cap
 _prescan = True
 _strict = False
+_verified: bool | str = False  # False, True or "strict"
+# The verdict log, looked up once per process: the checkpoint (or why there is no
+# usable one) and the shards fetched from it. Cleared by install().
+_log: dict = {}
+# File sha256 by the same file identity as _memo.
+_hashes: dict[tuple, str] = {}
 # In strict mode these are refused whatever `fail_on` says: each reports a
 # global that is not on the known-safe list, or remote code from a repo that
 # install(remote_code=...) does not name.
@@ -172,6 +186,86 @@ def _scan_stream(stream, suffix: str | None, label: str) -> list[Finding]:
 
 def _resolve(path) -> str:
     return os.path.realpath(os.fsdecode(path))
+
+
+def _hash_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _file_sha256(path: str) -> str:
+    st = os.stat(path)
+    key = (path, st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns)
+    digest = _hashes.get(key)
+    if digest is None:
+        digest = _hashes[key] = _hash_file(path)
+    return digest
+
+
+def _not_vouched(digest: str) -> str | None:
+    """Why the verdict log does not vouch for these bytes, or None when it does: every
+    current verdict for them is clean with no coverage gap. The checkpoint is fetched
+    once per process, and a failure is not retried, so loads do not each wait on it."""
+    from hayward import receipt, verify
+
+    errors = (OSError, ValueError, KeyError, TypeError, AttributeError, receipt.SignatureError)
+    if "checkpoint" not in _log:
+        _log["shards"] = {}
+        try:
+            _log["checkpoint"] = verify.fetch_checkpoint()
+        except ImportError:
+            _log["checkpoint"] = None
+            _log["error"] = 'the verdict log could not be checked: it needs pip install "hayward[sign]"'
+        except errors as exc:
+            _log["checkpoint"] = None
+            _log["error"] = f"the verdict log could not be checked ({exc})"
+    if _log["checkpoint"] is None:
+        return _log["error"]
+    n, statement, signed_at = _log["checkpoint"]
+    if datetime.now(timezone.utc) - signed_at > verify.MAX_CHECKPOINT_AGE:
+        return f"its newest checkpoint was signed over {verify.MAX_CHECKPOINT_AGE.days} days ago"
+    prefix = digest[:2]
+    if prefix not in _log["shards"]:
+        try:
+            _log["shards"][prefix] = verify.fetch_shard(statement, n, prefix)
+        except errors as exc:
+            _log["shards"][prefix] = f"the verdict log could not be checked ({exc})"
+    shard = _log["shards"][prefix]
+    if isinstance(shard, str):
+        return shard
+    entries = shard.get(digest) or []
+    if not entries:
+        return "it has no current verdict"
+    if any(not isinstance(e, dict) or e.get("verdict") != "clean" or verify.has_gap(e) for e in entries):
+        return "its verdict is not clean with every part read"
+    return None
+
+
+def _vouched(source, takes_path: bool, label: str) -> str | None:
+    """With install(verified=...): the resolved path when the verdict log vouches for
+    the file a loader is about to read, so the pre-scan can be skipped. Otherwise None
+    after a warning, or UnsafeModelError in strict mode."""
+    if takes_path and isinstance(source, (str, bytes, os.PathLike)):
+        path = _resolve(source)
+        try:
+            digest = _file_sha256(path)
+        except OSError:
+            return None  # the loader raises its own error for a missing file
+        reason = _not_vouched(digest)
+        if reason is None:
+            return path
+    else:
+        reason = "it is read from a stream, which cannot be looked up by hash"
+    if _verified == "strict":
+        raise UnsafeModelError(label, [], f"hayward refused {label}: it is not vouched for by the "
+                                          f"verdict log, because {reason}.")
+    # stacklevel 3 points the warning at the caller of the patched loader.
+    warnings.warn(f"hayward: {label} is not vouched for by the verdict log, because {reason}; "
+                  f"checking it locally instead.", stacklevel=3)
+    return None
 
 
 def _rereads_scanned_source(source, scanned: list) -> bool:
@@ -409,10 +503,10 @@ def _wrap(module_name: str, original, param: str, suffix: str | None):
         labels = _local.__dict__.setdefault("labels", [])
         source = args[0] if args else kwargs[param]
         label = _label(source, labels)
-        key = None
-        if _prescan:
-            if scanned and _rereads_scanned_source(source, scanned):
-                return original(*args, **kwargs)
+        if scanned and _rereads_scanned_source(source, scanned):
+            return original(*args, **kwargs)
+        key = _vouched(source, takes_path, label) if _verified else None
+        if key is None and _prescan:
             key = _check(source, suffix, takes_path, label)
         scanned.append(key)
         labels.append(label)
@@ -475,6 +569,7 @@ _hook = _ImportHook()
 def install(
     fail_on: str = "high", mode: str = "block", max_size: int | None = None,
     prescan: bool = True, strict: bool = False, remote_code: tuple[str, ...] | list[str] = (),
+    verified: bool | str = False,
 ) -> None:
     """Turn on the load-time check and patch the supported loaders. Calling it
     again replaces the settings.
@@ -489,14 +584,21 @@ def install(
     `remote_code` names the repos (`org/name`) or local model folders whose own
     Python code transformers may run with trust_remote_code=True; any other
     is refused as MFV-HF-002.
+    `verified=True` looks each file a loader reads by path up in the signed verdict
+    log (as `hayward verify --sha256` does): a file it vouches for skips the pre-scan,
+    and anything else is checked locally as usual, with a warning. `verified="strict"`
+    refuses anything the log does not vouch for. The load-time check runs either way.
+    It needs hayward[sign] and the network.
     """
-    global _limit, _mode, _max_size, _prescan, _strict, _hook_on, _hook_added, _remote_code
+    global _limit, _mode, _max_size, _prescan, _strict, _hook_on, _hook_added, _remote_code, _verified
     if fail_on not in _THRESHOLDS:
         raise ValueError(f"fail_on must be one of {', '.join(_THRESHOLDS)}")
     if mode not in ("block", "warn"):
         raise ValueError("mode must be 'block' or 'warn'")
     if max_size is not None and max_size <= 0:
         raise ValueError("max_size must be a positive byte count")
+    if verified not in (False, True, "strict"):
+        raise ValueError('verified must be False, True or "strict"')
     if isinstance(remote_code, str):
         raise ValueError("remote_code must be a list of repo ids, not one string")
     if any(not name.strip("/") for name in remote_code):
@@ -504,6 +606,8 @@ def install(
     uninstall()
     _limit, _mode, _max_size, _prescan = _THRESHOLDS[fail_on], mode, max_size, prescan
     _strict = bool(strict)
+    _verified = verified
+    _log.clear()
     # transformers 4.x filed the name as is; newer releases sanitize it.
     _remote_code = frozenset(form for name in remote_code
                              for form in (tuple(name.strip("/").split("/")), _module_parts(name.strip("/"))))

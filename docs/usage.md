@@ -494,6 +494,28 @@ follows `fail_on` and `mode`: it is HIGH, so `fail_on="critical"` lets it run
 and warn mode warns. Strict mode refuses it whatever `fail_on` is. A one-part
 name such as `my_model` matches a local folder of that name wherever it is.
 
+### Only what the verdict log vouches for
+
+```python
+hayward.guard.install(verified=True)      # vouched files skip the pre-scan; others are scanned, with a warning
+hayward.guard.install(verified="strict")  # refuse anything the log does not vouch for
+```
+
+Each file a guarded loader reads by path is hashed and looked up in the signed
+verdict log, as `hayward verify --sha256` does. A file is vouched for when every
+current verdict for its exact bytes is clean with no coverage gap; it then
+skips the local pre-scan. The load-time check runs for every file either way.
+
+Anything else falls back to the local scan with a warning, or is refused in
+strict mode: a file with no verdict, a gap, a log that is unreachable or over 3
+days old, and a stream, which has no path to hash (so `pickle.load(f)` is
+refused in strict mode). The checkpoint is fetched once per process and a
+failure is not retried. Hashes are cached per file, like the scan results.
+
+It needs `pip install "hayward[sign]"` and the network. The log only covers the
+repos the service scans, so most files will have no verdict today. A verdict is
+analysis evidence, not a safety certificate.
+
 ### Default mode raises the bar; it is not a sandbox
 
 By default the guard refuses denied callables and anything the scan rates

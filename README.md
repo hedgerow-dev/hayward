@@ -46,8 +46,9 @@ repo's own Python code, unless you name the repo with
 Each load is scanned first, then every function the file asks for is checked
 before it runs. The default mode raises the bar but is not a sandbox. For
 files you do not trust, `hayward.guard.install(strict=True)` refuses anything
-not on the known-safe list. The [usage guide](docs/usage.md#load-guard) lists
-what it does not cover.
+not on the known-safe list. With `hayward.guard.install(verified="strict")`, a
+file loads only if the signed verdict log vouches for its exact bytes. The
+[usage guide](docs/usage.md#load-guard) lists what it does not cover.
 
 ## Let your coding agent check first
 
