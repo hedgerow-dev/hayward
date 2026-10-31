@@ -6,6 +6,13 @@ within a major version.
 
 ## Unreleased
 
+### Added
+
+- `hayward verify --sha256 HASH` checks one file hash against the service's
+  signed verdict log: a checkpoint under 3 days old, the shard it names, and
+  every current verdict for those bytes. It passes only if all are clean with
+  no coverage gaps (`--allow-gaps` as for a repo). No entry is not a pass.
+
 ### Fixed
 
 - Two false alarms found by scanning popular Hub repos. `MFV-HF-001` and

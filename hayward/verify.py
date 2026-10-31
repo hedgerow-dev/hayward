@@ -1,6 +1,7 @@
 """``hayward verify org/name [DIR]``: check a Hub repo against its published, signed verdict.
 
     hayward verify org/name [--revision REV] [DIR] [--allow-gaps]
+    hayward verify --sha256 HASH [--allow-gaps]
 
 The hayward-verify service scans popular Hub repos at pinned commits and publishes a
 signed scan receipt for each one it finds clean or could not fully read; it never
@@ -11,6 +12,11 @@ file hashes match the Hub's. With DIR, a downloaded snapshot, every file there m
 the file at that commit. A file the verdict does not fully cover fails it, unless
 --allow-gaps.
 
+With --sha256, one file hash is looked up in the published verdict log instead: the
+newest signed checkpoint (under 3 days old) names a digest for each of 256 shards, and
+the shard holding the hash lists every current verdict for those bytes. It passes only
+if each one is clean with no coverage gaps.
+
 No published verdict is not a pass: the repo may not have been scanned yet, or may
 have been held back. It needs ``hayward[sign]`` and uses the network. A verdict is
 analysis evidence, not a safety certificate.
@@ -19,12 +25,14 @@ analysis evidence, not a safety certificate.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import __version__, hub, receipt
@@ -39,6 +47,9 @@ TRIGGER = "schedule"
 REPOSITORY_ID = "1440229852"
 OWNER_ID = "289219779"
 MAX_AGE_DAYS = 30  # the service re-signs weekly; older means it stopped or the repo was dropped
+CHECKPOINT_TYPE = "https://hedgerow.dev/hayward/checkpoint/v1"
+MAX_CHECKPOINT_AGE = timedelta(days=3)  # the log is signed every 6 hours; a receipt counts while a fresh checkpoint lists it
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
 TIMEOUT_SECONDS = 30
 
@@ -154,9 +165,10 @@ def check_snapshot(root: Path, hub_files: dict[str, dict]) -> list[str]:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="hayward verify", description=(__doc__ or "").splitlines()[0])
-    parser.add_argument("repo", help="the repo id, e.g. org/name")
+    parser.add_argument("repo", nargs="?", help="the repo id, e.g. org/name")
     parser.add_argument("directory", nargs="?", type=Path, help="a downloaded snapshot to check too")
     parser.add_argument("--revision", default="main", help="branch, tag or commit (default main)")
+    parser.add_argument("--sha256", help="look up one file's SHA-256 in the verdict log instead of a repo")
     parser.add_argument("--allow-gaps", action="store_true",
                         help="pass even when a file was not fully checked or not covered by the verdict")
     parser.add_argument("--service", default=SERVICE, help="verdict service URL, for a self-hosted one")
@@ -166,7 +178,16 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--repository-id", default=REPOSITORY_ID, help="the signing repo's numeric GitHub id")
     parser.add_argument("--owner-id", default=OWNER_ID, help="the signing repo owner's numeric GitHub id")
     args = parser.parse_args(argv)
-    if not hub.REPO_RE.fullmatch(args.repo) or not hub.REVISION_RE.fullmatch(args.revision):
+    if (args.repo is None) == (args.sha256 is None):
+        print("hayward verify: give a repo id or --sha256 HASH, not both", file=sys.stderr)
+        return 2
+    if args.sha256 is not None and not SHA256_RE.fullmatch(args.sha256):
+        print("hayward verify: --sha256 takes 64 lowercase hex characters", file=sys.stderr)
+        return 2
+    if args.sha256 is not None and args.revision != "main":
+        print("hayward verify: --revision is for a repo, not --sha256", file=sys.stderr)
+        return 2
+    if args.sha256 is None and (not hub.REPO_RE.fullmatch(args.repo) or not hub.REVISION_RE.fullmatch(args.revision)):
         print(f"hayward verify: {args.repo!r} at {args.revision!r} is not a usable repo id and revision",
               file=sys.stderr)
         return 2
@@ -174,7 +195,7 @@ def main(argv: list[str]) -> int:
         print("hayward verify: the service must be https", file=sys.stderr)
         return 2
     try:
-        return _run(args)
+        return _run_sha256(args) if args.sha256 is not None else _run(args)
     except ImportError:
         print('hayward verify: checking signatures needs: pip install "hayward[sign]"', file=sys.stderr)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, receipt.SignatureError, hub.HubError,
@@ -250,4 +271,81 @@ def _run(args: argparse.Namespace) -> int:
         return 1
     print(f"{args.repo}: verdict verified ({verdicts.count('clean')} clean, {gaps} not fully checked). "
           f"Load this exact commit: revision={sha}")
+    return 0
+
+
+def _printable(value: object) -> str:
+    """``value`` with control characters replaced, so a file name cannot forge output lines."""
+    return "".join(c if c.isprintable() else "?" for c in str(value))
+
+
+def _run_sha256(args: argparse.Namespace) -> int:
+    base = args.service.rstrip("/")
+    head = _fetch(f"{base}/v1/head.json")
+    if head is None:
+        raise ValueError("the service publishes no verdict log")
+    n = json.loads(head).get("checkpoint")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise ValueError("the verdict log's head names no checkpoint")
+    raw = _fetch(f"{base}/v1/checkpoints/{n}.sigstore.json")
+    if raw is None:
+        raise ValueError(f"checkpoint {n} is not published")
+    statement = json.loads(receipt._sigstore_open(raw, args.identity, args.issuer, args.trigger,
+                                                  args.repository_id, args.owner_id))
+    if (not isinstance(statement, dict) or statement.get("_type") != receipt.STATEMENT_TYPE
+            or statement.get("predicateType") != CHECKPOINT_TYPE):
+        raise ValueError("not a Hayward verdict log checkpoint")
+    run = statement["predicate"].get("run")
+    if not isinstance(run, int) or isinstance(run, bool) or run != n:
+        raise ValueError(f"the head names checkpoint {n}, but it is signed as run {run}")
+    # Age from the signing certificate, as for receipts.
+    age = datetime.now(timezone.utc) - receipt._signed_at(raw)
+    if age > MAX_CHECKPOINT_AGE:
+        print(f"checkpoint {n} was signed over {MAX_CHECKPOINT_AGE.days} days ago, so it does not "
+              f"count. The service may have stopped. This is not a pass.")
+        return 1
+    digests = {s["name"]: s["digest"].get("sha256") for s in statement["subject"]}
+    digest = digests.get(args.sha256[:2])
+    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        raise ValueError(f"checkpoint {n} names no shard {args.sha256[:2]}")
+    data = _fetch(f"{base}/v1/shards/{digest}.json")
+    if data is None:
+        raise ValueError(f"shard {args.sha256[:2]} of checkpoint {n} is not published")
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError(f"shard {args.sha256[:2]} does not match the checkpoint")
+    entries = json.loads(data).get(args.sha256) or []
+
+    print(f"sha256 {args.sha256}, checkpoint {n} signed by {args.identity}")
+    if not entries:
+        print(f"{args.sha256[:12]}: no current verdict. It may not have been scanned, or may have been "
+              f"withdrawn or held back. This is not a pass.")
+        return 1
+    failed = gaps = 0
+    for entry in entries:
+        verdict = entry.get("verdict")
+        note = f" ({_printable(entry['read'])} read)" if entry.get("read") else ""
+        scanner = entry.get("scanner") or {}
+        line = (f"  {_printable(verdict)}{note}  {_printable(entry.get('repo'))}@"
+                f"{_printable(entry.get('commit'))[:12]}  {_printable(entry.get('name'))}"
+                f"  hayward {_printable(scanner.get('version', '?'))}")
+        if entry.get("hash_source") == "hub":
+            line += "  (hash from the Hub)"
+        if verdict == "remote_code":
+            line += "  (runs code from the repo with trust_remote_code; not vouched for)"
+        if entry.get("coverage_gaps"):
+            line += f"  gaps: {', '.join(map(_printable, entry['coverage_gaps']))}"
+        print(line)
+        if verdict in ("not_verified", "remote_code") or (verdict == "clean" and entry.get("coverage_gaps")):
+            gaps += 1
+        elif verdict != "clean":
+            failed += 1  # flagged is never published, so anything else is wrong
+    if failed:
+        print(f"{args.sha256[:12]}: an entry is not a publishable verdict; this is NOT a pass")
+        return 1
+    if gaps and not args.allow_gaps:
+        print(f"{args.sha256[:12]}: {gaps} of {len(entries)} verdict(s) not fully checked, so this is not a pass "
+              f"(--allow-gaps to accept them)")
+        return 1
+    print(f"{args.sha256[:12]}: verdict verified ({len(entries) - gaps} clean, {gaps} not fully checked). "
+          f"Analysis evidence, not a safety certificate.")
     return 0

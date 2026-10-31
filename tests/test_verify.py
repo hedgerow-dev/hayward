@@ -248,3 +248,126 @@ def test_remote_code_is_shown_and_needs_allow_gaps(service, capsys):
     out = capsys.readouterr().out
     assert "remote_code" in out and "runs code" in out
     assert cli.main(["verify", "org/name", "--allow-gaps"]) == 0
+
+
+# `hayward verify --sha256 HASH`: one file hash against the verdict log.
+
+HASH = "ab" + "1" * 62
+
+
+def _entry(**over):
+    entry = {"receipt": "9" * 64, "repo": "org/name", "commit": SHA, "name": "model.safetensors",
+             "scanned": "2026-10-31T00:00:00+00:00", "scanner": {"name": "hayward", "version": "1.11.1"},
+             "verdict": "clean", "rules": [], "coverage_gaps": []}
+    entry.update(over)
+    return entry
+
+
+@pytest.fixture
+def log(service):
+    """Publish a verdict log: head, a checkpoint and the shards it names."""
+    base = verify.SERVICE
+
+    def publish(entries, *, run=7, head=None, predicate_type=verify.CHECKPOINT_TYPE, signed_hours_ago=1,
+                shard_bytes=None):
+        shard = json.dumps({HASH: entries} if entries else {}).encode()
+        shards = {f"{i:02x}": b"{}" for i in range(256)}
+        shards[HASH[:2]] = shard
+        st = {"_type": receipt.STATEMENT_TYPE, "predicateType": predicate_type,
+              "subject": [{"name": k, "digest": {"sha256": hashlib.sha256(v).hexdigest()}}
+                          for k, v in shards.items()],
+              "predicate": {"run": run, "previous": None, "signed": "2026-10-31T00:00:00Z",
+                            "scanner": {"name": "hayward", "version": "1.11.1"}}}
+        signed = (datetime.now(timezone.utc) - timedelta(hours=signed_hours_ago)).isoformat()
+        pub = service["published"]
+        pub[f"{base}/v1/head.json"] = json.dumps({"checkpoint": run if head is None else head}).encode()
+        pub[f"{base}/v1/checkpoints/{run if head is None else head}.sigstore.json"] = json.dumps(
+            {"mediaType": "x", "payload": json.dumps(st), "signed_at": signed}).encode()
+        for v in shards.values():
+            pub[f"{base}/v1/shards/{hashlib.sha256(v).hexdigest()}.json"] = v
+        if shard_bytes is not None:
+            pub[f"{base}/v1/shards/{hashlib.sha256(shard).hexdigest()}.json"] = shard_bytes
+
+    return publish
+
+
+def test_a_clean_hash_in_the_current_checkpoint_passes(service, log, capsys):
+    log([_entry()])
+    assert cli.main(["verify", "--sha256", HASH]) == 0
+    out = capsys.readouterr().out
+    assert "clean" in out and f"org/name@{SHA[:12]}" in out and "model.safetensors" in out and "1.11.1" in out
+    assert service["signer"] == (verify.IDENTITY, verify.ISSUER, "schedule", verify.REPOSITORY_ID, verify.OWNER_ID)
+
+
+def test_a_hash_with_no_entry_is_not_a_pass(log, capsys):
+    log([])
+    assert cli.main(["verify", "--sha256", HASH]) == 1
+    out = capsys.readouterr().out
+    assert "no current verdict" in out and "not a pass" in out
+
+
+def test_a_tampered_shard_is_refused(log, capsys):
+    log([_entry()], shard_bytes=json.dumps({HASH: [_entry()], "x": []}).encode())
+    assert cli.main(["verify", "--sha256", HASH]) != 0
+    assert "does not match the checkpoint" in capsys.readouterr().err
+
+
+def test_a_checkpoint_of_another_type_is_refused(log):
+    log([_entry()], predicate_type=receipt.PREDICATE_TYPE)
+    assert cli.main(["verify", "--sha256", HASH]) != 0
+
+
+def test_a_checkpoint_for_another_run_than_head_is_refused(log, capsys):
+    log([_entry()], run=7, head=8)
+    assert cli.main(["verify", "--sha256", HASH]) != 0
+    assert "run 7" in capsys.readouterr().err
+
+
+def test_a_checkpoint_over_3_days_old_does_not_count(log, capsys):
+    log([_entry()], signed_hours_ago=3 * 24 + 1)
+    assert cli.main(["verify", "--sha256", HASH]) == 1
+    assert "3 days" in capsys.readouterr().out
+
+
+def test_a_gap_fails_unless_gaps_are_allowed(log, capsys):
+    log([_entry(verdict="not_verified", coverage_gaps=["MFV-SKIP-001"])])
+    assert cli.main(["verify", "--sha256", HASH]) == 1
+    assert "--allow-gaps" in capsys.readouterr().out
+    assert cli.main(["verify", "--sha256", HASH, "--allow-gaps"]) == 0
+
+
+def test_a_clean_entry_with_coverage_gaps_is_a_gap(log):
+    log([_entry(coverage_gaps=["MFV-SKIP-003"])])
+    assert cli.main(["verify", "--sha256", HASH]) == 1
+    assert cli.main(["verify", "--sha256", HASH, "--allow-gaps"]) == 0
+
+
+def test_every_entry_must_be_clean(log):
+    log([_entry(), _entry(repo="other/repo", verdict="remote_code")])
+    assert cli.main(["verify", "--sha256", HASH]) == 1
+
+
+def test_a_flagged_entry_never_passes(log):
+    log([_entry(verdict="flagged")])
+    assert cli.main(["verify", "--sha256", HASH, "--allow-gaps"]) == 1
+
+
+def test_control_characters_in_an_entry_cannot_forge_output(log, capsys):
+    log([_entry(verdict="not_verified", name="x.bin\nverdict verified")])
+    assert cli.main(["verify", "--sha256", HASH]) == 1
+    assert "x.bin?verdict verified" in capsys.readouterr().out
+
+
+def test_a_header_read_entry_says_so(log, capsys):
+    log([_entry(read="header", hash_source="hub")])
+    assert cli.main(["verify", "--sha256", HASH]) == 0
+    out = capsys.readouterr().out
+    assert "clean (header read)" in out and "hash from the Hub" in out
+
+
+@pytest.mark.parametrize("argv", [[], ["org/name", "--sha256", HASH], ["--sha256", HASH.upper()],
+                                  ["--sha256", HASH[:-1]], ["--sha256", HASH, "./snap"],
+                                  ["--sha256", HASH, "--revision", "v1"]])
+def test_exactly_one_target_and_a_well_formed_hash(service, argv):
+    assert cli.main(["verify", *argv]) == 2
+    assert service["fetched"] == []
