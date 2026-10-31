@@ -409,3 +409,49 @@ def test_a_chat_template_json_is_fetched(monkeypatch, capsys):
     fake = FakeHub(monkeypatch, {"chat_template.json": b"{}", "model.pkl": CLEAN})
     run(["org/name", "--quiet"], capsys)
     assert sorted(fake.downloaded) == ["chat_template.json", "model.pkl"]
+
+
+def test_files_are_fetched_several_at_a_time_and_reported_in_hub_order(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    names = [f"model-{i:05d}.pkl" for i in range(20)]
+    fake = FakeHub(monkeypatch, {name: CLEAN for name in names})
+    lock, active, peak = threading.Lock(), [0], [0]
+    orig = fake.download
+
+    def slow_download(url, dest, max_bytes):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.02)
+        orig(url, dest, max_bytes)
+        with lock:
+            active[0] -= 1
+
+    monkeypatch.setattr(hub, "_download", slow_download)
+    got = hub.fetch("org/name", "main", tmp_path, 1 << 20)
+    assert got["fetched"] == names
+    assert 1 < peak[0] <= hub.FETCH_WORKERS
+
+
+def test_names_that_differ_only_by_case_are_refused(monkeypatch, tmp_path):
+    fake = FakeHub(monkeypatch, {"Model.pkl": EVIL, "model.pkl": CLEAN, "other.pkl": CLEAN})
+    got = hub.fetch("org/name", "main", tmp_path, 1 << 20)
+    assert sorted(got["refused"]) == ["Model.pkl", "model.pkl"]
+    assert fake.downloaded == ["other.pkl"]
+
+
+def test_a_hash_mismatch_stops_without_fetching_the_rest(monkeypatch, tmp_path):
+    names = [f"m-{i:03d}.pkl" for i in range(200)]
+    fake = FakeHub(monkeypatch, {n: CLEAN for n in names}, lfs={names[0]: "0" * 64})
+    with pytest.raises(hub.HubError):
+        hub.fetch("org/name", "main", tmp_path, 1 << 20)
+    assert len(fake.downloaded) < len(names)
+
+
+def test_names_that_differ_only_by_unicode_form_are_refused(monkeypatch, tmp_path):
+    composed, decomposed = "café.pkl", "café.pkl"
+    FakeHub(monkeypatch, {composed: EVIL, decomposed: CLEAN})
+    got = hub.fetch("org/name", "main", tmp_path, 1 << 20)
+    assert sorted(got["refused"]) == sorted([composed, decomposed])

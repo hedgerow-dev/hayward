@@ -25,11 +25,13 @@ import struct
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import __version__
@@ -39,6 +41,8 @@ from .scanner import ModelFileScanner
 HUB = "https://huggingface.co"
 TIMEOUT_SECONDS = 30
 RETRIES_429 = 4
+# Files fetched at once: a big repo has hundreds of shards, each a header read.
+FETCH_WORKERS = 8
 # "org/name": ASCII letters, digits, "_", "." and "-", no empty or dot-only parts.
 REPO_RE = re.compile(r"\w[\w.-]{0,95}/\w[\w.-]{0,95}", re.ASCII)
 # A branch, tag or commit. No slash, so it cannot change the shape of the URL.
@@ -279,18 +283,17 @@ def fetch(repo: str, revision: str, dest: Path, max_bytes: int) -> dict:
     suffixes = _scannable_suffixes()
     result: dict = {"sha": sha, "fetched": [], "partial": [], "too_large": [], "refused": []}
     root = dest.resolve()
-    for sibling in info.get("siblings", []):
+
+    def one(sibling: dict) -> tuple[str, object] | None:
         name = str(sibling.get("rfilename", ""))
         if not _wanted(name, suffixes):
-            continue
+            return None
         if not _safe_relative(name):
-            result["refused"].append(name)
-            continue
+            return "refused", name
         size = sibling.get("size")
         target = (root / name).resolve()
         if root not in target.parents:
-            result["refused"].append(name)
-            continue
+            return "refused", name
         target.parent.mkdir(parents=True, exist_ok=True)
         url = f"{HUB}/{quoted}/resolve/{sha}/{urllib.parse.quote(name)}"
         if isinstance(size, int) and size > max_bytes:
@@ -300,27 +303,43 @@ def fetch(repo: str, revision: str, dest: Path, max_bytes: int) -> dict:
             try:
                 if suffix in RANGE_SUFFIXES:
                     _range_scan_zip(url, size, target)
-                    result["partial"].append((name, size, "pickle members", hub_sha))
-                    continue
+                    return "partial", (name, size, "pickle members", hub_sha)
                 if suffix == ".safetensors":
                     _range_safetensors_header(url, size, target)
-                    result["partial"].append((name, size, "header", hub_sha))
-                    continue
+                    return "partial", (name, size, "header", hub_sha)
             except RangeSkip as exc:
                 target.unlink(missing_ok=True)
                 reason = f"over the cap; {exc}"
-            result["too_large"].append((name, size, reason))
-            continue
+            return "too_large", (name, size, reason)
         try:
             _download(url, target, max_bytes)
         except TooLarge as exc:
             target.unlink(missing_ok=True)
-            result["too_large"].append((name, exc.args[0], "over the cap"))
-            continue
+            return "too_large", (name, exc.args[0], "over the cap")
         expected = (sibling.get("lfs") or {}).get("sha256")
         if expected and _sha256(target) != expected:
             raise HubError(f"sha256 of {name} differs from the Hub's own record; not scanning")
-        result["fetched"].append(name)
+        return "fetched", name
+
+    siblings = info.get("siblings", [])
+    # Names that differ only by case or Unicode form are one file on macOS and Windows,
+    # so one could overwrite the other before the scan. Neither is fetched.
+    folded = [unicodedata.normalize("NFC", str(s.get("rfilename", ""))).casefold() for s in siblings]
+    clashes = {name for name in folded if folded.count(name) > 1}
+    for sibling, name in zip(siblings, folded, strict=True):
+        if name in clashes and _wanted(str(sibling.get("rfilename", "")), suffixes):
+            result["refused"].append(str(sibling.get("rfilename", "")))
+    siblings = [s for s, name in zip(siblings, folded, strict=True) if name not in clashes]
+
+    # Results come back in the Hub's file order. A hash mismatch in any file, or
+    # Ctrl-C, stops the scan without waiting for the files still queued.
+    pool = ThreadPoolExecutor(FETCH_WORKERS)
+    try:
+        for outcome in pool.map(one, siblings):
+            if outcome is not None:
+                result[outcome[0]].append(outcome[1])
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
     return result
 
 
