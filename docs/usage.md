@@ -494,6 +494,29 @@ follows `fail_on` and `mode`: it is HIGH, so `fail_on="critical"` lets it run
 and warn mode warns. Strict mode refuses it whatever `fail_on` is. A one-part
 name such as `my_model` matches a local folder of that name wherever it is.
 
+### Only what the verdict log vouches for
+
+```python
+hayward.guard.install(verified=True)      # warn about anything the log does not vouch for
+hayward.guard.install(verified="strict")  # refuse it
+```
+
+The bytes each guarded loader is about to read (a file by path, or the rest of
+a seekable stream) are hashed and looked up in the signed verdict log, as
+`hayward verify --sha256` does. They are vouched for when every current verdict
+for those exact bytes is clean with no coverage gap.
+
+Not vouched for: no verdict, a gap, a log that is unreachable or over 3 days
+old, a pipe or other non-regular file, a file that could not be read, or a
+stream that cannot seek. Vouching skips no check: the service may have read the
+file as another format, in part, or with older rules, so the pre-scan and the
+load-time check still run.
+
+The checkpoint is fetched once per process and a failure is not retried until
+the next `install()`. It needs `pip install "hayward[sign]"` and the network.
+The log only covers the repos the service scans, so most files have no verdict
+today. A verdict is analysis evidence, not a safety certificate.
+
 ### Default mode raises the bar; it is not a sandbox
 
 By default the guard refuses denied callables and anything the scan rates

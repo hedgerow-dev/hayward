@@ -6,6 +6,13 @@ within a major version.
 
 ## Unreleased
 
+### Added
+
+- `hayward.guard.install(verified=True)` looks the bytes each guarded loader
+  reads up in the signed verdict log by SHA-256 and warns about anything it does
+  not vouch for (every current verdict clean, no gaps). `verified="strict"`
+  refuses it. Every other check still runs. Needs `hayward[sign]`.
+
 ### Fixed
 
 - `hayward verify --sha256` crashed on every published verdict: the service

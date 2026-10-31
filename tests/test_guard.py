@@ -11,6 +11,7 @@ tests need nothing beyond the standard library.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import lzma
 import os
@@ -23,10 +24,12 @@ import tempfile
 import threading
 import warnings
 import zipfile
+from datetime import datetime, timedelta, timezone
+from urllib.error import URLError
 
 import pytest
 
-from hayward import guard
+from hayward import guard, verify
 from hayward.scanner import ModelFileScanner
 
 # Importing hayward.guard installed it. Every test installs it explicitly.
@@ -1228,3 +1231,244 @@ class TestRemoteCode:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         assert module.RAN == 42
+
+
+# ---- install(verified=...): the verdict log ------------------------------------------------
+
+CLEAN = [{"verdict": "clean", "coverage_gaps": []}]
+
+
+@pytest.fixture
+def log(monkeypatch):
+    """A fake verdict log: file sha256 -> entries. Counts checkpoint fetches."""
+    state = {"entries": {}, "fetches": 0, "signed": datetime.now(timezone.utc), "error": None}
+
+    def checkpoint(*args, **kwargs):
+        state["fetches"] += 1
+        if state["error"] is not None:
+            raise state["error"]
+        return 7, {"subject": []}, state["signed"]
+
+    def shard(statement, n, prefix, service=verify.SERVICE):
+        return {d: e for d, e in state["entries"].items() if d.startswith(prefix)}
+
+    monkeypatch.setattr(verify, "fetch_checkpoint", checkpoint)
+    monkeypatch.setattr(verify, "fetch_shard", shard)
+    return state
+
+
+def _joblib_file(tmp_path, payload=None, raw: bytes | None = None) -> tuple[str, str]:
+    joblib = pytest.importorskip("joblib")
+    path = tmp_path / "model.joblib"
+    if raw is not None:
+        path.write_bytes(raw)
+    else:
+        joblib.dump(BENIGN if payload is None else payload, path)
+    return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _count_scans(monkeypatch) -> list[str]:
+    seen: list[str] = []
+    real = ModelFileScanner.scan_file
+
+    def spy(self, path, **kwargs):
+        seen.append(str(path))
+        return real(self, path, **kwargs)
+
+    monkeypatch.setattr(ModelFileScanner, "scan_file", spy)
+    return seen
+
+
+def test_a_vouched_file_loads_quietly_and_is_still_scanned(tmp_path, log, monkeypatch):
+    # The service may have read it as another format, in part, or with older rules.
+    import joblib
+    path, digest = _joblib_file(tmp_path)
+    log["entries"][digest] = CLEAN
+    scans = _count_scans(monkeypatch)
+    guard.install(verified="strict")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert joblib.load(path) == BENIGN
+    assert scans
+
+
+def test_a_file_without_a_verdict_is_scanned_locally_with_a_warning(tmp_path, log, monkeypatch):
+    import joblib
+    path, _ = _joblib_file(tmp_path)
+    scans = _count_scans(monkeypatch)
+    guard.install(verified=True)
+    with pytest.warns(UserWarning, match="not vouched for"):
+        assert joblib.load(path) == BENIGN
+    assert scans
+
+
+def test_a_malicious_file_without_a_verdict_is_still_refused(tmp_path, log):
+    import joblib
+    path, _ = _joblib_file(tmp_path, raw=EVAL)
+    guard.install(verified=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(guard.UnsafeModelError):
+            joblib.load(path)
+
+
+def test_a_vouched_file_still_gets_the_load_time_check(tmp_path, log):
+    # A wrong verdict skips only the pre-scan: the loader's own globals are still judged.
+    import joblib
+    path, digest = _joblib_file(tmp_path, raw=EVAL)
+    log["entries"][digest] = CLEAN
+    guard.install(verified=True)
+    with pytest.raises(guard.UnsafeModelError):
+        joblib.load(path)
+
+
+@pytest.mark.parametrize("entries", [[], [{"verdict": "not_verified", "coverage_gaps": ["MFV-SKIP-001"]}],
+                                     [{"verdict": "remote_code", "coverage_gaps": []}],
+                                     [{"verdict": "clean", "coverage_gaps": ["MFV-SKIP-001"]}],
+                                     [*CLEAN, {"verdict": "flagged", "coverage_gaps": []}]])
+def test_strict_refuses_anything_not_vouched_for(tmp_path, log, entries):
+    import joblib
+    path, digest = _joblib_file(tmp_path)
+    if entries:
+        log["entries"][digest] = entries
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="not vouched for"):
+        joblib.load(path)
+
+
+def test_an_unreachable_log_falls_back_and_strict_refuses(tmp_path, log):
+    import joblib
+    path, digest = _joblib_file(tmp_path)
+    log["entries"][digest] = CLEAN
+    log["error"] = URLError("offline")
+    guard.install(verified=True)
+    with pytest.warns(UserWarning, match="could not be checked"):
+        assert joblib.load(path) == BENIGN
+    with pytest.warns(UserWarning, match="could not be checked"):  # the same reason, not retried
+        assert joblib.load(path) == BENIGN
+    assert log["fetches"] == 1
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="could not be checked"):
+        joblib.load(path)
+
+
+def test_a_missing_signing_extra_is_named(tmp_path, log, monkeypatch):
+    import joblib
+    path, _ = _joblib_file(tmp_path)
+
+    def no_sigstore(*args, **kwargs):
+        raise ImportError("No module named 'sigstore'")
+
+    monkeypatch.setattr(verify, "fetch_checkpoint", no_sigstore)
+    guard.install(verified="strict")
+    for _ in range(2):
+        with pytest.raises(guard.UnsafeModelError, match=r"hayward\[sign\]"):
+            joblib.load(path)
+
+
+def test_a_stale_checkpoint_vouches_for_nothing(tmp_path, log):
+    import joblib
+    path, digest = _joblib_file(tmp_path)
+    log["entries"][digest] = CLEAN
+    log["signed"] = datetime.now(timezone.utc) - timedelta(days=4)
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="over 3 days"):
+        joblib.load(path)
+
+
+def test_the_log_and_the_hash_are_looked_up_once(tmp_path, log, monkeypatch):
+    import joblib
+    path, digest = _joblib_file(tmp_path)
+    log["entries"][digest] = CLEAN
+    hashed = []
+    real = guard._hash_file
+    monkeypatch.setattr(guard, "_hash_file", lambda p: hashed.append(p) or real(p))
+    guard.install(verified=True)
+    joblib.load(path)
+    joblib.load(path)
+    assert log["fetches"] == 1 and len(hashed) == 1
+
+
+def test_a_seekable_stream_is_looked_up_by_what_is_left_to_read(log):
+    body = pickle.dumps(BENIGN)
+    log["entries"][hashlib.sha256(body).hexdigest()] = CLEAN
+    data = io.BytesIO(b"header" + body)
+    data.seek(6)
+    guard.install(verified="strict")
+    assert pickle.load(data) == BENIGN
+
+
+class _Unseekable(io.RawIOBase):
+    def __init__(self, body: bytes):
+        self._inner = io.BytesIO(body)
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        return self._inner.readinto(b)
+
+
+def test_a_stream_that_cannot_seek_is_not_vouched_for(log):
+    body = pickle.dumps(BENIGN)
+    log["entries"][hashlib.sha256(body).hexdigest()] = CLEAN
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="cannot be looked up"):
+        pickle.load(_Unseekable(body))
+
+
+def test_strict_refuses_a_file_it_could_not_hash(tmp_path, log, monkeypatch):
+    import joblib
+    path, digest = _joblib_file(tmp_path)
+    log["entries"][digest] = CLEAN
+
+    def gone(path):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(guard, "_hash_file", gone)
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="could not be read"):
+        joblib.load(path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
+def test_strict_refuses_a_pipe(tmp_path, log):
+    # A pipe could serve the hash one stream and the loader another.
+    import joblib
+    pytest.importorskip("joblib")
+    fifo = tmp_path / "model.joblib"
+    os.mkfifo(fifo)
+    guard.install(verified="strict")
+    with pytest.raises(guard.UnsafeModelError, match="not a regular file"):
+        joblib.load(str(fifo))
+
+
+def test_without_a_prescan_the_warning_says_only_the_load_time_check_applies(tmp_path, log):
+    import joblib
+    path, _ = _joblib_file(tmp_path)
+    guard.install(verified=True, prescan=False)
+    with pytest.warns(UserWarning, match="only the load-time check applies"):
+        assert joblib.load(path) == BENIGN
+
+
+def test_strict_lets_a_vouched_file_load_through_nested_loaders(tmp_path, log):
+    # numpy.load hands an object array to pickle.load on the same open file.
+    np = pytest.importorskip("numpy")
+    path = tmp_path / "objects.npy"
+    np.save(path, np.array([{"a": 1}], dtype=object), allow_pickle=True)
+    log["entries"][hashlib.sha256(path.read_bytes()).hexdigest()] = CLEAN
+    guard.install(verified="strict")
+    assert np.load(path, allow_pickle=True)[0] == {"a": 1}
+
+
+def test_the_log_is_not_consulted_by_default(tmp_path, log):
+    import joblib
+    path, _ = _joblib_file(tmp_path)
+    guard.install()
+    assert joblib.load(path) == BENIGN
+    assert log["fetches"] == 0
+
+
+def test_verified_takes_true_false_or_strict():
+    with pytest.raises(ValueError):
+        guard.install(verified="yes")

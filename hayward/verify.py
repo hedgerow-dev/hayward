@@ -279,8 +279,13 @@ def _printable(value: object) -> str:
     return "".join(c if c.isprintable() else "?" for c in str(value))
 
 
-def _run_sha256(args: argparse.Namespace) -> int:
-    base = args.service.rstrip("/")
+def fetch_checkpoint(service: str = SERVICE, identity: str = IDENTITY, issuer: str = ISSUER,
+                     trigger: str = TRIGGER, repository_id: str = REPOSITORY_ID,
+                     owner_id: str = OWNER_ID) -> tuple[int, dict, datetime]:
+    """The verdict log's current checkpoint: its run number, its signed statement and
+    when it was signed (from the certificate). Raises ValueError for anything that does
+    not check out, receipt.SignatureError for a wrong signer."""
+    base = service.rstrip("/")
     head = _fetch(f"{base}/v1/head.json")
     if head is None:
         raise ValueError("the service publishes no verdict log")
@@ -290,8 +295,7 @@ def _run_sha256(args: argparse.Namespace) -> int:
     raw = _fetch(f"{base}/v1/checkpoints/{n}.sigstore.json")
     if raw is None:
         raise ValueError(f"checkpoint {n} is not published")
-    statement = json.loads(receipt._sigstore_open(raw, args.identity, args.issuer, args.trigger,
-                                                  args.repository_id, args.owner_id))
+    statement = json.loads(receipt._sigstore_open(raw, identity, issuer, trigger, repository_id, owner_id))
     if (not isinstance(statement, dict) or statement.get("_type") != receipt.STATEMENT_TYPE
             or statement.get("predicateType") != CHECKPOINT_TYPE):
         raise ValueError("not a Hayward verdict log checkpoint")
@@ -299,21 +303,41 @@ def _run_sha256(args: argparse.Namespace) -> int:
     if not isinstance(run, int) or isinstance(run, bool) or run != n:
         raise ValueError(f"the head names checkpoint {n}, but it is signed as run {run}")
     # Age from the signing certificate, as for receipts.
-    age = datetime.now(timezone.utc) - receipt._signed_at(raw)
-    if age > MAX_CHECKPOINT_AGE:
+    return n, statement, receipt._signed_at(raw)
+
+
+def fetch_shard(statement: dict, n: int, prefix: str, service: str = SERVICE) -> dict:
+    """The shard of checkpoint ``n`` for hashes starting with ``prefix``, checked against
+    the digest the signed checkpoint names for it."""
+    digests = {s["name"]: s["digest"].get("sha256") for s in statement["subject"]}
+    digest = digests.get(prefix)
+    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        raise ValueError(f"checkpoint {n} names no shard {prefix}")
+    data = _fetch(f"{service.rstrip('/')}/v1/shards/{digest}.json")
+    if data is None:
+        raise ValueError(f"shard {prefix} of checkpoint {n} is not published")
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError(f"shard {prefix} does not match the checkpoint")
+    shard = json.loads(data)
+    if not isinstance(shard, dict):
+        raise ValueError(f"shard {prefix} is not a hash index")
+    return shard
+
+
+def has_gap(entry: dict) -> bool:
+    """A publishable verdict that does not fully clear the file."""
+    verdict = entry.get("verdict")
+    return verdict in ("not_verified", "remote_code") or (verdict == "clean" and bool(entry.get("coverage_gaps")))
+
+
+def _run_sha256(args: argparse.Namespace) -> int:
+    n, statement, signed_at = fetch_checkpoint(args.service, args.identity, args.issuer, args.trigger,
+                                               args.repository_id, args.owner_id)
+    if datetime.now(timezone.utc) - signed_at > MAX_CHECKPOINT_AGE:
         print(f"checkpoint {n} was signed over {MAX_CHECKPOINT_AGE.days} days ago, so it does not "
               f"count. The service may have stopped. This is not a pass.")
         return 1
-    digests = {s["name"]: s["digest"].get("sha256") for s in statement["subject"]}
-    digest = digests.get(args.sha256[:2])
-    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
-        raise ValueError(f"checkpoint {n} names no shard {args.sha256[:2]}")
-    data = _fetch(f"{base}/v1/shards/{digest}.json")
-    if data is None:
-        raise ValueError(f"shard {args.sha256[:2]} of checkpoint {n} is not published")
-    if hashlib.sha256(data).hexdigest() != digest:
-        raise ValueError(f"shard {args.sha256[:2]} does not match the checkpoint")
-    entries = json.loads(data).get(args.sha256) or []
+    entries = fetch_shard(statement, n, args.sha256[:2], args.service).get(args.sha256) or []
 
     print(f"sha256 {args.sha256}, checkpoint {n} signed by {args.identity}")
     if not entries:
@@ -334,7 +358,7 @@ def _run_sha256(args: argparse.Namespace) -> int:
         if entry.get("coverage_gaps"):
             line += f"  gaps: {', '.join(map(_printable, entry['coverage_gaps']))}"
         print(line)
-        if verdict in ("not_verified", "remote_code") or (verdict == "clean" and entry.get("coverage_gaps")):
+        if has_gap(entry):
             gaps += 1
         elif verdict != "clean":
             failed += 1  # flagged is never published, so anything else is wrong
