@@ -4,6 +4,22 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Changed
+
+- `hayward hub` fetches up to 8 files at a time. A big repo is hundreds of
+  shards, each a header read, so it was spending most of its time waiting on
+  one request after another. Results are reported in the Hub's file order, and
+  a hash mismatch in any file, or Ctrl-C, stops it without waiting for the
+  files still queued.
+
+### Fixed
+
+- `hayward hub` refuses files whose names differ only by case or Unicode form
+  (`Model.pkl` and `model.pkl`). On macOS and Windows they are one file, so one
+  could replace the other before the scan and its own bytes would never be read.
+
 ## 1.11.0 (2026-10-30)
 
 ### Added
