@@ -4,6 +4,15 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- `hayward verify --sha256 HASH` checks one file hash against the service's
+  signed verdict log: a checkpoint under 3 days old, the shard it names, and
+  every current verdict for those bytes. It passes only if all are clean with
+  no coverage gaps (`--allow-gaps` as for a repo). No entry is not a pass.
+
 ## 1.11.1 (2026-10-31)
 
 ### Changed

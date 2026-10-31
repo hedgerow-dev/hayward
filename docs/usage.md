@@ -220,6 +220,24 @@ check it. A verdict that covers no files is not a pass.
 - `--service`, `--identity`, `--issuer`, `--trigger`, `--repository-id` and
   `--owner-id` point it at a self-hosted service.
 
+### One file, by hash
+
+```bash
+hayward verify --sha256 HASH                  # 64 lowercase hex characters
+```
+
+Looks up one file's SHA-256 in the service's verdict log. It fetches the newest
+checkpoint, checks it was signed by the same pinned workflow and **under 3 days
+ago**, then fetches the one shard that holds the hash and checks it against the
+digest the checkpoint signed. It prints every current verdict for those bytes
+(the same file can be in many repos) with its repo, commit, file name and Hayward
+version, noting `(header read)` and "hash from the Hub" where they apply.
+
+It passes only if every entry is `clean` with no coverage gaps; `--allow-gaps`
+accepts `not_verified` and `remote_code`. No entry is not a pass (exit 1).
+A verdict withdrawn less than 3 days ago can still be served from an older
+checkpoint inside that window.
+
 A verdict is analysis evidence, not a safety certificate.
 
 ## Explain a pickle
