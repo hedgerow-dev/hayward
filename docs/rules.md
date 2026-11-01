@@ -71,12 +71,13 @@ CRITICAL.
 
 | Rule | Severity | CWE | Fires when |
 |------|----------|-----|------------|
-| `MFV-TORCH-001` | LOW | — | TorchScript graph source or Python source in a torch.package layout is present. A trust-boundary signal, not proof of a malicious operation. Members must match a container marker at the same archive root |
+| `MFV-TORCH-001` | LOW | - | Python source in a torch.package layout is present. A trust-boundary signal, not proof of a malicious operation. Members must match a container marker at the same archive root |
+| `MFV-TORCH-003` | INFO | - | TorchScript graph source is present. The JIT parses it; what its operators do is not assessed. **Not a clean verdict**, see coverage limits |
 | `MFV-TORCH-002` | HIGH | 94 | Packaged Python contains a statically resolved explicit execution call (`eval`, `exec`, OS shell, or subprocess). Reports source member and operation line; import/invocation reachability and intent remain unverified |
 | `MFV-KERAS-001` | HIGH | 502 | Lambda layer embedding a marshalled Python function |
 | `MFV-KERAS-002` | INFO | 502 | Layer class not on the known-builtin list |
 | `MFV-ONNX-001` | HIGH | 502, 94 | Custom op with documented code-execution behaviour (PyOp/PythonOp) |
-| `MFV-ONNX-002` | MEDIUM | 22 | Path string with `..` traversal, or an absolute `external_data` location |
+| `MFV-ONNX-002` | MEDIUM | 22 | An `external_data` location with `..` traversal or an absolute path. Any other path-shaped `..` string (a training path in metadata) is reported at INFO |
 | `MFV-ONNX-003` | HIGH | 502 | `external_data` key beyond the four the format defines. `CVE-2026-34445` |
 | `MFV-ONNX-004` | HIGH | 918 | `external_data` location points off the filesystem (a URL, UNC or protocol-relative reference). The loader fetches what `location` names, so loading the model issues a request. A published proof of concept points one at `169.254.169.254`, the cloud metadata endpoint |
 | `MFV-TF-001` | HIGH | 502, 94 | SavedModel graph op that touches the filesystem or invokes embedded Python |
@@ -117,8 +118,8 @@ authenticity.
 
 ## Coverage limits, stated plainly
 
-**`MFV-SKIP-001/002/003`, `MFV-7Z-001`, `MFV-GGUF-001`, `MFV-GGUF-004` and `MFV-LFS-001` are
-not clean verdicts.** Each means some or all of the file was never analysed.
+**`MFV-SKIP-001/002/003`, `MFV-7Z-001`, `MFV-GGUF-001`, `MFV-GGUF-004`, `MFV-LFS-001`
+and `MFV-TORCH-003` are not clean verdicts.** Each means some or all of the file was never analysed.
 Treat them as "unknown", never as "safe", and do not count them as detections
 when scoring.
 

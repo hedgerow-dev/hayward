@@ -6,6 +6,7 @@ import zipfile
 import pytest
 
 from hayward import ModelFileScanner, Severity, torch_source
+from hayward.findings import file_verdicts
 
 
 def archive(tmp_path, members, name="arbitrary.pt"):
@@ -88,8 +89,28 @@ def test_torchscript_presence_does_not_suppress_pickle_operation(tmp_path):
     path = archive(tmp_path, {"graph/data.pkl": b"cos\nsystem\n.",
                             "graph/code/__torch__/unit.py": b"class Unit: pass\n"})
     findings = ModelFileScanner().scan_file(path)
-    assert any(f.rule_id == "MFV-TORCH-001" and f.severity == Severity.LOW for f in findings)
+    assert any(f.rule_id == "MFV-TORCH-003" for f in findings)
     assert any(f.rule_id == "MFV-PICKLE-001" and f.severity == Severity.CRITICAL for f in findings)
+
+
+def test_torchscript_source_alone_is_not_verified_not_flagged(tmp_path):
+    # A TorchScript export: the JIT parses its graph source, and Hayward does not
+    # assess what the graph does, so the file is unread, not a detection.
+    path = archive(tmp_path, {"graph/data.pkl": pickle.dumps({"value": 3}),
+                              "graph/code/__torch__/unit.py": b"class Unit: pass\n"})
+    findings = ModelFileScanner().scan_file(path)
+    assert [f.rule_id for f in findings if f.rule_id.startswith("MFV-TORCH-")] == ["MFV-TORCH-003"]
+    assert file_verdicts(findings) == {str(path): "not_verified"}
+
+
+def test_torch_package_source_is_still_flagged_beside_torchscript(tmp_path):
+    path = archive(tmp_path, {"graph/data.pkl": pickle.dumps({"value": 3}),
+                              "graph/code/__torch__/unit.py": b"class Unit: pass\n",
+                              "delivery/.data/extern_modules": b"torch\n",
+                              "delivery/widget.py": b"VALUE = 3\n"})
+    findings = ModelFileScanner().scan_file(path)
+    assert {f.rule_id for f in findings if f.rule_id.startswith("MFV-TORCH-")} == {"MFV-TORCH-001", "MFV-TORCH-003"}
+    assert file_verdicts(findings) == {str(path): "flagged"}
 
 
 @pytest.mark.parametrize("source", [b"not valid python !!!", b"#" + b"a" * 100])

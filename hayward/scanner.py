@@ -3276,9 +3276,7 @@ class ModelFileScanner:
             with zf:
                 names = [info.filename for info in zf.infolist()]
                 sources = classify_sources(names)
-                presence = source_presence(file_path, sources)
-                if presence is not None:
-                    findings.append(presence)
+                findings.extend(source_presence(file_path, sources))
                 findings.extend(package_source_findings(
                     zf, file_path, sources.get("torch_package", [])))
                 findings.extend(self._archive_member_name_finding(
@@ -3713,7 +3711,9 @@ class ModelFileScanner:
                         f"{', '.join(traversal_paths[:5])}. If referenced via "
                         f"external_data, this escapes the model's own directory when "
                         f"the weights are loaded.",
-                severity=Severity.MEDIUM,
+                # Only an external_data location is a path the loader opens; any other
+                # string (a training path in metadata) is a note.
+                severity=Severity.MEDIUM if bad_locations else Severity.INFO,
                 category=Category.PATH_TRAVERSAL,
                 file_path=str(file_path),
                 confidence=0.5,

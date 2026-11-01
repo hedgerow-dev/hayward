@@ -76,12 +76,14 @@ class TestTorchSourceMembers:
                          b"    def forward(self, x: Tensor) -> Tensor:\n"
                          b"        return torch.relu(x)\n")
         findings = _scan(p)
-        torch001 = [f for f in findings if f.rule_id == "MFV-TORCH-001"]
-        assert torch001, [(f.rule_id, f.message) for f in findings]
-        assert torch001[0].severity == Severity.LOW
-        assert torch001[0].metadata["archive_kinds"] == ["torchscript"]
-        assert torch001[0].metadata["rule_class"] == "presence"
-        assert any(m.endswith("foo.py") for m in torch001[0].metadata["source_members"])
+        # A coverage gap (MFV-TORCH-003), not a detection: every TorchScript export has it.
+        torch003 = [f for f in findings if f.rule_id == "MFV-TORCH-003"]
+        assert torch003, [(f.rule_id, f.message) for f in findings]
+        assert not any(f.rule_id == "MFV-TORCH-001" for f in findings)
+        assert torch003[0].severity == Severity.INFO
+        assert torch003[0].metadata["archive_kinds"] == ["torchscript"]
+        assert torch003[0].metadata["rule_class"] == "presence"
+        assert any(m.endswith("foo.py") for m in torch003[0].metadata["source_members"])
 
     def test_benign_torch_package_data_layout_is_a_presence_signal(self, tmp_path):
         # torch.package's `.data/` layout with a python module the
