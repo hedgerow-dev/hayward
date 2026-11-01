@@ -734,6 +734,30 @@ class TestOnnxScanning:
         findings = ModelFileScanner().scan_file(p)
         assert any(f.rule_id == "MFV-ONNX-002" for f in findings)
 
+    def test_a_loose_traversal_string_is_a_note_not_a_detection(self, tmp_path):
+        # A training path kept as a string (metadata, doc_string) names no file the
+        # loader reads.
+        node = _pb_string_field(3, "../runs/S1/ckpt/model_750.pt")
+        model = _pb_length_delimited(7, _pb_length_delimited(1, node))
+        p = tmp_path / "policy.onnx"
+        p.write_bytes(model)
+        found = [f for f in ModelFileScanner().scan_file(p) if f.rule_id == "MFV-ONNX-002"]
+        assert [f.severity for f in found] == [Severity.INFO]
+
+    def test_a_traversal_external_data_location_is_a_detection(self, tmp_path):
+        p = tmp_path / "escape.onnx"
+        p.write_bytes(self._external_data(("location", "../../secret.bin")))
+        found = [f for f in ModelFileScanner().scan_file(p) if f.rule_id == "MFV-ONNX-002"]
+        assert [f.severity for f in found] == [Severity.MEDIUM]
+
+    def test_an_extra_field_does_not_hide_an_external_data_location(self, tmp_path):
+        entry = (_pb_string_field(1, "location") + _pb_string_field(2, "../../secret.bin")
+                 + b"\x28\x01")  # field 5, varint 1: skipped by protobuf parsers
+        p = tmp_path / "escape.onnx"
+        p.write_bytes(_pb_length_delimited(13, entry))
+        found = [f for f in ModelFileScanner().scan_file(p) if f.rule_id == "MFV-ONNX-002"]
+        assert [f.severity for f in found] == [Severity.MEDIUM]
+
     def test_malformed_protobuf_does_not_crash(self, tmp_path):
         p = tmp_path / "garbage.onnx"
         p.write_bytes(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff")

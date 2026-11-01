@@ -4,6 +4,20 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Changed
+
+Two rules no longer flag files that a review of new Hub uploads found benign:
+
+- A TorchScript export is `not_verified`, not `flagged`: its graph source is now
+  the coverage rule `MFV-TORCH-003` (INFO). `MFV-TORCH-001` keeps torch.package
+  source only.
+- `MFV-ONNX-002` is MEDIUM only for an `external_data` location. A `..` path in
+  any other string is INFO.
+- An ONNX `external_data` entry with an extra protobuf field is still read, so
+  the field cannot hide its location (it was skipped before).
+
 ## 1.13.0 (2026-10-31)
 
 ### Added

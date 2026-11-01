@@ -401,12 +401,15 @@ _ONNX_REMOTE_LOCATION_RE = re.compile(
 
 
 def _string_string_entry(value: bytes) -> tuple[str, str] | None:
-    """If `value` parses as a StringStringEntryProto {key: 1, value: 2} with
-    exactly those two fields and both decode as UTF-8, return (key, value),
-    else None. Anything richer is some other message and not ours to read."""
+    """If `value` parses as a StringStringEntryProto {key: 1, value: 2} and both
+    decode as UTF-8, return (key, value), else None. Other field numbers are
+    skipped, as protobuf parsers skip unknown fields: an extra field must not
+    hide a location the loader still opens."""
     key: str | None = None
     val: str | None = None
     for field_num, wire_type, field_value in _iter_protobuf_fields(value):
+        if field_num not in (1, 2):
+            continue
         if wire_type != 2 or not isinstance(field_value, (bytes, bytearray)):
             return None
         try:
@@ -415,10 +418,8 @@ def _string_string_entry(value: bytes) -> tuple[str, str] | None:
             return None
         if field_num == 1:
             key = text
-        elif field_num == 2:
-            val = text
         else:
-            return None
+            val = text
     if key is None:
         return None
     return key, val if val is not None else ""

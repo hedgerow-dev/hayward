@@ -41,27 +41,36 @@ def classify_sources(names: list[str]) -> dict[str, list[str]]:
     return result
 
 
-def source_presence(path: Path, sources: dict[str, list[str]]) -> Finding | None:
-    if not sources:
-        return None
-    members = sorted({n for group in sources.values() for n in group})
-    descriptions = []
-    if "torchscript" in sources:
-        descriptions.append("TorchScript graph source is present. It is parsed by the "
-                            "JIT importer, not imported as unrestricted Python")
+def source_presence(path: Path, sources: dict[str, list[str]]) -> list[Finding]:
+    findings = []
     if "torch_package" in sources:
-        descriptions.append("Python source is present in a torch.package layout. "
-                            "PackageImporter can execute these modules when importing them")
-    return Finding(
-        rule_id="MFV-TORCH-001", severity=Severity.LOW,
-        category=Category.DESERIALIZATION, file_path=str(path), confidence=0.95,
-        message="; ".join(descriptions) + ". Source presence alone does not establish "
-                "a malicious operation. Treat untrusted models as programs; graph "
-                "operator and runtime behavior are not fully assessed here. Members: "
-                + ", ".join(members[:5]),
-        metadata={"archive_kinds": sorted(sources), "source_members": members[:20],
-                  "rule_class": "presence", "evidence_tier": "presence"},
-    )
+        members = sources["torch_package"]
+        findings.append(Finding(
+            rule_id="MFV-TORCH-001", severity=Severity.LOW,
+            category=Category.DESERIALIZATION, file_path=str(path), confidence=0.95,
+            message="Python source is present in a torch.package layout. PackageImporter "
+                    "can execute these modules when importing them. Source presence alone "
+                    "does not establish a malicious operation. Treat untrusted models as "
+                    "programs. Members: " + ", ".join(members[:5]),
+            metadata={"archive_kinds": ["torch_package"], "source_members": members[:20],
+                      "rule_class": "presence", "evidence_tier": "presence"},
+        ))
+    if "torchscript" in sources:
+        # A coverage gap, not a detection: every TorchScript export has graph source,
+        # the JIT parses it rather than importing it as Python, and what the graph's
+        # operators do is not assessed here.
+        members = sources["torchscript"]
+        findings.append(Finding(
+            rule_id="MFV-TORCH-003", severity=Severity.INFO,
+            category=Category.DESERIALIZATION, file_path=str(path), confidence=0.95,
+            message="TorchScript graph source is present. It is parsed by the JIT importer, "
+                    "not imported as unrestricted Python, but what its operators do when "
+                    "the model runs is not assessed here. NOT a clean verdict. Members: "
+                    + ", ".join(members[:5]),
+            metadata={"archive_kinds": ["torchscript"], "source_members": members[:20],
+                      "rule_class": "presence", "evidence_tier": "presence"},
+        ))
+    return findings
 
 
 def _execution_calls(tree: ast.AST) -> list[dict]:
