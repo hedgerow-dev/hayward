@@ -14,6 +14,8 @@ import os
 import pickle
 import tarfile
 
+import pytest
+
 from hayward import ModelFileScanner
 
 
@@ -79,5 +81,50 @@ def test_pickle_renamed_to_tar_is_still_content_sniffed(tmp_path):
         (f.rule_id, f.severity) for f in findings
     ]
     assert not any(f.rule_id == "MFV-SKIP-003" for f in findings), [
+        (f.rule_id, f.severity) for f in findings
+    ]
+
+
+def _member(tf, name, data):
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    tf.addfile(info, io.BytesIO(data))
+
+
+def test_text_member_that_opens_like_a_pickle_is_not_flagged(tmp_path):
+    # Seen on the Hub: a web app's source tree as `repo.tar`. Minified JS opens
+    # with `(function`, which is a MARK opcode followed by no opcode at all, and
+    # its later `exec(` text matched the raw-byte fallback at HIGH.
+    js = b"(function(global, factory) { var m = /x/.exec(s); })(this);\n"
+    findings = _tar(tmp_path / "repo.tar", lambda tf: _member(tf, "static/lib/docx.umd.min.js", js))
+    assert not any(f.severity.value in ("critical", "high") for f in findings), [
+        (f.rule_id, f.severity) for f in findings
+    ]
+
+
+def test_protocol_0_pickle_member_is_still_flagged(tmp_path):
+    payload = pickle.dumps(_Evil(), protocol=0)
+    findings = _tar(tmp_path / "repo.tar", lambda tf: _member(tf, "notes.txt", payload))
+    assert any(f.severity.value in ("critical", "high") for f in findings), [
+        (f.rule_id, f.severity) for f in findings
+    ]
+
+
+def test_pickle_member_that_breaks_after_its_call_is_still_flagged(tmp_path):
+    # pickle.load runs the REDUCE before it reaches the bad byte, so a stream
+    # that fails to parse only after an import still counts.
+    payload = b"cos\nsystem\n(S'id'\ntR\xff exec("
+    findings = _tar(tmp_path / "repo.tar", lambda tf: _member(tf, "notes.txt", payload))
+    assert any(f.severity.value in ("critical", "high") for f in findings), [
+        (f.rule_id, f.severity) for f in findings
+    ]
+
+
+@pytest.mark.parametrize("prefix", [b"(I0x1\n1", b"(I017\n1", b"(I1\x00x\n1", b"(F1\x00\n1", b"(S'\xe9'\n1"])
+def test_protocol_0_member_behind_a_loader_only_number_is_still_flagged(tmp_path, prefix):
+    # These load, so the walk must read past them rather than call the member text.
+    payload = prefix + b"cos\nsystem\n(S'id'\ntR."
+    findings = _tar(tmp_path / "repo.tar", lambda tf: _member(tf, "notes.txt", payload))
+    assert any(f.severity.value in ("critical", "high") for f in findings), [
         (f.rule_id, f.severity) for f in findings
     ]

@@ -337,6 +337,24 @@ def _is_plain_tar(data: bytes) -> bool:
         return False
 
 
+# Opcodes that fetch a callable. Without one, a pickle can only build data.
+_IMPORTING_OPCODES = frozenset({"GLOBAL", "INST", "STACK_GLOBAL", "EXT1", "EXT2", "EXT4"})
+
+
+def _fails_before_any_import(data: bytes) -> bool:
+    """Whether the opcode walk breaks before any opcode that fetches a callable.
+    pickle.load raises at that same byte, having called nothing, so the bytes
+    after it never run, whatever they look like. Text that only opens like a
+    protocol-0 pickle (`(function`, `{"key"`) ends here."""
+    try:
+        for opcode, _, _ in _genops(data):
+            if opcode.name in _IMPORTING_OPCODES:
+                return False
+    except ValueError:
+        return True
+    return False
+
+
 def _strip_python2_longs(header: str) -> str:
     """numpy's _filter_header: drop the `L` that follows an integer in a
     header written by Python 2 (`(1L,)`), which literal_eval rejects."""
@@ -2951,7 +2969,12 @@ class ModelFileScanner:
         if blob[:4] == self._ZIP_LOCAL_MAGIC:
             findings.extend(self._scan_zip_bytes(blob, label, file_path))
             return findings
-        if not torch_member and not blob.startswith(self._PICKLE_OPENERS):
+        # A member torch.load does not read by name is only a pickle to a loader
+        # that unpickles it on purpose, and then only if it could run something.
+        if not torch_member and (
+            not blob.startswith(self._PICKLE_OPENERS)
+            or (blob[:1] != b"\x80" and _fails_before_any_import(blob))
+        ):
             exec_hits = _find_embedded_executables(blob)
             if exec_hits:
                 findings.append(self._executable_finding(file_path, exec_hits, member=label))
