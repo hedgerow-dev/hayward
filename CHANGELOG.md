@@ -4,6 +4,17 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## 1.14.1 (2026-11-02)
+
+### Fixed
+
+- The pickle opcode walk reads the numeric text arguments the way the loaders
+  do. Python 3.10 to 3.13 accept `0x`, `0o` and `0b` integers in `INT` and
+  `LONG` (and the C loader a leading-zero octal), and the C loader stops an
+  `INT`, `FLOAT`, `PUT` or `GET` argument at a NUL byte. `pickletools` stopped
+  at both, so a call placed after such an argument was never seen and the file
+  could scan clean.
+
 ## 1.14.0 (2026-11-01)
 
 ### Changed

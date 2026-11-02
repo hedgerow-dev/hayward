@@ -28,6 +28,82 @@ from typing import Any
 import hayward.scanner as _scanner
 from hayward.findings import Severity
 
+
+def _loader_int(line: bytes) -> int:
+    """An INT or LONG argument as some loader reads it, else ValueError.
+
+    pickletools reads base 10. Python 3.10 to 3.13 read base 0 (`0x10`, `0o7`,
+    `0b1`), and the C loader's strtol also takes a leading-zero octal (`017`)
+    and stops at a NUL. A walk stricter than the loader stops before the opcodes
+    the loader goes on to run.
+    """
+    for text in (line, line.split(b"\0", 1)[0]):
+        for base in (10, 0):
+            with contextlib.suppress(ValueError):
+                return int(text, base)
+        octal = re.fullmatch(rb"\s*([+-]?)0([0-7]+)\s*", text)
+        if octal:
+            return int(octal.group(1) + octal.group(2), 8)
+    raise ValueError(f"no loader reads {line!r} as an integer")
+
+
+def _read_line(f: io.BytesIO) -> bytes:
+    line = f.readline()
+    if not line.endswith(b"\n"):
+        raise ValueError("no newline found when trying to read an integer")
+    return line[:-1]
+
+
+def _read_int(f: io.BytesIO) -> int | bool:
+    line = _read_line(f)
+    if line in (b"00", b"01"):
+        return line == b"01"
+    return _loader_int(line)
+
+
+def _read_long(f: io.BytesIO) -> int:
+    line = _read_line(f)
+    return _loader_int(line[:-1] if line.endswith(b"L") else line)
+
+
+def _read_float(f: io.BytesIO) -> float:
+    line = _read_line(f)
+    for text in (line, line.split(b"\0", 1)[0]):
+        with contextlib.suppress(ValueError):
+            return float(text)
+    raise ValueError(f"no loader reads {line!r} as a float")
+
+
+def _read_memo_index(f: io.BytesIO) -> int:
+    # PUT and GET: base 10 in every loader, but the C one stops at a NUL.
+    line = _read_line(f)
+    for text in (line, line.split(b"\0", 1)[0]):
+        with contextlib.suppress(ValueError):
+            return int(text)
+    raise ValueError(f"no loader reads {line!r} as a memo index")
+
+
+_LOADER_READERS = {"INT": _read_int, "LONG": _read_long, "FLOAT": _read_float,
+                   "PUT": _read_memo_index, "GET": _read_memo_index}
+_OPCODES = {op.code: op for op in pickletools.opcodes}
+
+
+def genops(data: bytes | io.BytesIO):
+    """pickletools.genops, reading the numeric text arguments the way the loaders do."""
+    stream = io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else data
+    while True:
+        pos = stream.tell()
+        code = stream.read(1)
+        op = _OPCODES.get(code.decode("latin-1"))
+        if op is None:
+            if code == b"":
+                raise ValueError("pickle exhausted before seeing STOP")
+            raise ValueError(f"at position {pos}, opcode {code!r} unknown")
+        reader = _LOADER_READERS.get(op.name) or (op.arg.reader if op.arg else None)
+        yield op, (reader(stream) if reader else None), pos
+        if op.name == "STOP":
+            break
+
 PICKLE_DENIED_GLOBALS: frozenset[str] = frozenset({
     "os.system", "posix.system", "nt.system",
     "os.popen", "os.popen2", "os.popen3", "os.popen4",
@@ -922,7 +998,7 @@ def _pickle_stream_truncated(data: bytes) -> bool:
         # walk gave up is exactly what separates a short file from an
         # unreadable one, and `stream` still holds that position.
         with contextlib.suppress(Exception):
-            for op, _arg, offset in pickletools.genops(stream):
+            for op, _arg, offset in genops(stream):
                 if op.name == "STOP" and offset is not None:
                     end_of_pickle = offset + 1
                     break
@@ -1164,11 +1240,9 @@ def _walk_one_pickle(
     OBJ/BUILD). Where a call's arguments can't be resolved to literals (e.g.
     built from another REDUCE's return value), only the bare callable
     reference is recorded, matching prior behavior -- this never guesses at
-    a value. Raises whatever pickletools.genops raises on an unparseable
+    a value. Raises whatever genops raises on an unparseable
     stream -- callers should catch and fall back to a weaker signal.
     """
-    import pickletools
-
     # Fresh per pickle: a real Unpickler starts each load() with an empty
     # stack and memo, so memo indices from an earlier pickle in the same file
     # must not be visible here.
@@ -1234,7 +1308,7 @@ def _walk_one_pickle(
                 PickleResolvedCall(callable_val, (), None, tuple(seen), tuple(chained))
             )
 
-    for op, arg, _pos in pickletools.genops(stream):
+    for op, arg, _pos in genops(stream):
         if len(stack) > _scanner._PICKLE_STACK_MAX_DEPTH:
             raise _PickleWalkBudgetExceeded
         name = op.name
@@ -2064,7 +2138,7 @@ def _embedded_pickle_denied_globals(data: bytes, depth: int = 0) -> list[str]:
     # unparseable stream still yields nothing, because the exception aborts
     # the same loop the old list() fed.
     try:
-        for op, arg, _pos in pickletools.genops(io.BytesIO(data)):
+        for op, arg, _pos in genops(io.BytesIO(data)):
             # BYTEARRAY8 carries a pickle just as the BINBYTES family does;
             # genops yields it as a bytearray, so normalise to bytes below.
             if op.name not in (
