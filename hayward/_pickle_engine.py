@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import _compat_pickle
 import ast
+import codecs
 import contextlib
 import dataclasses
 import io
@@ -50,7 +51,7 @@ def _loader_int(line: bytes) -> int:
 def _read_line(f: io.BytesIO) -> bytes:
     line = f.readline()
     if not line.endswith(b"\n"):
-        raise ValueError("no newline found when trying to read an integer")
+        raise ValueError("no newline found when trying to read an argument")
     return line[:-1]
 
 
@@ -83,8 +84,26 @@ def _read_memo_index(f: io.BytesIO) -> int:
     raise ValueError(f"no loader reads {line!r} as a memo index")
 
 
+def _read_string(f: io.BytesIO) -> str:
+    # STRING: quoted and escape-decoded, then decoded in the load's encoding. A
+    # latin1 or bytes load reads any byte, where 3.10 and 3.11 pickletools
+    # insisted on ASCII.
+    line = _read_line(f)
+    if len(line) < 2 or line[:1] not in (b"'", b'"') or line[-1:] != line[:1]:
+        raise ValueError(f"the STRING argument {line!r} must be quoted")
+    return codecs.escape_decode(line[1:-1])[0].decode("latin-1")
+
+
+def _read_global(f: io.BytesIO) -> str:
+    # GLOBAL and INST: two UTF-8 lines with no escapes, where 3.10 and 3.11
+    # pickletools escape-decoded them as ASCII.
+    module = _read_line(f).decode("utf-8")
+    return f"{module} {_read_line(f).decode('utf-8')}"
+
+
 _LOADER_READERS = {"INT": _read_int, "LONG": _read_long, "FLOAT": _read_float,
-                   "PUT": _read_memo_index, "GET": _read_memo_index}
+                   "PUT": _read_memo_index, "GET": _read_memo_index,
+                   "STRING": _read_string, "GLOBAL": _read_global, "INST": _read_global}
 _OPCODES = {op.code: op for op in pickletools.opcodes}
 
 

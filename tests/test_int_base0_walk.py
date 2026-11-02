@@ -29,6 +29,8 @@ CALL = b"cos\nsystem\n(S'id'\ntR."
     b"(F1\x00\n1",
     b"\x80\x02Np1\x00\n0",   # PUT, C stops at the NUL
     b"\x80\x02Np1\n0g1\x00\n0",  # GET
+    b"]S'\xe9'\n0",          # STRING: a latin1 or bytes load reads non-ASCII
+    b"(S'\xe9'\n1",
 ])
 def test_payload_behind_a_loader_only_integer_is_flagged(tmp_path, prefix):
     path = tmp_path / "model.pkl"
@@ -47,3 +49,10 @@ def test_walk_reads_loader_integers():
 def test_walk_still_rejects_what_no_loader_reads():
     with pytest.raises(ValueError):
         list(genops(b"Iabc\n."))
+
+
+def test_walk_reads_strings_and_names_like_the_loaders():
+    # Python 3.10 and 3.11 pickletools decoded these as ASCII and raised.
+    data = b"S'\xe9'\ncbuiltins\n\xc3\xa9\n."
+    ops = [(op.name, arg) for op, arg, _ in genops(data)]
+    assert ops == [("STRING", "\xe9"), ("GLOBAL", "builtins \xe9"), ("STOP", None)]
