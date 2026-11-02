@@ -4,6 +4,16 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- A text file inside a tar is no longer scanned as a pickle just because its
+  first byte is a protocol-0 opcode. Minified JavaScript opening `(function`
+  raised `MFV-PICKLE-002` (HIGH) on its `exec(` text. A member torch.load does
+  not read by name is now skipped as a pickle when its opcode walk breaks before
+  any opcode that fetches a callable, since a loader stops there too.
+
 ## 1.14.2 (2026-11-02)
 
 ### Fixed
