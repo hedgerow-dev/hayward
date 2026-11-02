@@ -31,6 +31,7 @@ CALL = b"cos\nsystem\n(S'id'\ntR."
     b"\x80\x02Np1\n0g1\x00\n0",  # GET
     b"]S'\xe9'\n0",          # STRING: a latin1 or bytes load reads non-ASCII
     b"(S'\xe9'\n1",
+    b"P\\\n0",               # PERSID: no escapes, for a persistent_load hook
 ])
 def test_payload_behind_a_loader_only_integer_is_flagged(tmp_path, prefix):
     path = tmp_path / "model.pkl"

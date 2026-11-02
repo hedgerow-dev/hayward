@@ -101,9 +101,15 @@ def _read_global(f: io.BytesIO) -> str:
     return f"{module} {_read_line(f).decode('utf-8')}"
 
 
+def _read_persid(f: io.BytesIO) -> str:
+    # PERSID: an ASCII line with no escapes, where pickletools escape-decoded it.
+    return _read_line(f).decode("ascii")
+
+
 _LOADER_READERS = {"INT": _read_int, "LONG": _read_long, "FLOAT": _read_float,
                    "PUT": _read_memo_index, "GET": _read_memo_index,
-                   "STRING": _read_string, "GLOBAL": _read_global, "INST": _read_global}
+                   "STRING": _read_string, "GLOBAL": _read_global, "INST": _read_global,
+                   "PERSID": _read_persid}
 _OPCODES = {op.code: op for op in pickletools.opcodes}
 
 
