@@ -20,13 +20,17 @@ and nothing derived from the file is ever evaluated.
 from __future__ import annotations
 
 import io
-import pickletools
 import tarfile
 import zipfile
 from collections import Counter
 from pathlib import Path
 
-from ._pickle_engine import _PICKLE_ARG_SHELL_RE, _PICKLE_ARG_URL_RE, _classify_pickle_global
+from ._pickle_engine import (
+    _PICKLE_ARG_SHELL_RE,
+    _PICKLE_ARG_URL_RE,
+    _classify_pickle_global,
+    genops,
+)
 
 MAX_OPS = 2_000_000            # opcodes walked per pickle
 MAX_STACK = 1_000_000          # values held on the stack
@@ -135,7 +139,7 @@ class _Walk:
         """Walk to STOP. True if the pickle ended normally."""
         ops = 0
         try:
-            for op, arg, _ in pickletools.genops(stream):
+            for op, arg, _ in genops(stream):
                 ops += 1
                 if ops > MAX_OPS:
                     raise _Stop(f"more than {MAX_OPS:,} opcodes")

@@ -30,7 +30,6 @@ import json
 import logging
 import lzma
 import os
-import pickletools
 import re
 import shutil
 import stat
@@ -176,6 +175,7 @@ from hayward._pickle_engine import _propagate_result_invoked as _propagate_resul
 from hayward._pickle_engine import _resolve_pickle_globals as _resolve_pickle_globals
 from hayward._pickle_engine import _triage_unknown_pickle_call as _triage_unknown_pickle_call
 from hayward._pickle_engine import _walk_one_pickle as _walk_one_pickle
+from hayward._pickle_engine import genops as _genops
 from hayward._tensors import _ONNX_ABSOLUTE_PATH_RE as _ONNX_ABSOLUTE_PATH_RE
 from hayward._tensors import _ONNX_EXTERNAL_DATA_KEYS as _ONNX_EXTERNAL_DATA_KEYS
 from hayward._tensors import _ONNX_REMOTE_LOCATION_RE as _ONNX_REMOTE_LOCATION_RE
@@ -1356,7 +1356,7 @@ class ModelFileScanner:
         if data[:1] == b"\x80":
             return True
         with contextlib.suppress(Exception):
-            for op, _arg, _pos in pickletools.genops(io.BytesIO(data)):
+            for op, _arg, _pos in _genops(io.BytesIO(data)):
                 if op.name == "STOP":
                     return True
         return False
