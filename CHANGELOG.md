@@ -4,6 +4,17 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## 1.14.2 (2026-11-02)
+
+### Fixed
+
+- The pickle opcode walk reads `STRING`, `GLOBAL`, `INST` and `PERSID`
+  arguments the way the loaders do. On Python 3.10 and 3.11 `pickletools`
+  decoded a quoted string as ASCII, where a load with `encoding="latin1"` or
+  `"bytes"` takes any byte, and it escape-decoded `PERSID` ids on every version,
+  where the loaders do not. Either stopped the walk, so a call placed after such
+  an argument was never seen and the file could scan clean.
+
 ## 1.14.1 (2026-11-02)
 
 ### Fixed
