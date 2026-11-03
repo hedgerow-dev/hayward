@@ -4,6 +4,19 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Changed
+
+- A checkpoint past the 200 MB member limit inside an uncompressed outer layer
+  is now read in place instead of being reported as not verified: a `.nemo`
+  (NeMo writes an uncompressed tar) or a `.mar` built with
+  `--archive-format zip-store`. The nested zip is opened where it sits, so
+  seeking to its index costs a disk read, not a copy; a 1.5 GB `.nemo` scans in
+  well under a second. A compressed outer layer (a gzip tar, the default
+  deflated `.mar`) would inflate again on every seek, so those stay
+  `not_verified`.
+
 ## 1.15.0 (2026-11-03)
 
 ### Added

@@ -35,7 +35,7 @@ ending is not proof the file ended.
 | Rule | Means |
 |---|---|
 | `MFV-SKIP-001` | Over the size cap and not in a streamable format |
-| `MFV-SKIP-002` | A container walk ended early, so members past that point were never seen; or one member was past the 200 MB member limit, so only its start was read (a pickle or object `.npy`) or none of it (a nested zip, whose index is at its end) |
+| `MFV-SKIP-002` | A container walk ended early, so members past that point were never seen; or one member was past the 200 MB member limit, so only its start was read (a pickle or object `.npy`) or none of it (a nested zip in a compressed outer layer, whose index is at its end; in an uncompressed one it is read in place) |
 | `MFV-SKIP-003` | Content could not be verified |
 | `MFV-7Z-001` | A `.7z` archive with no extractor available |
 | `MFV-GGUF-004` | Valid GGUF magic, unparseable metadata section |
