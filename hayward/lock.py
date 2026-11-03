@@ -7,8 +7,10 @@ The lock names the commit and every file in the repo with its hash (SHA-256 for 
 files, the git blob id for the rest), so a downloaded snapshot can be checked without
 trusting where it came from. It is written for one profile, ``transformers``
 ``from_pretrained`` at a pinned revision, and it fails closed: anything that profile
-would load from outside this repo (custom code from another repo, an adapter's base
-model) is recorded as unresolved and the lock is marked "needs_review".
+would load from outside this repo is pinned too or recorded as unresolved, and an
+unresolved lock is marked "needs_review". Custom code from one other repo is pinned at
+a commit, loaded with ``code_revision``; an adapter's base model cannot be, because
+transformers loads it at the revision passed for the adapter.
 
 A lock pins what will be loaded. It says nothing about whether the files are safe:
 scan them with ``hayward hub`` or ``hayward scan``.
@@ -67,15 +69,62 @@ def _read_json(repo: str, sha: str, name: str, tmp: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _remote_code_refs(auto_map) -> list[str]:
-    """``auto_map`` values written as ``other/repo--module.Class`` load code from another repo."""
-    values = auto_map.values() if isinstance(auto_map, dict) else []
+def _auto_map_refs(auto_map) -> list[str] | None:
+    """Every class an ``auto_map`` names: ``module.Class`` in this repo, or
+    ``other/repo--module.Class`` in another. A dict of names or ``[slow, fast]``
+    pairs, or (older tokenizer configs) one such pair as a list. None for any
+    other shape, since what it loads is then unknown."""
+    values = list(auto_map.values()) if isinstance(auto_map, dict) else [auto_map]
+    if not isinstance(auto_map, (dict, list)):
+        return None
     refs = []
     for value in values:
         for item in value if isinstance(value, list) else [value]:
-            if isinstance(item, str) and "--" in item:
+            if isinstance(item, str):
                 refs.append(item)
+            elif item is not None:
+                return None
     return refs
+
+
+def _pin_remote_code(refs: list[str], local_code: bool) -> tuple[dict | None, str]:
+    """Pin the other repo that ``refs`` load code from, or say why it cannot be pinned.
+
+    transformers loads every such ref at one ``code_revision``, and loads this repo's own
+    auto_map code at that same revision once it is given, so only code from a single
+    other repo, with none from this one, can be pinned."""
+    repos = sorted({ref.split("--", 1)[0] for ref in refs})
+    if len(repos) > 1:
+        return None, "code comes from more than one other repo, and one code_revision cannot pin them all"
+    if local_code:
+        return None, "this repo's own code is loaded too, and code_revision would load it at the other repo's commit"
+    other = repos[0]
+    if not hub.REPO_RE.fullmatch(other):
+        return None, "not a repo id like org/name"
+    try:
+        info = hub._api_get(f"{hub.HUB}/api/models/{urllib.parse.quote(other, safe='/')}?blobs=true")
+    except (hub.HubError, OSError, ValueError, urllib.error.URLError):
+        info = {}
+    if not isinstance(info, dict):
+        info = {}
+    sha = str(info.get("sha", ""))
+    if not hub.COMMIT_RE.fullmatch(sha):
+        return None, "the Hub did not return a commit for that repo"
+    code_files = []
+    for sibling in sorted(info.get("siblings", []), key=lambda s: str(s.get("rfilename", ""))):
+        name = str(sibling.get("rfilename", ""))
+        if Path(name).suffix.lower() not in CODE_SUFFIXES:
+            continue
+        if not hub._safe_relative(name):
+            return None, "that repo has a code file name that is not a plain relative path"
+        lfs_sha = (sibling.get("lfs") or {}).get("sha256")
+        code_files.append({"path": name, **({"sha256": lfs_sha} if lfs_sha else {"git_blob": sibling.get("blobId")})})
+    present = {f["path"] for f in code_files}
+    for ref in refs:
+        module = ref.split("--", 1)[1].split(".", 1)[0] + ".py"
+        if module not in present:
+            return None, f"{module} is not in that repo"
+    return {"kind": "remote_code_repo", "repo": other, "revision": sha, "code_files": code_files}, ""
 
 
 def create(repo: str, revision: str) -> dict:
@@ -102,7 +151,8 @@ def create(repo: str, revision: str) -> dict:
         names.add(name)
         if Path(name).suffix.lower() in CODE_SUFFIXES:
             code_files.append(name)
-    requires_remote_code = False
+    requires_remote_code = local_code = False
+    remote_refs: list[str] = []
     with tempfile.TemporaryDirectory(prefix="hayward-lock-") as tmp:
         configs = sorted(n for n in names if n.rsplit("/", 1)[-1].endswith(CONFIG_SUFFIX))
         if len(configs) > MAX_CONFIGS:
@@ -116,9 +166,16 @@ def create(repo: str, revision: str) -> dict:
                 continue
             if config.get("auto_map"):
                 requires_remote_code = True
-                for ref in _remote_code_refs(config["auto_map"]):
-                    unresolved.append({"kind": "remote_code_repo", "ref": ref,
-                                       "why": "code is loaded from another repo, whose revision this lock does not pin"})
+                refs = _auto_map_refs(config["auto_map"])
+                if refs is None:
+                    unresolved.append({"kind": "unreadable", "ref": name,
+                                       "why": "an auto_map of a shape the lock does not know, so what it loads is unknown"})
+                    continue
+                for ref in refs:
+                    if "--" in ref and ref.split("--", 1)[0] != repo:
+                        remote_refs.append(ref)
+                    else:
+                        local_code = True
         if ADAPTER_FILE in names:
             adapter = _read_json(repo, sha, ADAPTER_FILE, Path(tmp))
             base = (adapter or {}).get("base_model_name_or_path")
@@ -127,12 +184,22 @@ def create(repo: str, revision: str) -> dict:
                                    "why": "could not be read as JSON, so what it loads is unknown"})
             elif base:
                 unresolved.append({"kind": "base_model", "ref": str(base),
-                                   "why": "an adapter loads a base model that this lock does not pin"})
+                                   "why": "transformers loads an adapter's base model at the revision passed "
+                                          "for the adapter, so one revision cannot pin both"})
+    dependencies, load_with = [], {"revision": sha}
+    if remote_refs:
+        dependency, why = _pin_remote_code(remote_refs, local_code)
+        if dependency:
+            dependencies.append(dependency)
+            load_with["code_revision"] = dependency["revision"]
+        else:
+            unresolved.extend({"kind": "remote_code_repo", "ref": ref, "why": why} for ref in remote_refs)
     return {
         "format": FORMAT, "profile": PROFILE, "repo": repo, "revision": sha,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "status": "needs_review" if unresolved else "complete",
         "requires_trust_remote_code": requires_remote_code,
+        "load_with": load_with, "dependencies": dependencies,
         "code_files": code_files, "unresolved": unresolved, "files": files,
     }
 
@@ -198,6 +265,9 @@ def main(argv: list[str]) -> int:
     args.output.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
     print(f"hayward: locked {args.repo} at {data['revision'][:12]}: {len(data['files'])} file(s) "
           f"-> {args.output}", file=sys.stderr)
+    if "code_revision" in data["load_with"]:
+        print(f"hayward lock: load with revision={data['revision']}, "
+              f"code_revision={data['load_with']['code_revision']}", file=sys.stderr)
     for item in data["unresolved"]:
         print(f"hayward lock: unresolved {item['kind']}: {item['ref']} ({item['why']})", file=sys.stderr)
     if data["status"] != "complete":
