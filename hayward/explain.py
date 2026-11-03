@@ -29,6 +29,7 @@ from ._pickle_engine import (
     _PICKLE_ARG_SHELL_RE,
     _PICKLE_ARG_URL_RE,
     _classify_pickle_global,
+    _PickleWalkBudgetExceeded,
     genops,
 )
 
@@ -147,6 +148,8 @@ class _Walk:
                     return True
         except _Stop as exc:
             self.note = f"stopped: {exc}"
+        except _PickleWalkBudgetExceeded:
+            self.note = "stopped: the opcode budget ran out"
         except (ValueError, EOFError, UnicodeDecodeError) as exc:
             self.note = f"stopped at byte {stream.tell()}: {exc}"
         if not self.note:
