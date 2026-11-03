@@ -1990,7 +1990,12 @@ class ModelFileScanner:
             if f.rule_id in ("MFV-PICKLE-001", "MFV-PICKLE-005", "MFV-PICKLE-006")
             and _SEVERITY_ORDER[f.severity] <= _SEVERITY_ORDER[Severity.MEDIUM]
         ]
-        line = what_it_does(data) if called_out else None
+        line = None
+        if called_out:
+            try:
+                line = what_it_does(data)
+            except Exception as e:  # the line is a nicety; it must never cost the finding
+                logger.debug("explain line failed for %s: %s", file_path, e)
         if line:
             for finding in called_out:
                 finding.metadata["what_it_does"] = line

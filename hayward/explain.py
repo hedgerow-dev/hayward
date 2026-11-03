@@ -20,6 +20,7 @@ and nothing derived from the file is ever evaluated.
 from __future__ import annotations
 
 import io
+import re
 import tarfile
 import zipfile
 from collections import Counter
@@ -45,6 +46,7 @@ MAX_DEPTH = 6                  # nesting shown
 MAX_LINE = 400                 # characters of one printed line
 
 _MARK = object()
+_DOTTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 def _safe(text: str) -> str:
@@ -294,6 +296,11 @@ def _text(value) -> str:
         except UnicodeDecodeError:
             printable = False
         return repr(bytes(value)) if printable else f"<{len(value)} bytes>"
+    if isinstance(value, int) and not isinstance(value, bool):
+        try:
+            return repr(value)
+        except ValueError:  # past Python's int-to-text digit limit
+            return f"<integer of {value.bit_length()} bits>"
     return repr(value)
 
 
@@ -303,7 +310,9 @@ def _expr(node, depth: int = 0) -> str:
     if isinstance(node, Const):
         return _text(node.value)
     if isinstance(node, Glob):
-        return _safe(node.ref)
+        # STACK_GLOBAL takes any string as a name: one that is not plain dotted
+        # identifiers is quoted, so it cannot pass for code or a comment.
+        return node.ref if _DOTTED.fullmatch(node.ref) else repr(node.ref)
     if isinstance(node, (Call, Build)):
         if node.var is not None:
             return f"_{node.var}"
@@ -502,28 +511,44 @@ def _inline(node, depth: int = 0) -> str:
     return _expr(node)  # Const, Glob, Odd
 
 
+def _reaches_denied(node, depth: int = 0) -> bool:
+    """Whether a denied callable is called, or named, anywhere in this call's chain."""
+    if depth > 4:
+        return False
+    if isinstance(node, Glob):
+        return node.level == "denied"
+    if isinstance(node, Call):
+        return any(_reaches_denied(n, depth + 1) for n in [node.func, *node.args[:4]])
+    return False
+
+
 def _most_telling_call(data: bytes) -> Call | None:
+    """A call that reaches a denied callable and has a shell-like or URL argument,
+    else the last call that reaches one (the end of its chain), else the first
+    call with such an argument."""
     stream = io.BytesIO(data)
-    denied = None
+    last_denied = first_hinted = None
     for _ in range(MAX_PICKLES):
         walk = _Walk()
         finished = walk.run(stream)
         for node in walk.calls:
             if not isinstance(node, Call):
                 continue
-            if _hints(node):
-                return node
-            if denied is None and isinstance(node.func, Glob) and node.func.level == "denied":
-                denied = node
+            hinted = bool(_hints(node))
+            if _reaches_denied(node):
+                if hinted:
+                    return node
+                last_denied = node
+            elif hinted and first_hinted is None:
+                first_hinted = node
         if not finished or stream.tell() >= len(data):
             break
-    return denied
+    return last_denied or first_hinted
 
 
 def what_it_does(data: bytes) -> str | None:
-    """The one call in a pickle stream most worth showing next to a scan finding: the
-    first whose argument looks like a shell command or a URL, else the first to a
-    denied callable. None when there is neither."""
+    """The one call in a pickle stream most worth showing next to a scan finding,
+    written out with its chain (see _most_telling_call). None when nothing qualifies."""
     node = _most_telling_call(data)
     if node is None:
         return None
