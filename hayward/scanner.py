@@ -2933,7 +2933,7 @@ class ModelFileScanner:
         `torch_member`: torch.load's legacy tar reader unpickles it by name,
         whatever opcode it opens with."""
         oversized = member.size > self.MAX_ZIP_MEMBER_BYTES
-        if member.size < 2 or (oversized and not torch_member):
+        if member.size < 2:
             return []
         findings: list[Finding] = []
         try:
@@ -2947,27 +2947,16 @@ class ModelFileScanner:
                     metadata={"skipped_reason": "unreadable", "tar_member": label},
                 ))
             return findings
-        if oversized:
-            # A pickle is read from its start, so the capped prefix is still
-            # analysed; the rest of the member is not.
-            findings.append(Finding(
-                rule_id="MFV-SKIP-002",
-                message=f"[{label}] Tar member that torch.load unpickles is larger "
-                        f"than the {self.MAX_ZIP_MEMBER_BYTES // 1_000_000}MB member "
-                        f"limit; only its start was analysed. NOT a clean verdict "
-                        f"for the rest of it.",
-                severity=Severity.LOW,
-                category=Category.AI_ML,
-                file_path=str(file_path),
-                confidence=0.50,
-                metadata={"skipped_reason": "oversized_member", "tar_member": label,
-                          "member_size": member.size},
-            ))
         if len(blob) < 2:
             return findings
 
         if blob[:4] == self._ZIP_LOCAL_MAGIC:
-            findings.extend(self._scan_zip_bytes(blob, label, file_path))
+            if oversized:
+                # A zip's index is at its end, so a capped start reads nothing.
+                findings.append(self._oversized_member_finding(
+                    file_path, label, member.size, "tar_member", read_start=False))
+            else:
+                findings.extend(self._scan_zip_bytes(blob, label, file_path))
             return findings
         # A member torch.load does not read by name is only a pickle to a loader
         # that unpickles it on purpose, and then only if it could run something.
@@ -2979,11 +2968,35 @@ class ModelFileScanner:
             if exec_hits:
                 findings.append(self._executable_finding(file_path, exec_hits, member=label))
             return findings
+        if oversized:
+            # A pickle is read from its start, so the capped prefix is still
+            # analysed; the rest of the member is not.
+            findings.append(self._oversized_member_finding(
+                file_path, label, member.size, "tar_member", read_start=True))
         for f in self._scan_pickle(file_path, blob, loader_unpickles=torch_member):
             f.message = f"[{label}] {f.message}"
             f.metadata = {**(f.metadata or {}), "tar_member": label}
             findings.append(f)
         return findings
+
+    def _oversized_member_finding(
+        self, file_path: Path, label: str, size: int | None, key: str, read_start: bool,
+    ) -> Finding:
+        """MFV-SKIP-002 for a container member past MAX_ZIP_MEMBER_BYTES. Never
+        skip one silently: a little compressed padding would hide a payload."""
+        rest = "only its start was analysed" if read_start else "it was not analysed"
+        return Finding(
+            rule_id="MFV-SKIP-002",
+            message=f"[{label}] Member is larger than the "
+                    f"{self.MAX_ZIP_MEMBER_BYTES // 1_000_000}MB member limit; {rest}. "
+                    f"NOT a clean verdict for the rest of it.",
+            severity=Severity.LOW,
+            category=Category.AI_ML,
+            file_path=str(file_path),
+            confidence=0.50,
+            metadata={"skipped_reason": "oversized_member", key: label,
+                      **({"member_size": size} if size is not None else {})},
+        )
 
     # tarfile.extractfile recurses through a link to a link; a cycle makes it
     # raise, so a chain longer than this is not one a loader completes.
@@ -3058,7 +3071,9 @@ class ModelFileScanner:
             # bytes, which would confuse the nested archive's parse.
             blob = _zip_blob_upto_archive_end(blob)
         if blob is None:
-            return []
+            # A zip's index is at its end, so a capped start reads nothing.
+            return [self._oversized_member_finding(
+                file_path, info.filename, None, "zip_member", read_start=False)]
 
         return self._scan_zip_bytes(blob, info.filename, file_path)
 
@@ -3096,9 +3111,18 @@ class ModelFileScanner:
                         # Same lied-metadata shape one level up: the strict
                         # reader refuses, the bytes are plainly there.
                         data = self._read_zip_member_raw(blob, inner)
-                    if data is None:
-                        continue
                     label = f"{prefix}/{inner.filename}"
+                    if data is None:
+                        # Past the cap, or unreadable: a pickle is read from its
+                        # start, so scan that much when it can be read.
+                        try:
+                            with inner_zf.open(inner) as handle:
+                                data = handle.read(self.MAX_ZIP_MEMBER_BYTES)
+                        except (OSError, zipfile.BadZipFile, RuntimeError,
+                                NotImplementedError, ValueError, EOFError):
+                            data = b""
+                        findings.append(self._oversized_member_finding(
+                            file_path, label, None, "zip_member", read_start=bool(data)))
                     for f in self._scan_pickle(file_path, data):
                         f.message = f"[{label}] {f.message}"
                         f.metadata = {**(f.metadata or {}), "zip_member": label}
@@ -4206,6 +4230,12 @@ class ModelFileScanner:
         header_len = int.from_bytes(data[8:8 + size_len], "little")
         return 8 + size_len + header_len <= len(data)
 
+    def _npy_holds_objects(self, data: bytes) -> bool:
+        """Whether `data` opens with a .npy header for an object array, which
+        numpy.load(allow_pickle=True) unpickles."""
+        parsed = self._parse_npy_header(data)
+        return parsed is not None and _npy_descr_has_object(parsed[0].get("descr", ""))
+
     def _parse_npy_header(self, data: bytes) -> tuple[dict[str, Any], int] | None:
         """Parse a .npy file's header dict and return (header, data_offset).
 
@@ -4377,6 +4407,18 @@ class ModelFileScanner:
                         except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, EOFError):
                             continue
                         if member_data is None:
+                            # Past the cap. numpy unpickles an object array from just past
+                            # its header, so scan the start; a numeric array says nothing.
+                            try:
+                                with zf.open(name) as handle:
+                                    member_data = handle.read(self.MAX_ZIP_MEMBER_BYTES)
+                            except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, EOFError):
+                                continue
+                            member_findings = self._scan_npy_bytes(file_path, member_data, member=name)
+                            if self._npy_holds_objects(member_data):
+                                member_findings.append(self._oversized_member_finding(
+                                    file_path, name, None, "zip_member", read_start=True))
+                            findings.extend(member_findings)
                             continue
                         findings.extend(self._scan_npy_bytes(file_path, member_data, member=name))
             except (zipfile.BadZipFile, OSError) as exc:

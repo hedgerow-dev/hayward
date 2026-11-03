@@ -8,6 +8,14 @@ within a major version.
 
 ### Fixed
 
+- A container member past the 200 MB member limit is no longer skipped
+  silently. A `.mar` holding a large checkpoint, a `.nemo` or other tar holding
+  one, and an `.npz` holding a padded object array each scanned clean with a
+  payload inside; a few hundred bytes of compressed padding was enough. Such a
+  member is now reported as `MFV-SKIP-002` (not verified), and its start is
+  still scanned when a loader reads it from the start (a pickle, an object
+  `.npy`). A large real `.nemo` or `.mar` is therefore `not_verified` instead
+  of `clean`; its weights pickle was never read before either.
 - A text file inside a tar is no longer scanned as a pickle just because its
   first byte is a protocol-0 opcode. Minified JavaScript opening `(function`
   raised `MFV-PICKLE-002` (HIGH) on its `exec(` text. A member torch.load does
