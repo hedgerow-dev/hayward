@@ -20,6 +20,7 @@ and nothing derived from the file is ever evaluated.
 from __future__ import annotations
 
 import io
+import re
 import tarfile
 import zipfile
 from collections import Counter
@@ -45,6 +46,7 @@ MAX_DEPTH = 6                  # nesting shown
 MAX_LINE = 400                 # characters of one printed line
 
 _MARK = object()
+_DOTTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 def _safe(text: str) -> str:
@@ -294,6 +296,11 @@ def _text(value) -> str:
         except UnicodeDecodeError:
             printable = False
         return repr(bytes(value)) if printable else f"<{len(value)} bytes>"
+    if isinstance(value, int) and not isinstance(value, bool):
+        try:
+            return repr(value)
+        except ValueError:  # past Python's int-to-text digit limit
+            return f"<integer of {value.bit_length()} bits>"
     return repr(value)
 
 
@@ -303,7 +310,9 @@ def _expr(node, depth: int = 0) -> str:
     if isinstance(node, Const):
         return _text(node.value)
     if isinstance(node, Glob):
-        return _safe(node.ref)
+        # STACK_GLOBAL takes any string as a name: one that is not plain dotted
+        # identifiers is quoted, so it cannot pass for code or a comment.
+        return node.ref if _DOTTED.fullmatch(node.ref) else repr(node.ref)
     if isinstance(node, (Call, Build)):
         if node.var is not None:
             return f"_{node.var}"
@@ -363,6 +372,16 @@ def _strings(node, depth: int = 0) -> list[str]:
     return []
 
 
+def _hints(node: Call) -> list[str]:
+    hints = []
+    for text in (t for a in node.args for t in _strings(a)):
+        if _PICKLE_ARG_URL_RE.search(text):
+            hints.append("argument is a URL")
+        elif _PICKLE_ARG_SHELL_RE.search(text) or (text.startswith("/") and " " in text.strip()):
+            hints.append("argument looks like a shell command")
+    return list(dict.fromkeys(hints))
+
+
 def _why(node) -> str:
     if isinstance(node, Build):
         return "sets the state of the object on an earlier line (runs its __setstate__)"
@@ -376,13 +395,7 @@ def _why(node) -> str:
         reason = "calls the result of an earlier line"
     else:
         reason = "calls a value built inside the file"
-    hints = []
-    for text in (t for a in node.args for t in _strings(a)):
-        if _PICKLE_ARG_URL_RE.search(text):
-            hints.append("argument is a URL")
-        elif _PICKLE_ARG_SHELL_RE.search(text) or (text.startswith("/") and " " in text.strip()):
-            hints.append("argument looks like a shell command")
-    return "; ".join([reason, *dict.fromkeys(hints)])
+    return "; ".join([reason, *_hints(node)])
 
 
 def _render(walk: _Walk, label: str, show_all: bool) -> list[str]:
@@ -477,6 +490,70 @@ def explain_bytes(data: bytes, show_all: bool = False) -> str:
             if index == MAX_PICKLES - 1 and stream.tell() < len(blob):
                 lines.append(f"# stopped: more than {MAX_PICKLES} pickles in one stream")
     return "\n".join(lines)
+
+
+def _inline(node, depth: int = 0) -> str:
+    """One call written out in full, earlier calls nested inside it rather than named
+    by line. Shallower and narrower than _expr, so a hostile tree stays small."""
+    if depth > 4:
+        return "..."
+    if isinstance(node, Call):
+        args = [_inline(a, depth + 1) for a in node.args[:4]]
+        if len(node.args) > 4:
+            args.append("...")
+        return f"{_inline(node.func, depth + 1)}({', '.join(args)})"
+    if isinstance(node, Build):
+        return f"BUILD({_inline(node.obj, depth + 1)}, ...)"
+    if isinstance(node, Seq):
+        return _container(node.kind, [_inline(i, depth + 1) for i in node.items[:4]], len(node.items))
+    if isinstance(node, Dct):
+        return "{...}" if node.pairs else "{}"
+    return _expr(node)  # Const, Glob, Odd
+
+
+def _reaches_denied(node, depth: int = 0) -> bool:
+    """Whether a denied callable is called, or named, anywhere in this call's chain."""
+    if depth > 4:
+        return False
+    if isinstance(node, Glob):
+        return node.level == "denied"
+    if isinstance(node, Call):
+        return any(_reaches_denied(n, depth + 1) for n in [node.func, *node.args[:4]])
+    return False
+
+
+def _most_telling_call(data: bytes) -> Call | None:
+    """A call that reaches a denied callable and has a shell-like or URL argument,
+    else the last call that reaches one (the end of its chain), else the first
+    call with such an argument."""
+    stream = io.BytesIO(data)
+    last_denied = first_hinted = None
+    for _ in range(MAX_PICKLES):
+        walk = _Walk()
+        finished = walk.run(stream)
+        for node in walk.calls:
+            if not isinstance(node, Call):
+                continue
+            hinted = bool(_hints(node))
+            if _reaches_denied(node):
+                if hinted:
+                    return node
+                last_denied = node
+            elif hinted and first_hinted is None:
+                first_hinted = node
+        if not finished or stream.tell() >= len(data):
+            break
+    return last_denied or first_hinted
+
+
+def what_it_does(data: bytes) -> str | None:
+    """The one call in a pickle stream most worth showing next to a scan finding,
+    written out with its chain (see _most_telling_call). None when nothing qualifies."""
+    node = _most_telling_call(data)
+    if node is None:
+        return None
+    line = _inline(node)
+    return line if len(line) <= 200 else line[:200] + "..."
 
 
 def explain_file(path: Path, show_all: bool = False) -> str:

@@ -6,6 +6,14 @@ within a major version.
 
 ## Unreleased
 
+### Added
+
+- Pickle findings that already call a file dangerous (`MFV-PICKLE-001`, `-005`
+  and `-006` at MEDIUM or above) carry one line from `hayward explain` in
+  `metadata["what_it_does"]`, also added to the message: the call a chain
+  reaches, such as the command behind `__import__('subprocess')`. It uses the
+  same allow and deny lists as `explain`, and benign files never pay for it.
+
 ### Fixed
 
 - A container member past the 200 MB member limit is no longer skipped
@@ -26,6 +34,10 @@ within a major version.
   2 GB in total, nested archives included (`MFV-SKIP-002`,
   `file_read_budget`); 40 small members that each inflated to just under the
   member cap took over a minute.
+- A pickle call with an integer argument past Python's 4,300-digit text limit
+  made the scan fail on Python 3.10 to 3.12, whose `reprlib` does not catch
+  that error, so an `os.system` payload was reported only as "scan failed"
+  (`MFV-SKIP-003`, LOW) instead of `MFV-PICKLE-001` (CRITICAL).
 - A text file inside a tar is no longer scanned as a pickle just because its
   first byte is a protocol-0 opcode. Minified JavaScript opening `(function`
   raised `MFV-PICKLE-002` (HIGH) on its `exec(` text. A member torch.load does

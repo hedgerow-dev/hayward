@@ -869,7 +869,15 @@ def _is_pickle_literal(value: Any, _seen: set[int] | None = None) -> bool:
 #
 # Only presentation is capped. Detection still reads the real values, so a
 # truncated render never changes a verdict.
-_PICKLE_ARG_REPR = reprlib.Repr()
+class _ArgRepr(reprlib.Repr):
+    def repr_int(self, x, level):
+        try:
+            return super().repr_int(x, level)
+        except ValueError:  # past the int-to-text digit limit; reprlib catches this only in newer Pythons
+            return f"<integer of {x.bit_length()} bits>"
+
+
+_PICKLE_ARG_REPR = _ArgRepr()
 _PICKLE_ARG_REPR.maxlevel = 6
 _PICKLE_ARG_REPR.maxtuple = 8
 _PICKLE_ARG_REPR.maxlist = 8
