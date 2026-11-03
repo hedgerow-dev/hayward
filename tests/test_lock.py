@@ -216,3 +216,36 @@ def test_remote_code_in_any_auto_class_config_is_read(monkeypatch, tmp_path, cap
     code, data, _ = make_lock(["org/name"], tmp_path, capsys)
     assert code == 1 and "third/repo--proc.P" in {u["ref"] for u in data["unresolved"]}
     assert data["requires_trust_remote_code"] is True
+
+
+@pytest.mark.parametrize("tok_map,local", [
+    (["other/repo--tok.T", None], False),
+    (["tok.T", None], True),
+])
+def test_a_list_shaped_tokenizer_auto_map_is_read(monkeypatch, tmp_path, capsys, tok_map, local):
+    # The older tokenizer_config.json format: AutoTokenizer reads a list, not a dict.
+    files = {**BASIC, "tokenizer_config.json": json.dumps({"auto_map": tok_map}).encode(), "tok.py": b"T = 1"}
+    if local:
+        files["config.json"] = json.dumps({"auto_map": {"AutoModel": "other/repo--modeling_x.X"}}).encode()
+    FakeRepo(monkeypatch, files, others=OTHER)
+    code, data, _ = make_lock(["org/name"], tmp_path, capsys)
+    if local:  # this repo's code and another's: one code_revision cannot pin both
+        assert code == 1 and data["status"] == "needs_review"
+    else:
+        assert code == 0 and data["load_with"]["code_revision"] == OTHER_SHA
+
+
+@pytest.mark.parametrize("auto_map", ["tok.T", 7, {"AutoModel": {"nested": "x--y.Z"}}])
+def test_an_auto_map_shape_the_lock_does_not_know_needs_review(monkeypatch, tmp_path, capsys, auto_map):
+    FakeRepo(monkeypatch, {**BASIC, "config.json": json.dumps({"auto_map": auto_map}).encode()})
+    code, data, _ = make_lock(["org/name"], tmp_path, capsys)
+    assert code == 1 and data["unresolved"][0]["kind"] == "unreadable"
+
+
+def test_a_hub_answer_that_is_not_an_object_needs_review(monkeypatch, tmp_path, capsys):
+    fake = FakeRepo(monkeypatch, {**BASIC, "config.json": json.dumps(
+        {"auto_map": {"AutoModel": "other/repo--modeling_x.X"}}).encode()}, others=OTHER)
+    real = fake.api_get
+    monkeypatch.setattr(hub, "_api_get", lambda url: [] if "other/repo" in url else real(url))
+    code, data, _ = make_lock(["org/name"], tmp_path, capsys)
+    assert code == 1 and data["unresolved"][0]["kind"] == "remote_code_repo"

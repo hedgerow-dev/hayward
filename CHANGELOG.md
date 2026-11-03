@@ -20,6 +20,10 @@ within a major version.
   reach `complete`. Code from several repos stays unresolved, as does an
   adapter's base model, now with the reason: transformers loads the base at the
   revision passed for the adapter.
+- `hayward lock` reads the older list-shaped `auto_map` in
+  `tokenizer_config.json`, which it used to skip, so a lock could say `complete`
+  while AutoTokenizer loaded unpinned code. An `auto_map` of any other shape
+  now marks the lock `needs_review`.
 
 ### Fixed
 

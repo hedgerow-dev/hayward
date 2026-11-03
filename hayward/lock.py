@@ -69,12 +69,22 @@ def _read_json(repo: str, sha: str, name: str, tmp: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _auto_map_refs(auto_map) -> list[str]:
+def _auto_map_refs(auto_map) -> list[str] | None:
     """Every class an ``auto_map`` names: ``module.Class`` in this repo, or
-    ``other/repo--module.Class`` in another."""
-    values = auto_map.values() if isinstance(auto_map, dict) else []
-    return [item for value in values for item in (value if isinstance(value, list) else [value])
-            if isinstance(item, str)]
+    ``other/repo--module.Class`` in another. A dict of names or ``[slow, fast]``
+    pairs, or (older tokenizer configs) one such pair as a list. None for any
+    other shape, since what it loads is then unknown."""
+    values = list(auto_map.values()) if isinstance(auto_map, dict) else [auto_map]
+    if not isinstance(auto_map, (dict, list)):
+        return None
+    refs = []
+    for value in values:
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, str):
+                refs.append(item)
+            elif item is not None:
+                return None
+    return refs
 
 
 def _pin_remote_code(refs: list[str], local_code: bool) -> tuple[dict | None, str]:
@@ -94,6 +104,8 @@ def _pin_remote_code(refs: list[str], local_code: bool) -> tuple[dict | None, st
     try:
         info = hub._api_get(f"{hub.HUB}/api/models/{urllib.parse.quote(other, safe='/')}?blobs=true")
     except (hub.HubError, OSError, ValueError, urllib.error.URLError):
+        info = {}
+    if not isinstance(info, dict):
         info = {}
     sha = str(info.get("sha", ""))
     if not hub.COMMIT_RE.fullmatch(sha):
@@ -154,7 +166,12 @@ def create(repo: str, revision: str) -> dict:
                 continue
             if config.get("auto_map"):
                 requires_remote_code = True
-                for ref in _auto_map_refs(config["auto_map"]):
+                refs = _auto_map_refs(config["auto_map"])
+                if refs is None:
+                    unresolved.append({"kind": "unreadable", "ref": name,
+                                       "why": "an auto_map of a shape the lock does not know, so what it loads is unknown"})
+                    continue
+                for ref in refs:
                     if "--" in ref and ref.split("--", 1)[0] != repo:
                         remote_refs.append(ref)
                     else:
