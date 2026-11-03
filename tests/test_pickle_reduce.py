@@ -162,13 +162,18 @@ class TestPickleReduceArgumentResolution:
         assert critical, f"expected MFV-PICKLE-001, got: {[(f.rule_id, f.severity) for f in findings]}"
         assert critical[0].severity == Severity.CRITICAL
 
-        message = critical[0].message
+        # The explain line after "What it does:" writes the expression out; the
+        # resolver's own part of the message must not.
+        message, _, explained = critical[0].message.partition(" What it does: ")
         # os.system pickles under its __module__, which is "posix" or "nt"
         # depending on the platform that wrote the fixture.
         assert any(s in message for s in ("os.system", "posix.system", "nt.system"))
         # Must not have synthesized a call expression for the dynamic arg.
         assert "system(" not in message
         assert "not-a-literal-once-reduced" not in message
+        # The explain line shows the call that makes the argument, never its value.
+        assert "'upper')('not-a-literal-once-reduced')" in explained
+        assert "NOT-A-LITERAL" not in explained
 
     def test_newobj_construction_with_literal_argument_is_resolved(self, tmp_path):
         """NEWOBJ (protocol 2+'s cls.__new__(cls, *args) construction

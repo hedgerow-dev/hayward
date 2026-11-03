@@ -200,6 +200,7 @@ from hayward._tensors import _onnx_external_data_maps as _onnx_external_data_map
 from hayward._tensors import _read_varint as _read_varint
 from hayward._tensors import _string_string_entry as _string_string_entry
 from hayward._tensors import _unsafe_name_reason as _unsafe_name_reason
+from hayward.explain import what_it_does
 from hayward.findings import Category, Finding, Severity
 from hayward.signatures import find_signature_artifacts, signature_findings
 from hayward.torch_source import classify_sources, package_source_findings, source_presence
@@ -1980,6 +1981,21 @@ class ModelFileScanner:
                     "file_size": len(data),
                 },
             ))
+
+        # One line from `hayward explain`, so a finding on a call chain also shows where
+        # the chain ends up. Only for findings that already say "dangerous": a benign
+        # model never pays for the second walk.
+        called_out = [
+            f for f in findings
+            if f.rule_id in ("MFV-PICKLE-001", "MFV-PICKLE-005", "MFV-PICKLE-006")
+            and _SEVERITY_ORDER[f.severity] <= _SEVERITY_ORDER[Severity.MEDIUM]
+        ]
+        line = what_it_does(data) if called_out else None
+        if line:
+            for finding in called_out:
+                finding.metadata["what_it_does"] = line
+                if line not in finding.message:
+                    finding.message += f" What it does: {line}"
 
         return findings
 

@@ -267,6 +267,17 @@ one line instead of listed; `--all` lists them. Long strings, big containers and
 deep nesting are shortened, and a hostile or truncated stream stops with a note
 saying where. It is for reading a file you already have; it is not a verdict.
 
+`scan` borrows one of these lines for its pickle findings. A `MFV-PICKLE-001`,
+`-005` or `-006` finding at MEDIUM or above carries the call most worth seeing
+(the first whose argument looks like a shell command or a URL, else the first
+to a denied callable) in `metadata["what_it_does"]`, written out with any call
+chain behind it, and adds it to the message when the message does not already
+say it:
+
+```text
+... builtins.__import__('subprocess'). ... What it does: builtins.getattr(builtins.__import__('subprocess'), 'getoutput')('echo $(id)')
+```
+
 ## Reports
 
 `html` produces one self-contained page: no external stylesheet, font or

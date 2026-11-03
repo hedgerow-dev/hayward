@@ -6,6 +6,14 @@ within a major version.
 
 ## Unreleased
 
+### Added
+
+- Pickle findings that already call a file dangerous (`MFV-PICKLE-001`, `-005`
+  and `-006` at MEDIUM or above) carry one line from `hayward explain` in
+  `metadata["what_it_does"]`, also added to the message: the call a chain
+  reaches, such as the command behind `__import__('subprocess')`. It uses the
+  same allow and deny lists as `explain`, and benign files never pay for it.
+
 ### Fixed
 
 - A container member past the 200 MB member limit is no longer skipped

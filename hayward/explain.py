@@ -363,6 +363,16 @@ def _strings(node, depth: int = 0) -> list[str]:
     return []
 
 
+def _hints(node: Call) -> list[str]:
+    hints = []
+    for text in (t for a in node.args for t in _strings(a)):
+        if _PICKLE_ARG_URL_RE.search(text):
+            hints.append("argument is a URL")
+        elif _PICKLE_ARG_SHELL_RE.search(text) or (text.startswith("/") and " " in text.strip()):
+            hints.append("argument looks like a shell command")
+    return list(dict.fromkeys(hints))
+
+
 def _why(node) -> str:
     if isinstance(node, Build):
         return "sets the state of the object on an earlier line (runs its __setstate__)"
@@ -376,13 +386,7 @@ def _why(node) -> str:
         reason = "calls the result of an earlier line"
     else:
         reason = "calls a value built inside the file"
-    hints = []
-    for text in (t for a in node.args for t in _strings(a)):
-        if _PICKLE_ARG_URL_RE.search(text):
-            hints.append("argument is a URL")
-        elif _PICKLE_ARG_SHELL_RE.search(text) or (text.startswith("/") and " " in text.strip()):
-            hints.append("argument looks like a shell command")
-    return "; ".join([reason, *dict.fromkeys(hints)])
+    return "; ".join([reason, *_hints(node)])
 
 
 def _render(walk: _Walk, label: str, show_all: bool) -> list[str]:
@@ -477,6 +481,54 @@ def explain_bytes(data: bytes, show_all: bool = False) -> str:
             if index == MAX_PICKLES - 1 and stream.tell() < len(blob):
                 lines.append(f"# stopped: more than {MAX_PICKLES} pickles in one stream")
     return "\n".join(lines)
+
+
+def _inline(node, depth: int = 0) -> str:
+    """One call written out in full, earlier calls nested inside it rather than named
+    by line. Shallower and narrower than _expr, so a hostile tree stays small."""
+    if depth > 4:
+        return "..."
+    if isinstance(node, Call):
+        args = [_inline(a, depth + 1) for a in node.args[:4]]
+        if len(node.args) > 4:
+            args.append("...")
+        return f"{_inline(node.func, depth + 1)}({', '.join(args)})"
+    if isinstance(node, Build):
+        return f"BUILD({_inline(node.obj, depth + 1)}, ...)"
+    if isinstance(node, Seq):
+        return _container(node.kind, [_inline(i, depth + 1) for i in node.items[:4]], len(node.items))
+    if isinstance(node, Dct):
+        return "{...}" if node.pairs else "{}"
+    return _expr(node)  # Const, Glob, Odd
+
+
+def _most_telling_call(data: bytes) -> Call | None:
+    stream = io.BytesIO(data)
+    denied = None
+    for _ in range(MAX_PICKLES):
+        walk = _Walk()
+        finished = walk.run(stream)
+        for node in walk.calls:
+            if not isinstance(node, Call):
+                continue
+            if _hints(node):
+                return node
+            if denied is None and isinstance(node.func, Glob) and node.func.level == "denied":
+                denied = node
+        if not finished or stream.tell() >= len(data):
+            break
+    return denied
+
+
+def what_it_does(data: bytes) -> str | None:
+    """The one call in a pickle stream most worth showing next to a scan finding: the
+    first whose argument looks like a shell command or a URL, else the first to a
+    denied callable. None when there is neither."""
+    node = _most_telling_call(data)
+    if node is None:
+        return None
+    line = _inline(node)
+    return line if len(line) <= 200 else line[:200] + "..."
 
 
 def explain_file(path: Path, show_all: bool = False) -> str:
