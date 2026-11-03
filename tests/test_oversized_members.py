@@ -209,3 +209,46 @@ def test_a_benign_oversized_checkpoint_in_an_uncompressed_outer_is_clean(tmp_pat
     else:
         _stored_mar(path, blob)
     assert _scanner().scan_file(path) == []
+
+
+def _inner_with_flagged_member(name: str, data: bytes, symlink: bool = False) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("archive/data.pkl", pickle.dumps({"w": 1}, protocol=2))
+        info = zipfile.ZipInfo(name)
+        if symlink:
+            info.external_attr = 0o120777 << 16
+        zf.writestr(info, data)
+        zf.writestr("archive/data/0", PAD)
+    return _set_encrypted_flag(buf.getvalue(), name.encode())
+
+
+@pytest.mark.parametrize("pack", ["nemo", "mar"])
+def test_a_lied_flag_bit_inside_a_streamed_checkpoint_is_still_read(tmp_path, pack):
+    # The bytes path reads such a member raw; the in-place path must too.
+    blob = _inner_with_flagged_member("archive/extra.txt", EVIL)
+    path = tmp_path / f"model.{pack}"
+    _plain_tar(path, "model_weights.ckpt", blob) if pack == "nemo" else _stored_mar(path, blob)
+    # The raw read runs past the member into the rest of the archive, so it is
+    # called oversized, as the bytes path calls it in a large archive: never clean.
+    rules = _rules(_scanner().scan_file(path))
+    assert ("MFV-PICKLE-001", "critical") in rules or ("MFV-SKIP-002", "low") in rules
+
+
+@pytest.mark.parametrize("pack", ["nemo", "mar"])
+def test_a_flagged_symlink_inside_a_streamed_checkpoint_is_still_read(tmp_path, pack):
+    blob = _inner_with_flagged_member("archive/link", b"../../../../etc/cron.d/x", symlink=True)
+    path = tmp_path / f"model.{pack}"
+    _plain_tar(path, "model_weights.ckpt", blob) if pack == "nemo" else _stored_mar(path, blob)
+    assert any(rule == "MFV-ARCHIVE-002" for rule, _ in _rules(_scanner().scan_file(path)))
+
+
+def test_a_lied_declared_size_does_not_route_a_small_checkpoint_around_its_scan(tmp_path):
+    import struct
+    path = tmp_path / "model.mar"
+    _stored_mar(path, _torch_zip(EVIL, weights=b"w"))
+    raw = bytearray(path.read_bytes())
+    cd = raw.find(b"PK\x01\x02")  # model.pt is the first central-directory entry
+    struct.pack_into("<I", raw, cd + 24, CAP * 25)  # declared uncompressed size
+    path.write_bytes(bytes(raw))
+    assert ("MFV-PICKLE-001", "critical") in _rules(_scanner().scan_file(path))

@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from defusedxml.common import EntitiesForbidden
 
@@ -656,6 +656,45 @@ def _scan_paths_parallel(
 
 class _HeaderTooLarge(tarfile.SubsequentHeaderError):
     """tarfile turns this into a ReadError, which the tar walk reports as a coverage gap."""
+
+
+class _FileWindow(io.RawIOBase):
+    """Bytes [start, start + length) of a file on disk, as a seekable file of
+    their own. Lets zipfile read an archive stored, uncompressed, inside another
+    one where it sits: every seek is a file seek, on every Python version
+    (zipfile's own member objects re-read from the start to seek backwards
+    before 3.12). Reads past the window end return nothing."""
+
+    def __init__(self, path: Path | str, start: int, length: int):
+        super().__init__()
+        self._file = open(path, "rb")  # noqa: SIM115 - closed by close()
+        self._start, self._length, self._pos = start, length, 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: self._length}[whence]
+        self._pos = max(0, base + offset)
+        return self._pos
+
+    def readinto(self, buffer) -> int:
+        n = max(0, min(len(buffer), self._length - self._pos))
+        self._file.seek(self._start + self._pos)
+        data = self._file.read(n)
+        buffer[:len(data)] = data
+        self._pos += len(data)
+        return len(data)
+
+    def close(self) -> None:
+        self._file.close()
+        super().close()
 
 
 class _BoundedTarInfo(tarfile.TarInfo):
@@ -2644,7 +2683,7 @@ class ModelFileScanner:
 
     def _zip_member_may_be_pickle(
         self, zf: zipfile.ZipFile, info: zipfile.ZipInfo,
-        source: Path | bytes | None,
+        source: Path | bytes | _FileWindow | None,
     ) -> bool:
         """Whether a zip member is worth running the pickle analysis over.
 
@@ -2687,15 +2726,16 @@ class ModelFileScanner:
         return head.startswith(self._PICKLE_OPENERS)
 
     def _read_zip_member_raw(
-        self, source: Path | bytes, info: zipfile.ZipInfo, head_only: bool = False,
-        report_oversized: bool = False,
+        self, source: Path | bytes | _FileWindow, info: zipfile.ZipInfo, head_only: bool = False,
+        report_oversized: bool = False, head_bytes: int | None = None,
     ) -> bytes | None | object:
         """Read a member's bytes straight out of the archive, bypassing
         `zipfile`'s flag-bit checks.
 
         `source` is the archive's path on disk, or the archive's bytes
-        themselves for a nested archive held in memory (whose local-header
-        offsets are relative to it, not to any file on disk).
+        themselves for a nested archive held in memory, or a window onto a
+        nested archive read in place (local-header offsets are relative to the
+        archive, not to any file on disk). A window is read, not closed.
 
         Used only when the strict reader refuses. Parses the *local* file
         header (whose name/extra lengths can differ from the central
@@ -2709,12 +2749,18 @@ class ModelFileScanner:
         returns the `_ZIP_MEMBER_OVERSIZED` sentinel instead of None, so the
         caller can raise MFV-PICKLE-003 for it exactly as the strict path does,
         rather than skipping a zip bomb in silence. None still means unreadable.
-        Never raises: this runs on attacker-controlled bytes.
+        `head_bytes` asks for only the member's first that many bytes, for a
+        caller that never needs more (a symlink target); the size cap does not
+        apply to it. Never raises: this runs on attacker-controlled bytes.
         """
         try:
-            handle = (io.BytesIO(source) if isinstance(source, bytes)
-                      else open(source, "rb"))
-            with handle:
+            if isinstance(source, _FileWindow):
+                handle = contextlib.nullcontext(source)
+            elif isinstance(source, bytes):
+                handle = io.BytesIO(source)
+            else:
+                handle = open(source, "rb")  # noqa: SIM115 - closed by the with below
+            with handle as handle:
                 handle.seek(info.header_offset)
                 local = handle.read(30)
                 if len(local) < 30 or local[:4] != b"PK\x03\x04":
@@ -2728,6 +2774,8 @@ class ModelFileScanner:
                 # that was always supposed to do the work. head_only reads
                 # enough compressed bytes to inflate the two-byte sniff.
                 want = 128 if head_only else self.MAX_ZIP_MEMBER_BYTES + 1
+                if head_bytes is not None:
+                    want = head_bytes if info.compress_type == zipfile.ZIP_STORED else want
                 blob = handle.read(want)
         except (OSError, ValueError):
             # ValueError: zipfile's offset arithmetic can hand back a
@@ -2737,6 +2785,8 @@ class ModelFileScanner:
         if info.compress_type == zipfile.ZIP_STORED:
             if head_only:
                 return blob[:2]
+            if head_bytes is not None:
+                return blob[:min(head_bytes, info.compress_size)]
             if len(blob) > self.MAX_ZIP_MEMBER_BYTES:
                 # We read MAX+1 stored bytes and got more than the cap, so the
                 # member is genuinely oversized (not merely unreadable).
@@ -2746,6 +2796,8 @@ class ModelFileScanner:
             decompressor = zlib.decompressobj(-15)
             if head_only:
                 return decompressor.decompress(blob, 2) or None
+            if head_bytes is not None:
+                return decompressor.decompress(blob, head_bytes)
             out = decompressor.decompress(blob, self.MAX_ZIP_MEMBER_BYTES)
         except zlib.error:
             return None
@@ -2995,12 +3047,13 @@ class ModelFileScanner:
                 blob = b""
             elif oversized:
                 blob = handle.read(4)
-                if blob == self._ZIP_LOCAL_MAGIC and isinstance(tf.fileobj, io.BufferedReader):
+                if (blob == self._ZIP_LOCAL_MAGIC and isinstance(tf.fileobj, io.BufferedReader)
+                        and tf.name and not member.issparse()):
                     # A checkpoint past the member cap in an uncompressed tar (how
-                    # NeMo writes .nemo): read the zip in place, where seeking to its
-                    # index at the end costs nothing, instead of copying it.
-                    handle.seek(0)
-                    return self._scan_zip_bytes(handle, label, file_path, spent=[0])
+                    # NeMo writes .nemo): its bytes sit contiguous in the file, so
+                    # read the zip in place instead of copying it.
+                    with _FileWindow(tf.name, member.offset_data, member.size) as window:
+                        return self._scan_zip_bytes(window, label, file_path, spent=[0])
                 blob += handle.read(self.MAX_ZIP_MEMBER_BYTES - len(blob))
             else:
                 blob = handle.read(self.MAX_ZIP_MEMBER_BYTES)
@@ -3122,13 +3175,14 @@ class ModelFileScanner:
             with zf.open(info) as handle:
                 if handle.read(4) != self._ZIP_LOCAL_MAGIC:
                     return []
-                if info.compress_type == zipfile.ZIP_STORED and info.file_size > self.MAX_ZIP_MEMBER_BYTES:
-                    # A checkpoint past the member cap, stored uncompressed (a .mar
-                    # built with --archive-format zip-store): read it in place, where
-                    # seeking costs a disk read, not a decompression. A compressed one
-                    # would inflate again on every seek, so it stays unread below.
-                    handle.seek(0)
-                    return self._scan_zip_bytes(handle, info.filename, file_path, spent)
+            window = self._stored_member_window(file_path, info)
+            if window is not None:
+                # A checkpoint past the member cap, stored uncompressed (a .mar
+                # built with --archive-format zip-store): read it in place, where
+                # seeking costs a disk read, not a decompression. A compressed one
+                # would inflate again on every seek, so it stays unread below.
+                with window:
+                    return self._scan_zip_bytes(window, info.filename, file_path, spent)
             blob = self._read_zip_member_capped(zf, info.filename, self.MAX_ZIP_MEMBER_BYTES)
         except (OSError, zipfile.BadZipFile, RuntimeError,
                 NotImplementedError, ValueError, EOFError):
@@ -3154,6 +3208,31 @@ class ModelFileScanner:
             spent[0] += len(blob)
         return self._scan_zip_bytes(blob, info.filename, file_path, spent)
 
+    def _stored_member_window(self, file_path: Path, info: zipfile.ZipInfo) -> _FileWindow | None:
+        """A window onto a STORED zip member past the member cap whose data
+        really lies inside the file, or None. The sizes are attacker-chosen, so
+        the window is only built when they agree with each other and with the
+        file on disk; anything else goes the capped-read way."""
+        if (info.compress_type != zipfile.ZIP_STORED or info.compress_size != info.file_size
+                or info.file_size <= self.MAX_ZIP_MEMBER_BYTES):
+            return None
+        try:
+            with open(file_path, "rb") as handle:
+                handle.seek(info.header_offset)
+                local = handle.read(30)
+                if len(local) < 30 or local[:4] != self._ZIP_LOCAL_MAGIC:
+                    return None
+                name_len, extra_len = struct.unpack("<HH", local[26:30])
+                start = info.header_offset + 30 + name_len + extra_len
+                if start + info.file_size > handle.seek(0, io.SEEK_END):
+                    return None
+                handle.seek(start)
+                if handle.read(4) != self._ZIP_LOCAL_MAGIC:
+                    return None
+            return _FileWindow(file_path, start, info.file_size)
+        except (OSError, ValueError):
+            return None
+
     def _read_budget_finding(self, file_path: Path, member: str) -> Finding:
         return Finding(
             rule_id="MFV-SKIP-002",
@@ -3169,22 +3248,21 @@ class ModelFileScanner:
         )
 
     def _scan_zip_bytes(
-        self, blob: bytes | BinaryIO, prefix: str, file_path: Path,
+        self, blob: bytes | _FileWindow, prefix: str, file_path: Path,
         spent: list[int] | None = None,
     ) -> list[Finding]:
         """Scan every pickle member of a nested zip archive.
 
         Shared by the nested-zip descent (a `.pt` inside a `.mar`) and the tar
         container walk (a zip-format checkpoint inside a `.nemo`). The archive
-        is bytes in memory, or, when it is past the member cap but sits in an
-        uncompressed outer layer, a seekable view of it read in place. A view
-        has no raw bytes for the lied-header fallbacks, which then report the
-        member as unreadable rather than read it.
+        is bytes in memory, or, when it is past the member cap but sits
+        uncompressed in its outer layer, a window onto it read in place. The
+        lied-header fallbacks read raw bytes from either.
         """
         findings: list[Finding] = []
-        source = blob if isinstance(blob, (bytes, bytearray)) else None
+        source = blob
         try:
-            with zipfile.ZipFile(io.BytesIO(blob) if source is not None else blob) as inner_zf:
+            with zipfile.ZipFile(io.BytesIO(blob) if isinstance(blob, bytes) else blob) as inner_zf:
                 # Raw inner names, not prefixed: joining a benign prefix onto
                 # an absolute inner name ("prefix//etc/x") would hide the leading
                 # slash from the absolute-path check.
@@ -3213,8 +3291,7 @@ class ModelFileScanner:
                             NotImplementedError, ValueError, EOFError):
                         # Same lied-metadata shape one level up: the strict
                         # reader refuses, the bytes are plainly there.
-                        data = (self._read_zip_member_raw(source, inner, report_oversized=True)
-                                if source is not None else None)
+                        data = self._read_zip_member_raw(source, inner, report_oversized=True)
                         if data is _ZIP_MEMBER_OVERSIZED:
                             data, oversized = None, True
                     label = f"{prefix}/{inner.filename}"
@@ -3317,7 +3394,8 @@ class ModelFileScanner:
     _ZIP_SYMLINK_TARGET_MAX_BYTES = 4096
 
     def _read_zip_symlink_target(
-        self, zf: zipfile.ZipFile, info: zipfile.ZipInfo, source: Path | bytes | None,
+        self, zf: zipfile.ZipFile, info: zipfile.ZipInfo,
+        source: Path | bytes | _FileWindow | None,
     ) -> str | None:
         """The head of a zip symlink member's content: its link target.
 
@@ -3335,17 +3413,17 @@ class ModelFileScanner:
                 NotImplementedError, ValueError, EOFError):
             if source is None:
                 return None
-            blob = self._read_zip_member_raw(source, info)
+            blob = self._read_zip_member_raw(source, info, head_bytes=cap)
             if not isinstance(blob, bytes):
                 return None
-            raw = blob[:cap]
+            raw = blob
         # The target is a path. Decode leniently: the traversal and absolute
         # markers are ASCII, so an undecodable tail never hides them, and a
         # decode error must not turn a link check into a scan failure.
         return raw.decode("utf-8", "surrogateescape")
 
     def _zip_symlink_targets(
-        self, zf: zipfile.ZipFile, source: Path | bytes | None,
+        self, zf: zipfile.ZipFile, source: Path | bytes | _FileWindow | None,
     ) -> list[tuple[str, str]]:
         """(member name, link target) for every zip member stored as a symlink.
 
