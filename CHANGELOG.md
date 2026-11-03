@@ -18,6 +18,14 @@ within a major version.
   of `clean`; its weights pickle was never read before either. The same holds
   behind a lied "encrypted" flag, and for an `.npz` past the 500 MB file cap,
   whose object arrays were not read at all.
+- Two caps on the work one file can cause, each reported as not verified
+  rather than read in silence. Every pickle opcode walk stops after 5 million
+  opcodes (`MFV-SKIP-003`, `pickle_walk_budget`); a 7 KB checkpoint that
+  inflated to 95 million no-op opcodes took 95 seconds to scan and now takes a
+  few. A zip checkpoint stops reading members once they have decompressed past
+  2 GB in total, nested archives included (`MFV-SKIP-002`,
+  `file_read_budget`); 40 small members that each inflated to just under the
+  member cap took over a minute.
 - A text file inside a tar is no longer scanned as a pickle just because its
   first byte is a protocol-0 opcode. Minified JavaScript opening `(function`
   raised `MFV-PICKLE-002` (HIGH) on its `exec(` text. A member torch.load does

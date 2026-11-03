@@ -232,6 +232,14 @@ _PICKLE_MEMO_MAX_ENTRIES = 1_000_000
 # terminates and the caller reports the unread remainder as a coverage gap --
 # a stream whose stack never fits is not the shape of a model file.
 _PICKLE_STACK_MAX_DEPTH = 4_000_000
+# Cap on opcodes in one walk over a stream; the main walk also shares it across
+# every pickle in the stream. Each opcode costs about a microsecond per walk,
+# a scan walks a stream several times, and a file a few KB long can decompress
+# to hundreds of millions of opcodes (`N0` repeated), which kept one scan busy
+# for minutes. A real state dict walks a few dozen opcodes per tensor, so this
+# leaves wide headroom. On overflow the main walk stops and the rest is
+# reported as unread, exactly like the stack cap.
+_PICKLE_MAX_OPS = 5_000_000
 
 
 # Severity rank mirroring Finding.severity_order in findings.py (lower is
@@ -350,6 +358,8 @@ def _fails_before_any_import(data: bytes) -> bool:
         for opcode, _, _ in _genops(data):
             if opcode.name in _IMPORTING_OPCODES:
                 return False
+    except _PickleWalkBudgetExceeded:
+        return False  # it parsed this far: scan it as a pickle
     except ValueError:
         return True
     return False
@@ -669,6 +679,11 @@ class ModelFileScanner:
     # lower MAX_ZIP_MEMBER_BYTES to exercise the bomb caps.
     MAX_SCAN_BYTES: int = 500_000_000  # 500 MB; larger files are streamed or skipped
     MAX_ZIP_MEMBER_BYTES: int = 200_000_000  # 200 MB cap on decompressed pickle members
+    # Total decompressed bytes one zip checkpoint may make the walk read, across
+    # its members and the archives nested in them. Each member stays under the
+    # member cap, but a few KB of compressed members can each inflate to just
+    # under it. Well above what the pickle sniff reads from a real checkpoint.
+    MAX_ZIP_FILE_READ_BYTES: int = 2_000_000_000
 
     # Extensions too generic to map to a format, but too commonly used by real
     # model files for a directory walk to skip. `.bin` is `pytorch_model.bin`,
@@ -1377,10 +1392,14 @@ class ModelFileScanner:
             return sniffed in _PICKLE_BEARING_FORMATS
         if data[:1] == b"\x80":
             return True
-        with contextlib.suppress(Exception):
+        try:
             for op, _arg, _pos in _genops(io.BytesIO(data)):
                 if op.name == "STOP":
                     return True
+        except _PickleWalkBudgetExceeded:
+            return True  # it parsed this far: treat it as a pickle
+        except Exception:  # noqa: BLE001
+            return False
         return False
 
     def _sniff_format(self, data: bytes) -> ModelFormat | None:
@@ -1713,8 +1732,8 @@ class ModelFileScanner:
             # would claim a complete analysis of a stream that was not one.
             findings.append(_skip_unverified_finding(
                 file_path,
-                "The pickle walk exceeded its simulated-stack budget, so the "
-                "stream past that point was never read.",
+                "The pickle walk exceeded its budget (simulated-stack depth or "
+                "opcode count), so the stream past that point was never read.",
                 {"skipped_reason": "pickle_walk_budget", "file_size": len(data)},
             ))
 
@@ -3039,6 +3058,7 @@ class ModelFileScanner:
 
     def _scan_nested_zip_member(
         self, zf: zipfile.ZipFile, info: zipfile.ZipInfo, file_path: Path,
+        spent: list[int] | None = None,
     ) -> list[Finding]:
         """Scan pickle streams one level further down, inside a zip member
         that is itself a zip.
@@ -3081,10 +3101,27 @@ class ModelFileScanner:
             # A zip's index is at its end, so a capped start reads nothing.
             return [self._oversized_member_finding(
                 file_path, info.filename, None, "zip_member", read_start=False)]
+        if spent is not None:
+            spent[0] += len(blob)
+        return self._scan_zip_bytes(blob, info.filename, file_path, spent)
 
-        return self._scan_zip_bytes(blob, info.filename, file_path)
+    def _read_budget_finding(self, file_path: Path, member: str) -> Finding:
+        return Finding(
+            rule_id="MFV-SKIP-002",
+            message=f"The archive's members decompress to more than the "
+                    f"{self.MAX_ZIP_FILE_READ_BYTES // 1_000_000}MB read budget for one file, "
+                    f"so members from {member!r} on were never analysed. NOT a clean verdict "
+                    f"for the rest of the archive.",
+            severity=Severity.LOW,
+            category=Category.AI_ML,
+            file_path=str(file_path),
+            confidence=0.50,
+            metadata={"skipped_reason": "file_read_budget", "zip_member": member},
+        )
 
-    def _scan_zip_bytes(self, blob: bytes, prefix: str, file_path: Path) -> list[Finding]:
+    def _scan_zip_bytes(
+        self, blob: bytes, prefix: str, file_path: Path, spent: list[int] | None = None,
+    ) -> list[Finding]:
         """Scan every pickle member of a zip archive held in memory.
 
         Shared by the nested-zip descent (a `.pt` inside a `.mar`) and the tar
@@ -3104,6 +3141,9 @@ class ModelFileScanner:
                     self._zip_symlink_targets(inner_zf, blob), file_path,
                 ))
                 for inner in inner_zf.infolist():
+                    if spent is not None and spent[0] > self.MAX_ZIP_FILE_READ_BYTES:
+                        findings.append(self._read_budget_finding(file_path, f"{prefix}/{inner.filename}"))
+                        break
                     # The raw-bytes fallback gets the archive's own bytes:
                     # local-header offsets are relative to this in-memory
                     # archive, not to any file on disk.
@@ -3140,6 +3180,8 @@ class ModelFileScanner:
                             data = b""
                         findings.append(self._oversized_member_finding(
                             file_path, label, None, "zip_member", read_start=bool(data)))
+                    if spent is not None:
+                        spent[0] += len(data)
                     for f in self._scan_pickle(file_path, data):
                         f.message = f"[{label}] {f.message}"
                         f.metadata = {**(f.metadata or {}), "zip_member": label}
@@ -3347,10 +3389,14 @@ class ModelFileScanner:
                     [info.orig_filename for info in zf.infolist()], file_path))
                 findings.extend(self._archive_link_target_finding(
                     self._zip_symlink_targets(zf, file_path), file_path))
+                spent = [0]  # decompressed bytes read so far, against MAX_ZIP_FILE_READ_BYTES
                 for info in zf.infolist():
                     name = info.filename
+                    if spent[0] > self.MAX_ZIP_FILE_READ_BYTES:
+                        findings.append(self._read_budget_finding(file_path, name))
+                        break
                     if not self._zip_member_may_be_pickle(zf, info, file_path):
-                        findings.extend(self._scan_nested_zip_member(zf, info, file_path))
+                        findings.extend(self._scan_nested_zip_member(zf, info, file_path, spent))
                         continue
                     try:
                         inner = self._read_zip_member_capped(zf, name, self.MAX_ZIP_MEMBER_BYTES)
@@ -3398,6 +3444,7 @@ class ModelFileScanner:
                             metadata={"zip_member": name, "skipped_reason": "oversized_decompressed"},
                         ))
                         continue
+                    spent[0] += len(inner)
                     exec_hits = _find_embedded_executables(inner)
                     if exec_hits:
                         findings.append(self._executable_finding(file_path, exec_hits, member=name))

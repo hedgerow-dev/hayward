@@ -114,9 +114,16 @@ _OPCODES = {op.code: op for op in pickletools.opcodes}
 
 
 def genops(data: bytes | io.BytesIO):
-    """pickletools.genops, reading the numeric text arguments the way the loaders do."""
+    """pickletools.genops, reading the numeric text arguments the way the loaders do.
+
+    Raises _PickleWalkBudgetExceeded past _PICKLE_MAX_OPS opcodes, so no walk over
+    an attacker-sized stream runs unbounded. Callers decide what a stop means."""
     stream = io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else data
+    ops = 0
     while True:
+        ops += 1
+        if ops > _scanner._PICKLE_MAX_OPS:
+            raise _PickleWalkBudgetExceeded
         pos = stream.tell()
         code = stream.read(1)
         op = _OPCODES.get(code.decode("latin-1"))
@@ -487,10 +494,10 @@ _MEMO_INDEX_MAX_TRACKED = 1_000_000
 
 
 class _PickleWalkBudgetExceeded(Exception):
-    """The simulated stack outgrew _PICKLE_STACK_MAX_DEPTH. Raised rather
-    than swallowed so the caller keeps what was already resolved and reports
-    the unread remainder, instead of either OOM-ing or claiming a complete
-    analysis."""
+    """The simulated stack outgrew _PICKLE_STACK_MAX_DEPTH, or the walk passed
+    _PICKLE_MAX_OPS opcodes. Raised rather than swallowed so the caller keeps
+    what was already resolved and reports the unread remainder, instead of
+    either OOM-ing or claiming a complete analysis."""
 
 
 @dataclass(frozen=True)
@@ -1126,6 +1133,7 @@ def _walk_pickles(
     resyncs = 0
     budget_exceeded = False
     array_unread = False
+    ops = [0]
     while stream.tell() < total:
         start = stream.tell()
         calls_before = len(resolved_calls)
@@ -1134,7 +1142,7 @@ def _walk_pickles(
         stopped = False
         try:
             _walk_one_pickle(stream, globals_found, resolved_calls, memo_indices,
-                             joblib_arrays=joblib_arrays)
+                             joblib_arrays=joblib_arrays, ops=ops)
         except _PickleWalkBudgetExceeded:
             # The simulated stack outgrew its bound. Keep everything resolved
             # so far (discarding it would make "payload first, stack bomb
@@ -1237,8 +1245,12 @@ def _walk_one_pickle(
     resolved_calls: list[PickleResolvedCall],
     memo_indices: set[int],
     joblib_arrays: bool = False,
+    ops: list[int] | None = None,
 ) -> None:
     """Walk exactly one pickle from `stream`, appending what it resolves.
+
+    `ops` is a one-item counter of opcodes walked, shared by every pickle in a
+    stream, so the opcode cap bounds the whole stream and not each pickle.
 
     `memo_indices` collects every memo slot number this pickle stores into,
     for the out-of-band index check. It is filled in place rather than
@@ -1333,8 +1345,11 @@ def _walk_one_pickle(
                 PickleResolvedCall(callable_val, (), None, tuple(seen), tuple(chained))
             )
 
+    if ops is None:
+        ops = [0]
     for op, arg, _pos in genops(stream):
-        if len(stack) > _scanner._PICKLE_STACK_MAX_DEPTH:
+        ops[0] += 1
+        if len(stack) > _scanner._PICKLE_STACK_MAX_DEPTH or ops[0] > _scanner._PICKLE_MAX_OPS:
             raise _PickleWalkBudgetExceeded
         name = op.name
         if (
@@ -2176,6 +2191,8 @@ def _embedded_pickle_denied_globals(data: bytes, depth: int = 0) -> list[str]:
             # it, bounded, so a payload buried two levels down is still read.
             if depth < _EMBEDDED_PICKLE_MAX_DEPTH:
                 found.extend(_embedded_pickle_denied_globals(inner, depth + 1))
+    except _PickleWalkBudgetExceeded:
+        pass  # keep what was found before the budget ran out
     except Exception:                                    # noqa: BLE001
         return []
     return sorted(set(found))
