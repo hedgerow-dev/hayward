@@ -113,10 +113,23 @@ so an extra `.py` cannot ride along.
 
 It is written for one profile: `transformers` `from_pretrained` at a pinned
 revision. It fails closed. Custom code files are listed, and anything the profile
-would load from outside the repo is recorded as unresolved and the lock is marked
-`needs_review` (exit code 1): an `auto_map` entry that loads code from another
-repo (`other/repo--module.Class`), or an adapter's base model. A lock pins what
-will be loaded; it does not say the files are safe. Scan them as well.
+would load from outside the repo is pinned too or recorded as unresolved, which
+marks the lock `needs_review` (exit code 1).
+
+- **Code from another repo** (`other/repo--module.Class` in an `auto_map`) is
+  pinned when it all comes from one other repo and this repo has no `auto_map`
+  code of its own. The lock records that repo's commit and its code files under
+  `dependencies`, and `load_with` gives the arguments that load exactly that:
+  `from_pretrained(repo, revision=..., code_revision=...)`. transformers loads
+  every such reference, and this repo's own code once `code_revision` is set, at
+  that one revision, so code from two other repos, or from another repo and this
+  one, cannot be pinned and stays unresolved.
+- **An adapter's base model** stays unresolved: transformers loads it at the
+  revision passed for the adapter, so one revision cannot pin both.
+
+`--verify` checks this repo's snapshot. The other repo's code is held to its
+commit by `code_revision` at load time. A lock pins what will be loaded; it does
+not say the files are safe. Scan them as well.
 
 ## Scan receipts
 

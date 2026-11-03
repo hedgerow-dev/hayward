@@ -13,6 +13,13 @@ within a major version.
   `metadata["what_it_does"]`, also added to the message: the call a chain
   reaches, such as the command behind `__import__('subprocess')`. It uses the
   same allow and deny lists as `explain`, and benign files never pay for it.
+- `hayward lock` pins custom code from another repo: when every
+  `other/repo--module.Class` reference names one repo and this repo has no code
+  of its own, the lock records that repo's commit and code files in
+  `dependencies` and the `code_revision` to load it with in `load_with`, and can
+  reach `complete`. Code from several repos stays unresolved, as does an
+  adapter's base model, now with the reason: transformers loads the base at the
+  revision passed for the adapter.
 
 ### Fixed
 
