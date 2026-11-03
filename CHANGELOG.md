@@ -4,7 +4,7 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
-## Unreleased
+## 1.15.0 (2026-11-03)
 
 ### Added
 
