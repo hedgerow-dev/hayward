@@ -22,7 +22,7 @@ from hayward.findings import (
 )
 from hayward.scanner import ModelFileScanner
 
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 
 __all__ = [
     "COVERAGE_RULE_IDS",
