@@ -100,7 +100,7 @@ CRITICAL.
 | `MFV-EXEC-001` | HIGH | 506 | A loadable binary (PE, ELF, Mach-O) is embedded. No serialisation format writes one |
 | `MFV-CONFUSE-001` | HIGH | - | Extension implies one format, magic bytes say another |
 | `MFV-SKIP-001` | LOW | - | File exceeds the 500MB cap and cannot be streamed (ZIP, Keras HDF5 and SafeTensors can) |
-| `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed. Includes a compressed tar that would decompress more than 500 MB, and a long-name or pax header over 1 MB. Also a member of a tar, zip or `.npz` past the 200 MB member limit: a pickle or object `.npy` has its start analysed, a nested zip none of it. Also a zip checkpoint whose members decompress past the 2 GB per-file read budget (`file_read_budget`) |
+| `MFV-SKIP-002` | LOW | - | A tar walk ended early, so members past the failure were never analysed. Includes a compressed tar that would decompress more than 500 MB, and a long-name or pax header over 1 MB. Also a member of a tar, zip or `.npz` past the 200 MB member limit: a pickle or object `.npy` has its start analysed, a nested zip none of it, unless the outer layer is uncompressed (a plain tar, a stored zip member), where it is read in place. Also a zip checkpoint whose members decompress past the 2 GB per-file read budget (`file_read_budget`) |
 | `MFV-SKIP-003` | LOW | - | Content could not be verified |
 | `MFV-7Z-001` | INFO | - | A `.7z` archive is present and no extractor is available |
 | `MFV-LFS-001` | INFO | - | The file is a Git LFS pointer: a placeholder for content stored elsewhere, so the real bytes were never fetched and nothing was scanned |

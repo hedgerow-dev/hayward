@@ -107,10 +107,11 @@ def test_an_oversized_numeric_npy_in_an_npz_says_nothing(tmp_path):
 
 
 @pytest.mark.parametrize("name", ["notes.bin", "weights.dat"])
-def test_an_oversized_zip_in_a_tar_is_not_verified(tmp_path, name):
-    path = tmp_path / "bundle.tar"
+def test_an_oversized_zip_in_a_compressed_tar_is_not_verified(tmp_path, name):
+    # Seeking inside a gzip stream means inflating it again, so it is not streamed.
+    path = tmp_path / "bundle.tar.gz"
     blob = _torch_zip(EVIL)
-    with tarfile.open(path, "w") as tf:
+    with tarfile.open(path, "w:gz") as tf:
         info = tarfile.TarInfo(name)
         info.size = len(blob)
         tf.addfile(info, io.BytesIO(blob))
@@ -167,3 +168,44 @@ def test_an_unreadable_member_is_not_called_oversized(tmp_path):
         tf.addfile(info, io.BytesIO(bytes(raw)))
     findings = _scanner().scan_file(path)
     assert not any(f.metadata.get("skipped_reason") == "oversized_member" for f in findings)
+
+
+# ---- streamed: the outer layer is uncompressed, so the nested checkpoint is read in place
+
+
+def _plain_tar(path, name: str, blob: bytes):
+    with tarfile.open(path, "w") as tf:  # NeMo writes .nemo with "w:", uncompressed
+        info = tarfile.TarInfo(name)
+        info.size = len(blob)
+        tf.addfile(info, io.BytesIO(blob))
+
+
+def _stored_mar(path, blob: bytes):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:  # torch-model-archiver zip-store
+        zf.writestr("model.pt", blob)
+        zf.writestr("MAR-INF/MANIFEST.json", "{}")
+
+
+@pytest.mark.parametrize("pack", ["nemo", "mar"])
+def test_an_oversized_checkpoint_in_an_uncompressed_outer_is_read_in_place(tmp_path, pack):
+    path = tmp_path / f"model.{pack}"
+    blob = _torch_zip(EVIL)
+    assert len(blob) > CAP
+    if pack == "nemo":
+        _plain_tar(path, "model_weights.ckpt", blob)
+    else:
+        _stored_mar(path, blob)
+    rules = _rules(_scanner().scan_file(path))
+    assert ("MFV-PICKLE-001", "critical") in rules
+    assert ("MFV-SKIP-002", "low") not in rules
+
+
+@pytest.mark.parametrize("pack", ["nemo", "mar"])
+def test_a_benign_oversized_checkpoint_in_an_uncompressed_outer_is_clean(tmp_path, pack):
+    path = tmp_path / f"model.{pack}"
+    blob = _torch_zip(pickle.dumps({"w": 1}, protocol=2))
+    if pack == "nemo":
+        _plain_tar(path, "model_weights.ckpt", blob)
+    else:
+        _stored_mar(path, blob)
+    assert _scanner().scan_file(path) == []

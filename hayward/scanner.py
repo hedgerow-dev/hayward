@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from defusedxml.common import EntitiesForbidden
 
@@ -2991,7 +2991,19 @@ class ModelFileScanner:
         findings: list[Finding] = []
         try:
             handle = tf.extractfile(member)
-            blob = handle.read(self.MAX_ZIP_MEMBER_BYTES) if handle is not None else b""
+            if handle is None:
+                blob = b""
+            elif oversized:
+                blob = handle.read(4)
+                if blob == self._ZIP_LOCAL_MAGIC and isinstance(tf.fileobj, io.BufferedReader):
+                    # A checkpoint past the member cap in an uncompressed tar (how
+                    # NeMo writes .nemo): read the zip in place, where seeking to its
+                    # index at the end costs nothing, instead of copying it.
+                    handle.seek(0)
+                    return self._scan_zip_bytes(handle, label, file_path, spent=[0])
+                blob += handle.read(self.MAX_ZIP_MEMBER_BYTES - len(blob))
+            else:
+                blob = handle.read(self.MAX_ZIP_MEMBER_BYTES)
         except (OSError, tarfile.TarError):
             if torch_member:
                 findings.append(_skip_unverified_finding(
@@ -3110,6 +3122,13 @@ class ModelFileScanner:
             with zf.open(info) as handle:
                 if handle.read(4) != self._ZIP_LOCAL_MAGIC:
                     return []
+                if info.compress_type == zipfile.ZIP_STORED and info.file_size > self.MAX_ZIP_MEMBER_BYTES:
+                    # A checkpoint past the member cap, stored uncompressed (a .mar
+                    # built with --archive-format zip-store): read it in place, where
+                    # seeking costs a disk read, not a decompression. A compressed one
+                    # would inflate again on every seek, so it stays unread below.
+                    handle.seek(0)
+                    return self._scan_zip_bytes(handle, info.filename, file_path, spent)
             blob = self._read_zip_member_capped(zf, info.filename, self.MAX_ZIP_MEMBER_BYTES)
         except (OSError, zipfile.BadZipFile, RuntimeError,
                 NotImplementedError, ValueError, EOFError):
@@ -3150,17 +3169,22 @@ class ModelFileScanner:
         )
 
     def _scan_zip_bytes(
-        self, blob: bytes, prefix: str, file_path: Path, spent: list[int] | None = None,
+        self, blob: bytes | BinaryIO, prefix: str, file_path: Path,
+        spent: list[int] | None = None,
     ) -> list[Finding]:
-        """Scan every pickle member of a zip archive held in memory.
+        """Scan every pickle member of a nested zip archive.
 
         Shared by the nested-zip descent (a `.pt` inside a `.mar`) and the tar
-        container walk (a zip-format checkpoint inside a `.nemo`); both hold
-        the inner archive as bytes rather than as a file on disk.
+        container walk (a zip-format checkpoint inside a `.nemo`). The archive
+        is bytes in memory, or, when it is past the member cap but sits in an
+        uncompressed outer layer, a seekable view of it read in place. A view
+        has no raw bytes for the lied-header fallbacks, which then report the
+        member as unreadable rather than read it.
         """
         findings: list[Finding] = []
+        source = blob if isinstance(blob, (bytes, bytearray)) else None
         try:
-            with zipfile.ZipFile(io.BytesIO(blob)) as inner_zf:
+            with zipfile.ZipFile(io.BytesIO(blob) if source is not None else blob) as inner_zf:
                 # Raw inner names, not prefixed: joining a benign prefix onto
                 # an absolute inner name ("prefix//etc/x") would hide the leading
                 # slash from the absolute-path check.
@@ -3168,7 +3192,7 @@ class ModelFileScanner:
                     [inner.orig_filename for inner in inner_zf.infolist()], file_path,
                 ))
                 findings.extend(self._archive_link_target_finding(
-                    self._zip_symlink_targets(inner_zf, blob), file_path,
+                    self._zip_symlink_targets(inner_zf, source), file_path,
                 ))
                 for inner in inner_zf.infolist():
                     if spent is not None and spent[0] > self.MAX_ZIP_FILE_READ_BYTES:
@@ -3177,7 +3201,7 @@ class ModelFileScanner:
                     # The raw-bytes fallback gets the archive's own bytes:
                     # local-header offsets are relative to this in-memory
                     # archive, not to any file on disk.
-                    if not self._zip_member_may_be_pickle(inner_zf, inner, blob):
+                    if not self._zip_member_may_be_pickle(inner_zf, inner, source):
                         continue
                     oversized = False
                     try:
@@ -3189,7 +3213,8 @@ class ModelFileScanner:
                             NotImplementedError, ValueError, EOFError):
                         # Same lied-metadata shape one level up: the strict
                         # reader refuses, the bytes are plainly there.
-                        data = self._read_zip_member_raw(blob, inner, report_oversized=True)
+                        data = (self._read_zip_member_raw(source, inner, report_oversized=True)
+                                if source is not None else None)
                         if data is _ZIP_MEMBER_OVERSIZED:
                             data, oversized = None, True
                     label = f"{prefix}/{inner.filename}"
