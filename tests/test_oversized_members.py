@@ -115,3 +115,55 @@ def test_an_oversized_zip_in_a_tar_is_not_verified(tmp_path, name):
         info.size = len(blob)
         tf.addfile(info, io.BytesIO(blob))
     assert ("MFV-SKIP-002", "low") in _rules(_scanner().scan_file(path))
+
+
+def test_an_npz_past_the_file_cap_still_reads_its_object_arrays(tmp_path):
+    arr = np.empty(1, dtype=object)
+    arr[0] = _Evil()
+    member = io.BytesIO()
+    np.save(member, arr, allow_pickle=True)
+    path = tmp_path / "data.npz"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("x.npy", member.getvalue())
+        zf.writestr("pad.npy", PAD)
+    scanner = _scanner()
+    scanner.MAX_SCAN_BYTES = 10_000
+    assert ("MFV-PICKLE-001", "critical") in _rules(scanner.scan_file(path))
+
+
+def _set_encrypted_flag(data: bytes, name: bytes) -> bytes:
+    """Set bit 0 of the general-purpose flags for `name` in both headers."""
+    out = bytearray(data)
+    for sig, flag_at, name_at in ((b"PK\x03\x04", 6, 30), (b"PK\x01\x02", 8, 46)):
+        pos = out.find(sig)
+        while pos != -1:
+            if out[pos + name_at:pos + name_at + len(name)] == name:
+                out[pos + flag_at] |= 1
+            pos = out.find(sig, pos + 4)
+    return bytes(out)
+
+
+def test_an_oversized_nested_checkpoint_behind_a_lied_flag_is_not_verified(tmp_path):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("model.pt", _torch_zip(EVIL))
+    path = tmp_path / "model.mar"
+    path.write_bytes(_set_encrypted_flag(buf.getvalue(), b"model.pt"))
+    assert ("MFV-SKIP-002", "low") in _rules(_scanner().scan_file(path))
+
+
+def test_an_unreadable_member_is_not_called_oversized(tmp_path):
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("archive/data.pkl", EVIL)
+    raw = bytearray(inner.getvalue())
+    for sig, method_at in ((b"PK\x03\x04", 8), (b"PK\x01\x02", 10)):
+        pos = raw.find(sig)
+        raw[pos + method_at] = 99  # a compression method zipfile cannot read
+    path = tmp_path / "model.nemo"
+    with tarfile.open(path, "w") as tf:
+        info = tarfile.TarInfo("model_weights.ckpt")
+        info.size = len(raw)
+        tf.addfile(info, io.BytesIO(bytes(raw)))
+    findings = _scanner().scan_file(path)
+    assert not any(f.metadata.get("skipped_reason") == "oversized_member" for f in findings)

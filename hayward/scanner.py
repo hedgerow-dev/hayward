@@ -982,6 +982,10 @@ class ModelFileScanner:
                     return findings
             if zipfile.is_zipfile(file_path):
                 findings = self._scan_pytorch_zip(file_path)
+                if magic in _NPZ_MAGICS:
+                    # numpy.load reads a zip as an .npz, and its object arrays
+                    # are pickles the torch walk does not sniff as such.
+                    findings += self._scan_numpy(file_path, magic)
                 if magic != b"PK\x03\x04":
                     # Bytes in front of the archive are a pickle to the
                     # loaders; see the in-cap case below. A pickle never needs
@@ -3063,7 +3067,10 @@ class ModelFileScanner:
             # bits or lied sizes make the strict reader refuse a plainly
             # readable member. The only caller opens `zf` on `file_path`
             # itself, so the raw local-header read is valid here.
-            blob = self._read_zip_member_raw(file_path, info)
+            blob = self._read_zip_member_raw(file_path, info, report_oversized=True)
+            if blob is _ZIP_MEMBER_OVERSIZED:
+                return [self._oversized_member_finding(
+                    file_path, info.filename, None, "zip_member", read_start=False)]
             if blob is None or blob[:4] != self._ZIP_LOCAL_MAGIC:
                 return []
             # The raw read is capped, not member-exact: a lied declared size
@@ -3102,19 +3109,29 @@ class ModelFileScanner:
                     # archive, not to any file on disk.
                     if not self._zip_member_may_be_pickle(inner_zf, inner, blob):
                         continue
+                    oversized = False
                     try:
                         data = self._read_zip_member_capped(
                             inner_zf, inner.filename, self.MAX_ZIP_MEMBER_BYTES,
                         )
+                        oversized = data is None
                     except (OSError, zipfile.BadZipFile, RuntimeError,
                             NotImplementedError, ValueError, EOFError):
                         # Same lied-metadata shape one level up: the strict
                         # reader refuses, the bytes are plainly there.
-                        data = self._read_zip_member_raw(blob, inner)
+                        data = self._read_zip_member_raw(blob, inner, report_oversized=True)
+                        if data is _ZIP_MEMBER_OVERSIZED:
+                            data, oversized = None, True
                     label = f"{prefix}/{inner.filename}"
-                    if data is None:
-                        # Past the cap, or unreadable: a pickle is read from its
-                        # start, so scan that much when it can be read.
+                    if data is None and not oversized:
+                        findings.append(_skip_unverified_finding(
+                            file_path, f"[{label}] Zip member could not be read.",
+                            metadata={"skipped_reason": "unreadable", "zip_member": label},
+                        ))
+                        continue
+                    if oversized:
+                        # A pickle is read from its start, so scan that much
+                        # when it can be read.
                         try:
                             with inner_zf.open(inner) as handle:
                                 data = handle.read(self.MAX_ZIP_MEMBER_BYTES)
@@ -4403,6 +4420,12 @@ class ModelFileScanner:
                     # with the .npy magic. _scan_npy_bytes skips the rest.
                     for name in zf.namelist():
                         try:
+                            # Only a member opening with the .npy magic can be
+                            # unpickled (_scan_npy_bytes skips the rest), so a
+                            # big archive is not read twice for nothing.
+                            with zf.open(name) as handle:
+                                if handle.read(6) != self._NPY_MAGIC:
+                                    continue
                             member_data = self._read_zip_member_capped(zf, name, self.MAX_ZIP_MEMBER_BYTES)
                         except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, EOFError):
                             continue

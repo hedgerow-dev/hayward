@@ -15,7 +15,9 @@ within a major version.
   member is now reported as `MFV-SKIP-002` (not verified), and its start is
   still scanned when a loader reads it from the start (a pickle, an object
   `.npy`). A large real `.nemo` or `.mar` is therefore `not_verified` instead
-  of `clean`; its weights pickle was never read before either.
+  of `clean`; its weights pickle was never read before either. The same holds
+  behind a lied "encrypted" flag, and for an `.npz` past the 500 MB file cap,
+  whose object arrays were not read at all.
 - A text file inside a tar is no longer scanned as a pickle just because its
   first byte is a protocol-0 opcode. Minified JavaScript opening `(function`
   raised `MFV-PICKLE-002` (HIGH) on its `exec(` text. A member torch.load does
