@@ -19,7 +19,7 @@ within a major version.
   behind a lied "encrypted" flag, and for an `.npz` past the 500 MB file cap,
   whose object arrays were not read at all.
 - Two caps on the work one file can cause, each reported as not verified
-  rather than read in silence. Every pickle opcode walk stops after 5 million
+  rather than read in silence. Every pickle opcode walk stops after 10 million
   opcodes (`MFV-SKIP-003`, `pickle_walk_budget`); a 7 KB checkpoint that
   inflated to 95 million no-op opcodes took 95 seconds to scan and now takes a
   few. A zip checkpoint stops reading members once they have decompressed past

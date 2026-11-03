@@ -1021,6 +1021,7 @@ def _pickle_stream_truncated(data: bytes) -> bool:
     stream = io.BytesIO(data)
     total = len(data)
     pos = 0
+    ops = 0  # one opcode budget across every pickle, as the main walk has
     while pos < total:
         if data[pos:pos + 2] not in _PICKLE_RESYNC_MARKERS:
             return False
@@ -1031,9 +1032,12 @@ def _pickle_stream_truncated(data: bytes) -> bool:
         # unreadable one, and `stream` still holds that position.
         with contextlib.suppress(Exception):
             for op, _arg, offset in genops(stream):
+                ops += 1
                 if op.name == "STOP" and offset is not None:
                     end_of_pickle = offset + 1
                     break
+        if ops > _scanner._PICKLE_MAX_OPS:
+            return False  # out of budget: the main walk reports the unread rest
         if end_of_pickle is None:
             # No STOP. Truncated only if the parse ran off the end of the
             # data; stopping short of it means an opcode it could not read,
@@ -2114,6 +2118,11 @@ def _nested_pickle_globals(blob: bytes) -> list[str] | None:
     return sorted(names) or None
 
 
+# Returned in place of evidence when a nested pickle's own walk ran out of
+# budget; _scan_pickle reports it as a coverage gap, never as a detection.
+NESTED_PICKLE_UNREAD = "<nested pickle not read to the end: opcode budget>"
+
+
 def _nested_pickle_evidence(blob: bytes) -> list[str]:
     """Evidence from one pickle stream carried inside a bytes literal.
 
@@ -2132,10 +2141,10 @@ def _nested_pickle_evidence(blob: bytes) -> list[str]:
     if bytes(blob[:1]) not in _NESTED_PICKLE_OPENERS:
         return []
     try:
-        names, calls, _memo = _resolve_pickle_globals(bytes(blob))
+        names, calls, memo = _resolve_pickle_globals(bytes(blob))
     except Exception:                                    # noqa: BLE001
         return []
-    evidence: list[str] = []
+    evidence: list[str] = [NESTED_PICKLE_UNREAD] if memo.walk_budget_exceeded else []
     for name in names:
         if _classify_pickle_global(name) == "denied":
             evidence.append(name)

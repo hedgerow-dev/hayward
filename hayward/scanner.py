@@ -139,6 +139,7 @@ from hayward._pickle_engine import _PICKLE_PROTO0_GLOBAL_RE as _PICKLE_PROTO0_GL
 from hayward._pickle_engine import _PICKLE_RESYNC_MARKERS as _PICKLE_RESYNC_MARKERS
 from hayward._pickle_engine import _PICKLE_STORAGE_NAME_RE as _PICKLE_STORAGE_NAME_RE
 from hayward._pickle_engine import _STRING_PUSH_OPCODES as _STRING_PUSH_OPCODES
+from hayward._pickle_engine import NESTED_PICKLE_UNREAD as NESTED_PICKLE_UNREAD
 from hayward._pickle_engine import PICKLE_ALLOWED_GLOBALS as PICKLE_ALLOWED_GLOBALS
 from hayward._pickle_engine import PICKLE_DANGER_SIGNATURES as PICKLE_DANGER_SIGNATURES
 from hayward._pickle_engine import PICKLE_DENIED_GLOBALS as PICKLE_DENIED_GLOBALS
@@ -239,7 +240,7 @@ _PICKLE_STACK_MAX_DEPTH = 4_000_000
 # for minutes. A real state dict walks a few dozen opcodes per tensor, so this
 # leaves wide headroom. On overflow the main walk stops and the rest is
 # reported as unread, exactly like the stack cap.
-_PICKLE_MAX_OPS = 5_000_000
+_PICKLE_MAX_OPS = 10_000_000
 
 
 # Severity rank mirroring Finding.severity_order in findings.py (lower is
@@ -1666,6 +1667,14 @@ class ModelFileScanner:
             ))
 
         embedded = _embedded_pickle_denied_globals(data)
+        if NESTED_PICKLE_UNREAD in embedded:
+            embedded.remove(NESTED_PICKLE_UNREAD)
+            findings.append(_skip_unverified_finding(
+                file_path,
+                "A pickle carried as a bytes literal inside this one ran past the "
+                "opcode budget, so what it does was never read to the end.",
+                {"skipped_reason": "pickle_walk_budget", "file_size": len(data)},
+            ))
         if embedded:
             findings.append(Finding(
                 rule_id="MFV-PICKLE-008",
