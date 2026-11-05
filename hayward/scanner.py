@@ -1840,6 +1840,11 @@ class ModelFileScanner:
         # on the unknown bucket runs here too. `OrderedDict` reconstructing a
         # state dict never receives a shell command, a URL or a filesystem
         # path, whatever `collections` happens to resolve to at load time.
+        # Every call, not one per ref: a clean first call must not hide a later
+        # one that hands the same callable free text.
+        all_calls_by_ref: dict[str, list[PickleResolvedCall]] = {}
+        for call in resolved_calls:
+            all_calls_by_ref.setdefault(call.ref, []).append(call)
         allowed_evidence: dict[str, tuple[Severity, str]] = {}
         for ref in allowed:
             if _is_ml_constructor_allowed(ref):
@@ -1849,14 +1854,15 @@ class ModelFileScanner:
                 # measured: 24 of 215 benign models tripped it the day these
                 # refs became allowed.
                 continue
-            call = calls_by_ref.get(ref)
-            shape_reason = _allowed_call_has_anomalous_string(ref, call)
-            if shape_reason is not None:
-                allowed_evidence[ref] = (Severity.MEDIUM, shape_reason)
-                continue
-            verdict = _triage_unknown_pickle_call(call)
-            if verdict is not None:
-                allowed_evidence[ref] = verdict
+            for call in all_calls_by_ref.get(ref) or [None]:
+                shape_reason = _allowed_call_has_anomalous_string(ref, call)
+                verdict = ((Severity.MEDIUM, shape_reason) if shape_reason is not None
+                           else _triage_unknown_pickle_call(call))
+                if verdict is not None:
+                    allowed_evidence[ref] = verdict
+                    if call is not None:
+                        calls_by_ref[ref] = call  # report the call that convicted it
+                    break
 
         if allowed_evidence:
             details = "; ".join(

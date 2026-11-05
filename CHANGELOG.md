@@ -4,6 +4,20 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- `MFV-PICKLE-006` (MEDIUM) no longer fires on a set of plain names. A
+  protocol-2 pickle stores a set of strings as `builtins.set([...])`, and PEFT
+  pickles a `LoraConfig` inside `torch.save` checkpoints whose
+  `target_modules` is such a set (`'q_proj'`, `'k_proj'`, ...), so LoRA
+  checkpoints on the Hub were reported. Free text handed to a set (spaces,
+  quotes, call syntax, paths, or a name past 128 characters) is still reported.
+- `MFV-PICKLE-006` checks every call to an allow-listed callable, not only the
+  first. A clean first call (`OrderedDict()`) hid a later one handed free text
+  (`OrderedDict('ls -la')`).
+
 ## 1.16.0 (2026-11-03)
 
 ### Changed
