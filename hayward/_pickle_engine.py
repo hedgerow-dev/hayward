@@ -1889,6 +1889,7 @@ _PICKLE_ALLOWED_STRING_ARG_OK: frozenset[str] = frozenset({
 _PICKLE_NAME_SET_CALLABLES: frozenset[str] = frozenset({
     "builtins.set", "builtins.frozenset", "__builtin__.set", "__builtin__.frozenset",
 })
+_PICKLE_PLAIN_NAME_MAX = 128  # a module path is tens of characters; a long name is encoded data
 _PICKLE_PLAIN_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*")
 
 
@@ -1922,7 +1923,9 @@ def _allowed_call_has_anomalous_string(ref: str, call: PickleResolvedCall | None
     ]
     if not texts:
         return None
-    if ref in _PICKLE_NAME_SET_CALLABLES and all(_PICKLE_PLAIN_NAME_RE.fullmatch(t) for t in texts):
+    if ref in _PICKLE_NAME_SET_CALLABLES and all(
+        len(t) <= _PICKLE_PLAIN_NAME_MAX and _PICKLE_PLAIN_NAME_RE.fullmatch(t) for t in texts
+    ):
         return None
     longest = max(texts, key=len)
     return (

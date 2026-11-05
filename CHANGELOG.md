@@ -13,7 +13,10 @@ within a major version.
   pickles a `LoraConfig` inside `torch.save` checkpoints whose
   `target_modules` is such a set (`'q_proj'`, `'k_proj'`, ...), so LoRA
   checkpoints on the Hub were reported. Free text handed to a set (spaces,
-  quotes, call syntax, paths) is still reported.
+  quotes, call syntax, paths, or a name past 128 characters) is still reported.
+- `MFV-PICKLE-006` checks every call to an allow-listed callable, not only the
+  first. A clean first call (`OrderedDict()`) hid a later one handed free text
+  (`OrderedDict('ls -la')`).
 
 ## 1.16.0 (2026-11-03)
 

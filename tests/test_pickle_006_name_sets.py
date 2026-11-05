@@ -34,3 +34,21 @@ def test_a_set_of_module_names_is_data(tmp_path, value):
 def test_free_text_in_a_set_is_still_reported(tmp_path, text):
     data = pickle.dumps({"target_modules": {"q_proj", text}}, protocol=2)
     assert "MFV-PICKLE-006" in _rules(tmp_path, data)
+
+
+def test_free_text_in_a_later_set_call_is_still_reported(tmp_path):
+    # The scanner kept one call per callable, so a clean first call hid the rest.
+    data = pickle.dumps([{"q_proj"}, {"ls -la"}], protocol=2)
+    assert "MFV-PICKLE-006" in _rules(tmp_path, data)
+
+
+def test_free_text_in_a_later_call_to_any_allowlisted_callable_is_still_reported(tmp_path):
+    # [OrderedDict(), OrderedDict('ls -la')]: the clean call comes first.
+    data = (b"\x80\x02]q\x00(ccollections\nOrderedDict\n)Rccollections\nOrderedDict\n"
+            b"X\x06\x00\x00\x00ls -la\x85Re.")
+    assert "MFV-PICKLE-006" in _rules(tmp_path, data)
+
+
+def test_a_long_name_is_not_a_plain_name(tmp_path):
+    data = pickle.dumps({"target_modules": {"x" + "696d706f7274206f73" * 20}}, protocol=2)
+    assert "MFV-PICKLE-006" in _rules(tmp_path, data)
