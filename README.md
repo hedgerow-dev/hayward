@@ -7,12 +7,16 @@ It scans PyTorch, pickle, joblib, GGUF, SafeTensors, ONNX and Keras files, plus
 Hugging Face `config.json`, and tells you whether loading a checkpoint would run
 code, before you load it.
 
+[![CI](https://github.com/hedgerow-dev/hayward/actions/workflows/ci.yml/badge.svg)](https://github.com/hedgerow-dev/hayward/actions/workflows/ci.yml)
+![PyPI](https://img.shields.io/pypi/v/hayward?style=flat-square&labelColor=013D5A&color=013D5A)
 ![License MIT](https://img.shields.io/badge/license-MIT-013D5A?style=flat-square&labelColor=013D5A)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-013D5A?style=flat-square&labelColor=013D5A)
 ![Rules 47](https://img.shields.io/badge/rules-47-013D5A?style=flat-square&labelColor=013D5A)
 ![Dependencies 1](https://img.shields.io/badge/dependencies-1-708C69?style=flat-square&labelColor=013D5A)
 ![Scan makes no outbound calls](https://img.shields.io/badge/scan_outbound_calls-none-F4A25B?style=flat-square&labelColor=013D5A)
 [![GitHub Marketplace](https://img.shields.io/badge/marketplace-hayward_model_scan-013D5A?style=flat-square&labelColor=013D5A&logo=github)](https://github.com/marketplace/actions/hayward-model-scan)
+
+## Quick start
 
 ```bash
 pip install hayward
@@ -30,6 +34,21 @@ CRITICAL MFV-PICKLE-001  checkpoints/model.pt
 Or [try it in your browser](https://huggingface.co/spaces/hedgerow-dev/hayward).
 Same scanner, compiled to WebAssembly. Drop a checkpoint on the page and it
 stays on your machine.
+
+## Contents
+
+- [Guard the load itself](#guard-the-load-itself)
+- [Let your coding agent check first](#let-your-coding-agent-check-first)
+- [The problem](#the-problem)
+- [Who it is for](#who-it-is-for)
+- [What makes it different](#what-makes-it-different)
+- [What it scans](#what-it-scans)
+- [Ways to run it](#ways-to-run-it)
+- [What a clean result means](#what-a-clean-result-means)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Security](#security)
+- [Licence](#licence)
 
 ## Guard the load itself
 
