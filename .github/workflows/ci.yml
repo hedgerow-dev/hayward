@@ -14,12 +14,32 @@ concurrency:
 jobs:
   test:
     strategy:
+      # One red cell should not hide the others. Six jobs are cheap once a
+      # runner is assigned, and the rest of the matrix is what says whether a
+      # break is a Python version or an OS.
       fail-fast: false
       matrix:
+        # CPython differences are covered on ubuntu, where a job finishes in
+        # well under a minute and runners are easy to get. macOS is the scarce
+        # pool: four macos-latest jobs at once sat with no runner until GitHub
+        # cancelled them, and a cancelled job fails the run even when every
+        # test that actually started passed. One macOS job and one Windows job,
+        # both on the newest Python, still cover path, symlink, and shell
+        # differences. Those do not vary by minor version here; the version
+        # bugs this suite has caught (int parsing on 3.10–3.12) show up on
+        # ubuntu. No pip cache: installs take a few seconds.
         python-version: ["3.10", "3.11", "3.12", "3.13"]
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
+        include:
+          - python-version: "3.13"
+            os: macos-latest
+          - python-version: "3.13"
+            os: windows-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Queue time does not count. Once a runner is assigned the slowest job is
+    # about three minutes (Windows). Ten minutes leaves room for a cold
+    # setup-python without letting a hang bill a macOS minute at 10x.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -33,7 +53,7 @@ jobs:
       - run: hayward scan tests --fail-on never
         shell: bash
       # Coverage is measured on a single matrix entry (HW-133) so the other
-      # eleven jobs stay fast. Reporting only: no failure threshold yet.
+      # jobs stay fast. Reporting only: no failure threshold yet.
       - if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
         run: |
           pip install pytest-cov
@@ -41,7 +61,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
