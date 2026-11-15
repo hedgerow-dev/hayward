@@ -31,6 +31,8 @@ Or [try it in your browser](https://huggingface.co/spaces/hedgerow-dev/hayward).
 Same scanner, compiled to WebAssembly. Drop a checkpoint on the page and it
 stays on your machine.
 
+Follow [@Hedgerowdotdev](https://x.com/Hedgerowdotdev) on X for releases and research.
+
 ## Guard the load itself
 
 A scan checks a file before you load it. The guard checks it while you do:
