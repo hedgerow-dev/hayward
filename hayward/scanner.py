@@ -85,6 +85,7 @@ from hayward._gguf import _jinja_ssti_signature as _jinja_ssti_signature
 from hayward._gguf import _parse_gguf_metadata as _parse_gguf_metadata
 from hayward._gguf import _read_gguf_string as _read_gguf_string
 from hayward._gguf import _read_gguf_value as _read_gguf_value
+from hayward._gguf import _template_command as _template_command
 from hayward._keras import _KERAS_BUILTIN_LAYER_CLASSES as _KERAS_BUILTIN_LAYER_CLASSES
 from hayward._keras import _KERAS_CONFIG_ANCHOR as _KERAS_CONFIG_ANCHOR
 from hayward._keras import _KERAS_CONFIG_BACKTRACK as _KERAS_CONFIG_BACKTRACK
@@ -2355,6 +2356,9 @@ class ModelFileScanner:
                     confidence=0.80,
                     cwe_ids=[94, 1336],
                 ))
+            command = self._template_command_finding(file_path, chat_template, "MFV-GGUF-006", f"GGUF {key}")
+            if command is not None:
+                findings.append(command)
 
         if kv_window_truncated:
             # The layout pass (_check_gguf_layout) walked the whole file, but
@@ -2380,12 +2384,35 @@ class ModelFileScanner:
 
     # ── HuggingFace / transformers JSON config scanning ───────────
 
+    def _template_command_finding(self, file_path: Path, template: str, rule_id: str, where: str) -> Finding | None:
+        """MFV-HF-005 / MFV-GGUF-006: the template's rendered text carries a shell
+        command. Nothing runs on load, but the text lands in every conversation,
+        so an agent that runs the model's tool calls can be told to run it."""
+        hit = _template_command(template)
+        if hit is None:
+            return None
+        label, snippet = hit
+        return Finding(
+            rule_id=rule_id,
+            message=f"{where} writes a shell command into the conversation ({label}): "
+                    f"{snippet[:160]!r}. Nothing runs on load, but an agent that "
+                    f"executes the model's tool calls can be led to run it.",
+            severity=Severity.HIGH,
+            category=Category.INJECTION,
+            file_path=str(file_path),
+            confidence=0.70,
+            cwe_ids=[1427, 77],
+            metadata={"pattern": label, "snippet": snippet[:300]},
+        )
+
     def _scan_jinja_template(self, file_path: Path, template: str) -> list[Finding]:
-        """A standalone chat template (`chat_template.jinja`): the MFV-HF-001 check."""
+        """A standalone chat template (`chat_template.jinja`): MFV-HF-001 and MFV-HF-005."""
+        command = self._template_command_finding(file_path, template, "MFV-HF-005", "Chat template")
+        commands = [command] if command is not None else []
         ssti_hit = _jinja_ssti_signature(template)
         if ssti_hit is None:
-            return []
-        return [Finding(
+            return commands
+        return commands + [Finding(
             rule_id="MFV-HF-001",
             message=f"Chat template contains a code-execution construct ({ssti_hit!r}) "
                     f"inside Jinja2 template syntax. transformers renders this template "
@@ -2435,6 +2462,13 @@ class ModelFileScanner:
             for entry in chat_template:
                 if isinstance(entry, dict) and isinstance(entry.get("template"), str):
                     templates.append(entry["template"])
+
+        # One MFV-HF-005 per file, for the same reason as the break below.
+        for template in templates:
+            command = self._template_command_finding(file_path, template, "MFV-HF-005", "chat_template")
+            if command is not None:
+                findings.append(command)
+                break
 
         for template in templates:
             ssti_hit = _jinja_ssti_signature(template)

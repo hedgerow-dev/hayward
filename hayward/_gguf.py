@@ -88,6 +88,67 @@ def _jinja_ssti_signature(template: str) -> str | None:
     return None
 
 
+# Shell commands a template has no reason to write into a conversation. Matched
+# on the text the template renders, not its code: a template that stays inert but
+# tells the model (or plants a fake tool call) to fetch and run a script reaches
+# code execution through whatever agent obeys the model. Each pattern needs a URL
+# or a shell on the receiving end, so prose that only names a tool stays clean.
+_TEMPLATE_COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (label, re.compile(pattern, re.IGNORECASE)) for label, pattern in (
+        ("download tool fetching a URL", r"\b(?:curl|wget)\b[^\n]{0,200}?https?://"),
+        ("output piped into a shell", r"\|\s*(?:ba|z|da|k)?sh\b"),
+        ("file handed to a shell", r"&&\s*(?:ba|z|da)?sh\s+\S"),
+        ("PowerShell download or eval", r"\b(?:iwr|invoke-webrequest|downloadstring|invoke-expression)\b"),
+        ("reverse shell", r"/dev/(?:tcp)/"),
+    )
+)
+
+# Comments and blocks in one pass, so a `{#` inside a block's string literal is
+# read as part of that block and cannot hide the prose after it.
+_JINJA_COMMENT_OR_BLOCK_RE = re.compile(r"\{#.*?#\}|\{\{.*?\}\}|\{%.*?%\}", re.DOTALL)
+
+# Jinja decodes Python escapes in string literals, so `\x63` renders as `c`.
+_JINJA_ESCAPE_RE = re.compile(r"\\(?:x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|([0-7]{1,3}))")
+
+
+def _decode_escapes(literal: str) -> str:
+    def char(m: re.Match[str]) -> str:
+        hex_digits = m.group(1) or m.group(2) or m.group(3)
+        code = int(hex_digits, 16) if hex_digits else int(m.group(4), 8)
+        return chr(code) if code <= 0x10FFFF else m.group(0)
+    return _JINJA_ESCAPE_RE.sub(char, literal)
+
+
+def _template_rendered_text(template: str) -> str:
+    """The text a Jinja2 template can emit: prose outside its blocks plus the
+    string literals inside them, escapes decoded. Comments render nothing.
+    Literals in one block are joined, so ``'cu' ~ 'rl'`` reads as ``curl``.
+    Variables are not resolved: a command assembled from a `{% set %}` value
+    elsewhere is a known miss."""
+    parts: list[str] = []
+    pos = 0
+    for block in _JINJA_COMMENT_OR_BLOCK_RE.finditer(template):
+        parts.append(template[pos:block.start()])
+        if not block.group(0).startswith("{#"):
+            literals = _GGUF_JINJA_STRING_RE.findall(block.group(0))
+            parts.append("".join(_decode_escapes(lit[1:-1]) for lit in literals))
+        pos = block.end()
+    parts.append(template[pos:])
+    return "\n".join(parts)
+
+
+def _template_command(template: str) -> tuple[str, str] | None:
+    """(label, snippet) for the first shell command in a template's rendered
+    text, or None."""
+    text = _template_rendered_text(template)
+    for label, pattern in _TEMPLATE_COMMAND_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            start = max(0, m.start() - 40)
+            return label, text[start:m.end() + 40].strip()
+    return None
+
+
 # ── GGUF metadata parsing ───────────────────────────────────────────
 #
 # Structure-aware KV parsing per the GGUF binary spec, instead of decoding

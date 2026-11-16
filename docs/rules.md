@@ -48,6 +48,7 @@ derive theirs from the strength of the evidence found.
 | `MFV-GGUF-003` | CRITICAL | 94, 1336 | `tokenizer.chat_template` contains a code-execution construct in Jinja2 syntax |
 | `MFV-GGUF-004` | INFO | - | Magic is valid but the KV section will not parse. **Not a clean verdict**, see coverage limits |
 | `MFV-GGUF-005` | HIGH | 787, 190 | Container arithmetic wraps or overruns the file (the `CVE-2025-53630` / `CVE-2026-27940` / `CVE-2026-33298` class), **or a tensor name carries a path** |
+| `MFV-GGUF-006` | HIGH | 1427, 77 | A `tokenizer.chat_template*` writes a shell command into the conversation (the `MFV-HF-005` check in GGUF) |
 
 ## HuggingFace / transformers JSON config
 
@@ -66,6 +67,7 @@ CRITICAL.
 |------|----------|-----|------------|
 | `MFV-HF-001` | CRITICAL | 94, 1336 | A `.json` config's `chat_template`, or a standalone `.jinja` chat template, contains a code-execution construct in Jinja2 code position (the `MFV-GGUF-003` threat in JSON) |
 | `MFV-HF-002` | HIGH | 94 | A `.json` config declares `auto_map` (custom modules the loader imports and runs) or ships `trust_remote_code: true` |
+| `MFV-HF-005` | HIGH | 1427, 77 | A chat template's rendered text (prose, and string literals inside Jinja blocks) carries a shell command: a download tool fetching a URL, output piped into a shell, a PowerShell download, or a reverse shell. Nothing runs on load, but the text lands in every conversation, so an agent that runs the model's tool calls can be told to run it |
 
 ## Other formats
 
