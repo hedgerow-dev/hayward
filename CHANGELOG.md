@@ -4,6 +4,18 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Added
+
+- `MFV-HF-005` (and `MFV-GGUF-006` for GGUF): a chat template that writes a
+  shell command into the conversation, such as a download piped into a shell
+  or a fake tool call that runs one. Nothing runs on load, so the code-execution
+  checks stay quiet, but an agent that runs the model's tool calls can be led
+  to run it. Matched on the text the template renders: prose, and string
+  literals with escapes decoded. No popular template tried was flagged. A
+  command assembled from a variable set elsewhere is not caught.
+
 ## 1.16.1 (2026-11-05)
 
 ### Fixed
