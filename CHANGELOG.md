@@ -6,6 +6,19 @@ within a major version.
 
 ## Unreleased
 
+### Changed
+
+- Scanner-evasion gadgets found on the Hub are now CRITICAL. Before, they came
+  out HIGH, and four came out INFO when the payload did not look like a shell
+  command. Denied by name: `code.InteractiveInterpreter`/`InteractiveConsole`,
+  `codeop.compile_command`, `trace.Trace`, `mailcap.findmatch`,
+  `atexit.register`, `copyreg.add_extension`, `inspect.get_annotations`, and
+  the whole of `logging.config` (dictConfig builds any class it is given) and
+  `torch.hub`. `importlib.import_module` handed a denied module (`os`,
+  `subprocess`, ...) is now `MFV-PICKLE-005` at CRITICAL, which catches the
+  `operator.methodcaller("system", ...)(import_module("os"))` family without
+  denying `methodcaller` itself.
+
 ### Fixed
 
 - `hayward hub` scanned no model file inside a folder named like a project's

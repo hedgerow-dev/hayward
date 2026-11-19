@@ -843,7 +843,9 @@ class TestDynamicResolutionByTargetName:
             f"{resolver}.{target}('os.system') stayed at INFO: "
             f"{[(f.rule_id, f.severity) for f in findings]}"
         )
-        assert any(f.severity == Severity.HIGH for f in actionable)
+        # At least HIGH: logging.config is denied outright since 1.18 (dictConfig gadgets),
+        # so its resolver now comes out CRITICAL through the deny list instead.
+        assert any(f.severity in (Severity.HIGH, Severity.CRITICAL) for f in actionable)
 
     def test_bare_denied_module_name_also_counts(self, tmp_path):
         """`numpy.lib.utils._makenamedict('os')` passes only the module."""

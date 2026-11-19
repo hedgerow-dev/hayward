@@ -264,6 +264,9 @@ _SEVERITY_ORDER: dict[Severity, int] = {
 # callable is being handed a shell command" and "...handed a file path"; one
 # message for both would overstate at one end.
 _PICKLE_UNKNOWN_TIERS: dict[Severity, tuple[float, str]] = {
+    Severity.CRITICAL: (0.85, "Pickle file imports a module this scanner denies (os, subprocess, ...) "
+                              "by name, the first step of a gadget chain that reaches its callables "
+                              "without naming them"),
     Severity.HIGH: (0.70, "Pickle file invokes unrecognized global(s) with arguments indicating "
                           "command execution, network access, or data exfiltration"),
     Severity.MEDIUM: (0.50, "Pickle file invokes unrecognized global(s) with arguments that name a "

@@ -193,6 +193,18 @@ PICKLE_DENIED_GLOBALS: frozenset[str] = frozenset({
     "imaplib.IMAP4_stream",
     "code.InteractiveInterpreter.runcode",
     "trace.Trace.run", "trace.Trace.runctx",
+    # Launch pads from scanner-evasion gadgets found on the Hub (November 2026):
+    # each turns a string into running code without naming os or eval, and none
+    # has a reason to be in a model file. Exact names, not modules: `code` and
+    # `trace` are also common names for a project's own package.
+    "code.InteractiveInterpreter", "code.InteractiveConsole", "code.interact",
+    "code.compile_command",
+    "codeop.compile_command", "codeop.Compile", "codeop.CommandCompiler",
+    "trace.Trace",
+    "mailcap.findmatch", "mailcap.subst",
+    "atexit.register",
+    "copyreg.add_extension",
+    "inspect.get_annotations",
     # uuid's MAC-address helpers shell out through subprocess. Denying the
     # specific gadgets, not picklescan's `uuid: *` wildcard (which flags an
     # ordinary pickled uuid.UUID), catches the GHSA-g38g-8gr9-h9xp payload
@@ -1657,6 +1669,9 @@ _PICKLE_DENIED_MODULES: frozenset[str] = frozenset({
     "setuptools._distutils.spawn",  # what `distutils` resolves to on Python 3.12+
     "shutil", "socket", "ssl", "subprocess", "sys", "test", "timeit",
     "urllib.request", "venv", "webbrowser",
+    # dictConfig/fileConfig build any class named in the config ("()": "subprocess.Popen"),
+    # and torch.hub downloads and runs a repo's hubconf.py.
+    "logging.config", "torch.hub",
 })
 
 
@@ -1782,6 +1797,14 @@ _PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`|\s[;&|]|[;&|]\s")
 # and a literal that is Python *source* resolving a denied callable. None of
 # those is anything a code object carries by construction, and the real sink
 # in a dill-based gadget is still reached by MFV-PICKLE-001.
+# Callables that return a module by name. Handed a denied module, they are the
+# import step of a gadget chain (operator.methodcaller("system", ...) applied to
+# importlib.import_module("os")), so that call is CRITICAL rather than HIGH.
+_PICKLE_MODULE_IMPORTERS: frozenset[str] = frozenset({
+    "importlib.import_module", "importlib.__import__",
+})
+
+
 _PICKLE_CODE_OBJECT_BUILDERS: frozenset[str] = frozenset({
     "dill._dill._create_code",
     "dill._dill._create_function",
@@ -2318,6 +2341,15 @@ def _triage_unknown_pickle_call(
         # the *target* is not. Keying on the target rather than the resolver is
         # what stops this being a list-maintenance race.
         if _classify_pickle_global(text) == "denied" or _is_denied_pickle_module(text):
+            if call.ref in _PICKLE_MODULE_IMPORTERS:
+                # Importing os (or another denied module) by name inside a model
+                # file has no ordinary reason; it is the first step of every
+                # methodcaller/getattr chain that reaches os.system without naming it.
+                return (
+                    Severity.CRITICAL,
+                    f"imports {text!r} by name, which this scanner denies: the first step "
+                    f"of a chain that reaches its callables without naming them",
+                )
             return (
                 Severity.HIGH,
                 f"is invoked with {text!r}, which names a callable this scanner denies -- "
