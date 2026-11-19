@@ -1802,14 +1802,6 @@ _PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`[^`]+`|\s[;&|]|[;&|]\s")
 # and a literal that is Python *source* resolving a denied callable. None of
 # those is anything a code object carries by construction, and the real sink
 # in a dill-based gadget is still reached by MFV-PICKLE-001.
-# Callables that return a module by name. Handed a denied module, they are the
-# import step of a gadget chain (operator.methodcaller("system", ...) applied to
-# importlib.import_module("os")), so that call is CRITICAL rather than HIGH.
-_PICKLE_MODULE_IMPORTERS: frozenset[str] = frozenset({
-    "importlib.import_module", "importlib.__import__",
-})
-
-
 _PICKLE_CODE_OBJECT_BUILDERS: frozenset[str] = frozenset({
     "dill._dill._create_code",
     "dill._dill._create_function",
@@ -1820,6 +1812,14 @@ _PICKLE_CODE_OBJECT_BUILDERS: frozenset[str] = frozenset({
     "types.CodeType",
     "types.FunctionType",
     "marshal.loads",
+})
+
+
+# Callables that return a module by name. Handed a denied module, they are the
+# import step of a gadget chain (operator.methodcaller("system", ...) applied to
+# importlib.import_module("os")), so that call is CRITICAL rather than HIGH.
+_PICKLE_MODULE_IMPORTERS: frozenset[str] = frozenset({
+    "importlib.import_module", "importlib.__import__",
 })
 
 
@@ -1858,6 +1858,14 @@ _PICKLE_DATA_CONSTRUCTORS: frozenset[str] = frozenset({
     "collections.Counter", "collections.OrderedDict", "collections.defaultdict",
     "collections.deque", "builtins.set", "builtins.frozenset", "builtins.dict",
     "builtins.list", "builtins.tuple", "__builtin__.set", "__builtin__.frozenset",
+    "__builtin__.dict", "__builtin__.list", "__builtin__.tuple",
+})
+
+# Callables that take a vocabulary: the long-string-list skip applies only to
+# these and to the data constructors above, so padding a command list to 100
+# items does not hide it from an unknown launch pad.
+_PICKLE_VOCABULARY_HOLDERS: frozenset[str] = frozenset({
+    "spacy.strings.StringStore",
 })
 
 
@@ -2344,10 +2352,11 @@ def _triage_unknown_pickle_call(
     else:
         arguments = (_codecs_encode_as_bytes(call), call.kwargs or {})
         binary_args = call.ref in _PICKLE_BINARY_ARG_CALLABLES
+        takes_vocabulary = call.ref in _PICKLE_DATA_CONSTRUCTORS or call.ref in _PICKLE_VOCABULARY_HOLDERS
         texts = [
             text
             for text in (_pickle_arg_text(v)
-                         for v in _iter_pickle_arg_values(arguments, skip_vocabulary=True)
+                         for v in _iter_pickle_arg_values(arguments, skip_vocabulary=takes_vocabulary)
                          if not (binary_args and isinstance(v, (bytes, bytearray))))
             if text is not None
         ]
@@ -2365,20 +2374,10 @@ def _triage_unknown_pickle_call(
         return (Severity.HIGH, "invoked with a network endpoint (host, port) argument")
 
 
-    # A resolver is handed its target directly (`_resolve('os.system')`,
-    # `import_module('os')`, `getattr(mod, 'system')`). A word deep inside a
-    # dict or list argument is data: a Counter of romanized Khmer words has a
-    # key 'nt', which is also the name of Windows' os module.
-    if call.partial_texts:
-        # No structure to tell a direct argument from a container's contents. A
-        # resolver call carries a few texts; a word list carries many, and then
-        # only a dotted name ('os.system') is read as a target.
-        name_texts = texts if len(texts) <= 4 else [t for t in texts if "." in t]
-    else:
-        positional, keywords = arguments
-        direct = [*positional, *keywords.values()] if isinstance(positional, tuple) else list(keywords.values())
-        name_texts = [t for t in (_pickle_arg_text(v) for v in direct) if t is not None]
-
+    # Container constructors take words as data: there only a dotted name
+    # ('os.system') is read as a resolver target, not a bare word that also
+    # names a module ('nt' as a Counter key is Windows' os module).
+    name_texts = texts
     if call.ref in _PICKLE_DATA_CONSTRUCTORS:
         name_texts = [t for t in name_texts if "." in t]
 
