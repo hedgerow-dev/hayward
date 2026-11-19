@@ -21,6 +21,22 @@ within a major version.
 
 ### Fixed
 
+- Fewer false alarms on real Hub models (measured on the November 2026 sweep:
+  of 96 verified false HIGHs, 85 are no longer flagged; all 324 verified
+  attacks, tests and gadgets are still flagged):
+  - numpy scalars: the raw bytes of `scalar(dtype, bytes)` are its value, not
+    text (a string argument is still checked).
+  - A backtick counts as shell only as command substitution with content, so
+    the Penn Treebank tag "``" (spaCy) and stray backticks in binary values no
+    longer read as commands.
+  - `regex._regex.compile` (GPT-2/Whisper tokenizers) takes a pattern, like
+    `re.compile`.
+  - Long string lists (100 or more, such as spaCy's StringStore) are
+    vocabularies; URLs in them are corpus text.
+  - Container constructors (`Counter`, `OrderedDict`, `set`, ...) take words as
+    data: a bare word that names a denied module (`'nt'`) or a `'/'` key is no
+    longer a resolver target or a path. Dotted names (`'os.system'`), URLs and
+    commands handed to them are still reported.
 - `hayward hub` scanned no model file inside a folder named like a project's
   dependency or build tree (`build/`, `dist/`, `env/`, `vendor/`,
   `third_party/`, `bundle/` and the rest of the project skip list), and said

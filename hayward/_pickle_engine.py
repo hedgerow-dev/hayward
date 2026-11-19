@@ -1351,6 +1351,8 @@ def _walk_one_pickle(
             if isinstance(value, _PickleCallResultType):
                 if value.ref not in chained and len(chained) < _PICKLE_MAX_PARTIAL_TEXTS:
                     chained.append(value.ref)
+            elif isinstance(value, (bytes, bytearray)) and callable_val in _PICKLE_BINARY_ARG_CALLABLES:
+                continue  # a numpy scalar's raw value, not text; see _PICKLE_BINARY_ARG_CALLABLES
             elif (text := _pickle_arg_text(value)) is not None and text not in seen:
                 if len(seen) < _PICKLE_MAX_PARTIAL_TEXTS:
                     seen.append(text)
@@ -1776,8 +1778,11 @@ def _laundered_denied_ref(qualname: str) -> str | None:
 _PICKLE_ARG_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]{1,15}://", re.I)
 # A shell metacharacter adjacent to whitespace, i.e. used as an operator
 # rather than merely present. A download piped into a shell matches; an ordinary
-# value like `a;b` or a base64 blob containing `+/=` does not.
-_PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`|\s[;&|]|[;&|]\s")
+# value like `a;b` or a base64 blob containing `+/=` does not. A backtick counts
+# only as command substitution, with something between the pair: a lone one is a
+# shell syntax error, and "``" is the Penn Treebank tag for an opening quote
+# (spaCy taggers carry it).
+_PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`[^`]+`|\s[;&|]|[;&|]\s")
 # Callables that rebuild a code object or a function from its parts. Every
 # code object carries co_filename, the absolute path of the source it was
 # compiled from, so a path argument here is structural metadata rather than a
@@ -1825,6 +1830,34 @@ _PICKLE_CODE_OBJECT_BUILDERS: frozenset[str] = frozenset({
 # "^§|^%|^=|^—|^–|^\\+(?![0-9])".
 _PICKLE_PATTERN_ARG_CALLABLES: frozenset[str] = frozenset({
     "re._compile", "re.compile", "regex._compile", "regex.compile",
+    # How the `regex` package pickles a compiled pattern (GPT-2/Whisper tokenizers).
+    "regex._regex.compile",
+})
+
+
+# Callables whose bytes argument is a raw binary value. numpy pickles a scalar
+# as scalar(dtype, raw_bytes); those bytes are often all printable, and a
+# backtick or `|` among them read as a shell line (71 false HIGHs in the
+# November 2026 Hub sweep). A str argument to them is still checked.
+_PICKLE_BINARY_ARG_CALLABLES: frozenset[str] = frozenset({
+    "numpy.core.multiarray.scalar", "numpy._core.multiarray.scalar",
+})
+
+
+# A list or set this long made of strings is a vocabulary (spaCy's StringStore,
+# a tokenizer's word list), not a payload; corpus text in it includes URLs and
+# shell-like tokens. A command is handed to a launch pad as one argument.
+_PICKLE_VOCABULARY_MIN_ITEMS = 100
+
+
+# Container constructors take words as data. A bare word that happens to be a
+# denied module ('nt' as a Counter key, 'test' in a set) is not a resolver
+# target here; a dotted name ('os.system') still is, and the URL and shell
+# checks still apply to whatever they are given.
+_PICKLE_DATA_CONSTRUCTORS: frozenset[str] = frozenset({
+    "collections.Counter", "collections.OrderedDict", "collections.defaultdict",
+    "collections.deque", "builtins.set", "builtins.frozenset", "builtins.dict",
+    "builtins.list", "builtins.tuple", "__builtin__.set", "__builtin__.frozenset",
 })
 
 
@@ -2040,7 +2073,7 @@ def _pickle_source_denied_target(text: str) -> str | None:
     return None
 
 
-def _iter_pickle_arg_values(value: Any, _seen: set[int] | None = None):
+def _iter_pickle_arg_values(value: Any, _seen: set[int] | None = None, skip_vocabulary: bool = False):
     """Yield every scalar nested anywhere inside a resolved argument value.
 
     Recurses over container depth an attacker controls (nested TUPLE1 opcodes),
@@ -2065,12 +2098,15 @@ def _iter_pickle_arg_values(value: Any, _seen: set[int] | None = None):
             return
         _seen.add(marker)
     if isinstance(value, (tuple, list, set, frozenset)):
+        if (skip_vocabulary and len(value) >= _PICKLE_VOCABULARY_MIN_ITEMS
+                and all(isinstance(item, str) for item in value)):
+            return
         for item in value:
-            yield from _iter_pickle_arg_values(item, _seen)
+            yield from _iter_pickle_arg_values(item, _seen, skip_vocabulary)
     elif isinstance(value, dict):
         for key, item in value.items():
-            yield from _iter_pickle_arg_values(key, _seen)
-            yield from _iter_pickle_arg_values(item, _seen)
+            yield from _iter_pickle_arg_values(key, _seen, skip_vocabulary)
+            yield from _iter_pickle_arg_values(item, _seen, skip_vocabulary)
     else:
         yield value
 
@@ -2307,9 +2343,12 @@ def _triage_unknown_pickle_call(
         arguments: Any = ()
     else:
         arguments = (_codecs_encode_as_bytes(call), call.kwargs or {})
+        binary_args = call.ref in _PICKLE_BINARY_ARG_CALLABLES
         texts = [
             text
-            for text in (_pickle_arg_text(v) for v in _iter_pickle_arg_values(arguments))
+            for text in (_pickle_arg_text(v)
+                         for v in _iter_pickle_arg_values(arguments, skip_vocabulary=True)
+                         if not (binary_args and isinstance(v, (bytes, bytearray))))
             if text is not None
         ]
 
@@ -2326,7 +2365,24 @@ def _triage_unknown_pickle_call(
         return (Severity.HIGH, "invoked with a network endpoint (host, port) argument")
 
 
-    for text in texts:
+    # A resolver is handed its target directly (`_resolve('os.system')`,
+    # `import_module('os')`, `getattr(mod, 'system')`). A word deep inside a
+    # dict or list argument is data: a Counter of romanized Khmer words has a
+    # key 'nt', which is also the name of Windows' os module.
+    if call.partial_texts:
+        # No structure to tell a direct argument from a container's contents. A
+        # resolver call carries a few texts; a word list carries many, and then
+        # only a dotted name ('os.system') is read as a target.
+        name_texts = texts if len(texts) <= 4 else [t for t in texts if "." in t]
+    else:
+        positional, keywords = arguments
+        direct = [*positional, *keywords.values()] if isinstance(positional, tuple) else list(keywords.values())
+        name_texts = [t for t in (_pickle_arg_text(v) for v in direct) if t is not None]
+
+    if call.ref in _PICKLE_DATA_CONSTRUCTORS:
+        name_texts = [t for t in name_texts if "." in t]
+
+    for text in name_texts:
         # A literal string that *names* something denied, handed to some other
         # callable. This is dynamic resolution in its general form, and the
         # check needs no list of its own: it re-runs the existing
@@ -2427,7 +2483,8 @@ def _triage_unknown_pickle_call(
 
     for text in texts:
         if (_PICKLE_ARG_PATH_RE.search(text) and not is_code_builder
-                and call.ref not in _PICKLE_PATH_CONSTRUCTORS):
+                and call.ref not in _PICKLE_PATH_CONSTRUCTORS
+                and call.ref not in _PICKLE_DATA_CONSTRUCTORS):  # a '/' Counter key is a word
             # Weak on its own -- `pathlib.PurePosixPath('/home/u/model.bin')`
             # looks identical to `linecache.getline` reading a system credential file at the
             # opcode level, and a file read is not code execution either way.
