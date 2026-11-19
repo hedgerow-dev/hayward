@@ -354,6 +354,11 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
              "in-toto/SLSA). Detection only, not cryptographic verification",
     )
     scan.add_argument(
+        "--no-skip-dirs", action="store_true",
+        help="walk every folder, including the ones a project scan skips "
+             "(venv/, build/, dist/, site-packages/, ...). `hayward hub` always sets it",
+    )
+    scan.add_argument(
         "--exclude", action="append", metavar="PATTERN",
         help="glob pattern (fnmatch) matched against each file's path as "
              "walked (relative to the scan root) and against any path "
@@ -438,6 +443,8 @@ def main(argv: list[str] | None = None, *, label: str | None = None) -> int:
             return 2
 
     scanner = ModelFileScanner()
+    if args.no_skip_dirs:
+        scanner.skip_dirs = frozenset()
     scanner.check_signatures = args.check_signatures
     if args.max_size is not None:
         # Setting the instance attribute shadows the class constant for this

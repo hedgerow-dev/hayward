@@ -381,7 +381,8 @@ def main(argv: list[str]) -> int:
         receipt_path = _receipt_path(scan_flags)
         if receipt_path is not None:
             receipt_path.unlink(missing_ok=True)
-        code = scan_main(["scan", tmp, *scan_flags], label=f"hf://{args.repo}@{got['sha'][:12]}")
+        # Every file in a model repo was put there on purpose: walk build/, env/ and the rest too.
+        code = scan_main(["scan", tmp, "--no-skip-dirs", *scan_flags], label=f"hf://{args.repo}@{got['sha'][:12]}")
     if receipt_path is not None and receipt_path.is_file():
         _finish_receipt(receipt_path, args.repo, got["sha"], got["partial"])
     for read in ("pickle members", "header"):

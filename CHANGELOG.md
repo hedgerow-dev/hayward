@@ -4,6 +4,18 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- `hayward hub` scanned no model file inside a folder named like a project's
+  dependency or build tree (`build/`, `dist/`, `env/`, `vendor/`,
+  `third_party/`, `bundle/` and the rest of the project skip list), and said
+  nothing about it, so a payload there gave a clean result. Hub scans now walk
+  every folder. Local scans still skip those folders by default; the new
+  `--no-skip-dirs` walks them too, and `ModelFileScanner.discover_files` takes
+  `skip_dirs`.
+
 ## 1.17.0 (2026-11-16)
 
 ### Added
