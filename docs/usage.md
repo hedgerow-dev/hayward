@@ -33,6 +33,7 @@ relative to their common ancestor (or absolute paths when they share none).
 | `--fail-on` | `high` | Lowest severity that exits non-zero. `critical`, `high`, `medium`, `low`, `info`, `never` |
 | `--fail-on-coverage` | off | Also exit non-zero when a file could not be fully read |
 | `--exclude` | off | Glob pattern (fnmatch) of files/directories to skip. Repeatable (see [Excluding paths](#excluding-paths)) |
+| `--no-skip-dirs` | off | Also walk the folders a project scan skips (`venv/`, `build/`, `dist/`, `env/`, `vendor/`, `site-packages/`, ...). `hayward hub` always sets it, since every file in a model repo counts |
 | `--max-size` | `500M` | Override the per-file scan cap. Plain byte count or a `k`/`m`/`g` suffix, e.g. `200M`, `1G`, `500k` |
 | `--jobs` | `1` | Scan a directory's files across N worker processes (see [Parallel scanning](#parallel-scanning)) |
 | `--policy` | off | JSON per-rule severity overrides, applied first (see [Policy overrides](#policy-overrides)) |

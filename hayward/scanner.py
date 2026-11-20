@@ -264,6 +264,9 @@ _SEVERITY_ORDER: dict[Severity, int] = {
 # callable is being handed a shell command" and "...handed a file path"; one
 # message for both would overstate at one end.
 _PICKLE_UNKNOWN_TIERS: dict[Severity, tuple[float, str]] = {
+    Severity.CRITICAL: (0.85, "Pickle file imports a module this scanner denies (os, subprocess, ...) "
+                              "by name, the first step of a gadget chain that reaches its callables "
+                              "without naming them"),
     Severity.HIGH: (0.70, "Pickle file invokes unrecognized global(s) with arguments indicating "
                           "command execution, network access, or data exfiltration"),
     Severity.MEDIUM: (0.50, "Pickle file invokes unrecognized global(s) with arguments that name a "
@@ -715,6 +718,11 @@ class _BoundedTarInfo(tarfile.TarInfo):
 
 class ModelFileScanner:
     """Scans ML model files for backdoors and unsafe content."""
+
+    # Folder names discover_files does not walk. Right for a project tree (venv/, build/,
+    # site-packages/); a downloaded model repo sets frozenset(), since every file in it
+    # was put there on purpose and a payload in build/ must not scan clean.
+    skip_dirs: frozenset[str] = SKIP_DIR_NAMES
 
     # Annotated as int (not the inferred Literal) because both are overridden
     # per instance: --max-size shadows MAX_SCAN_BYTES for a run, and tests
@@ -1561,7 +1569,8 @@ class ModelFileScanner:
         return None
 
     def discover_files(
-        self, root: Path, exclude: list[str] | None = None
+        self, root: Path, exclude: list[str] | None = None,
+        skip_dirs: frozenset[str] | None = None,
     ) -> list[Path]:
         """Return every scannable model file under `root`, in walk order.
 
@@ -1576,7 +1585,8 @@ class ModelFileScanner:
         # whole path and excluded only `.git` and `__pycache__`, so it walked
         # the target's installed dependencies. Match on path *components*
         # instead, so a directory whose name merely contains "bundle" is kept.
-        skip_dirs = SKIP_DIR_NAMES
+        if skip_dirs is None:
+            skip_dirs = self.skip_dirs
         files: list[Path] = []
         # Directory discovery must cover the same extension set scan_file
         # accepts, including the ambiguous ones it resolves by content sniff --

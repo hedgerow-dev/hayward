@@ -455,3 +455,13 @@ def test_names_that_differ_only_by_unicode_form_are_refused(monkeypatch, tmp_pat
     FakeHub(monkeypatch, {composed: EVIL, decomposed: CLEAN})
     got = hub.fetch("org/name", "main", tmp_path, 1 << 20)
     assert sorted(got["refused"]) == sorted([composed, decomposed])
+
+
+# A model repo has no virtualenvs or build trees: every file in it was put there on purpose.
+# The local skip list (build/, dist/, env/, vendor/, ...) must not hide a payload in a Hub repo.
+@pytest.mark.parametrize("folder", ["build", "dist", "env", "vendor", "third_party", "bundle"])
+def test_a_payload_in_a_folder_local_scans_skip_is_still_scanned(monkeypatch, capsys, folder):
+    FakeHub(monkeypatch, {f"{folder}/pytorch_model.bin": EVIL, "model.pkl": CLEAN})
+    code, out, _ = run(["org/name", "--quiet"], capsys)
+    assert code == 1
+    assert "MFV-PICKLE-001" in out and folder in out

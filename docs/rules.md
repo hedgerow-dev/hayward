@@ -22,7 +22,7 @@ derive theirs from the strength of the evidence found.
 | `MFV-PICKLE-002` | HIGH | 502 | Stream will not parse as opcodes but carries suspicious byte patterns |
 | `MFV-PICKLE-003` | HIGH | - | Member exceeds the decompressed-size limit, possible zip bomb. Also a compressed tar member that would decompress to over 100 times the file size, or a tar long-name or pax header over 1 MB: both stop the walk, so they are reported HIGH rather than only as a coverage gap |
 | `MFV-PICKLE-004` | INFO | 502 | References a global on neither the allow nor the deny list |
-| `MFV-PICKLE-005` | HIGH/MEDIUM/LOW | 502 | An unknown callable's **resolved arguments** convict it: a URL, a shell-shaped string, a `(host, port)` pair, or a literal naming a denied global. Severity follows the strength of the signal, never the callable's name |
+| `MFV-PICKLE-005` | CRITICAL/HIGH/MEDIUM/LOW | 502 | An unknown callable's **resolved arguments** convict it: a URL, a shell-shaped string, a `(host, port)` pair, or a literal naming a denied global. Severity follows the strength of the signal, never the callable's name. CRITICAL only when a module importer (`importlib.import_module`) is handed a denied module such as `os`: the first step of a gadget chain |
 | `MFV-PICKLE-006` | HIGH/MEDIUM | 502 | An allow-listed callable is handed an argument no legitimate model would supply |
 | `MFV-PICKLE-007` | HIGH | 502 | Memo slots sit in a band far from the rest of the stream, the signature of a spliced-in pickle |
 | `MFV-PICKLE-008` | CRITICAL | 502 | A **second pickle stream is carried as a bytes literal** and references a denied callable. `numpy.load(BytesIO(<pickle>))` is the shape: the outer callable is on no deny list and the payload exists only once the inner bytes are read |

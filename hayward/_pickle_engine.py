@@ -193,6 +193,18 @@ PICKLE_DENIED_GLOBALS: frozenset[str] = frozenset({
     "imaplib.IMAP4_stream",
     "code.InteractiveInterpreter.runcode",
     "trace.Trace.run", "trace.Trace.runctx",
+    # Launch pads from scanner-evasion gadgets found on the Hub (November 2026):
+    # each turns a string into running code without naming os or eval, and none
+    # has a reason to be in a model file. Exact names, not modules: `code` and
+    # `trace` are also common names for a project's own package.
+    "code.InteractiveInterpreter", "code.InteractiveConsole", "code.interact",
+    "code.compile_command",
+    "codeop.compile_command", "codeop.Compile", "codeop.CommandCompiler",
+    "trace.Trace",
+    "mailcap.findmatch", "mailcap.subst",
+    "atexit.register",
+    "copyreg.add_extension",
+    "inspect.get_annotations",
     # uuid's MAC-address helpers shell out through subprocess. Denying the
     # specific gadgets, not picklescan's `uuid: *` wildcard (which flags an
     # ordinary pickled uuid.UUID), catches the GHSA-g38g-8gr9-h9xp payload
@@ -1339,6 +1351,8 @@ def _walk_one_pickle(
             if isinstance(value, _PickleCallResultType):
                 if value.ref not in chained and len(chained) < _PICKLE_MAX_PARTIAL_TEXTS:
                     chained.append(value.ref)
+            elif isinstance(value, (bytes, bytearray)) and callable_val in _PICKLE_BINARY_ARG_CALLABLES:
+                continue  # a numpy scalar's raw value, not text; see _PICKLE_BINARY_ARG_CALLABLES
             elif (text := _pickle_arg_text(value)) is not None and text not in seen:
                 if len(seen) < _PICKLE_MAX_PARTIAL_TEXTS:
                     seen.append(text)
@@ -1657,6 +1671,9 @@ _PICKLE_DENIED_MODULES: frozenset[str] = frozenset({
     "setuptools._distutils.spawn",  # what `distutils` resolves to on Python 3.12+
     "shutil", "socket", "ssl", "subprocess", "sys", "test", "timeit",
     "urllib.request", "venv", "webbrowser",
+    # dictConfig/fileConfig build any class named in the config ("()": "subprocess.Popen"),
+    # and torch.hub downloads and runs a repo's hubconf.py.
+    "logging.config", "torch.hub",
 })
 
 
@@ -1761,8 +1778,11 @@ def _laundered_denied_ref(qualname: str) -> str | None:
 _PICKLE_ARG_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]{1,15}://", re.I)
 # A shell metacharacter adjacent to whitespace, i.e. used as an operator
 # rather than merely present. A download piped into a shell matches; an ordinary
-# value like `a;b` or a base64 blob containing `+/=` does not.
-_PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`|\s[;&|]|[;&|]\s")
+# value like `a;b` or a base64 blob containing `+/=` does not. A backtick counts
+# only as command substitution, with something between the pair: a lone one is a
+# shell syntax error, and "``" is the Penn Treebank tag for an opening quote
+# (spaCy taggers carry it).
+_PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`[^`]+`|\s[;&|]|[;&|]\s")
 # Callables that rebuild a code object or a function from its parts. Every
 # code object carries co_filename, the absolute path of the source it was
 # compiled from, so a path argument here is structural metadata rather than a
@@ -1795,6 +1815,14 @@ _PICKLE_CODE_OBJECT_BUILDERS: frozenset[str] = frozenset({
 })
 
 
+# Callables that return a module by name. Handed a denied module, they are the
+# import step of a gadget chain (operator.methodcaller("system", ...) applied to
+# importlib.import_module("os")), so that call is CRITICAL rather than HIGH.
+_PICKLE_MODULE_IMPORTERS: frozenset[str] = frozenset({
+    "importlib.import_module", "importlib.__import__",
+})
+
+
 # Callables whose first argument is a pattern, not a command. A regex is dense
 # with the same characters a shell line uses (| ^ $ ( ) . *), so running the
 # command-shape patterns over one measures how complex the regex is. 40 of
@@ -1802,6 +1830,42 @@ _PICKLE_CODE_OBJECT_BUILDERS: frozenset[str] = frozenset({
 # "^§|^%|^=|^—|^–|^\\+(?![0-9])".
 _PICKLE_PATTERN_ARG_CALLABLES: frozenset[str] = frozenset({
     "re._compile", "re.compile", "regex._compile", "regex.compile",
+    # How the `regex` package pickles a compiled pattern (GPT-2/Whisper tokenizers).
+    "regex._regex.compile",
+})
+
+
+# Callables whose bytes argument is a raw binary value. numpy pickles a scalar
+# as scalar(dtype, raw_bytes); those bytes are often all printable, and a
+# backtick or `|` among them read as a shell line (71 false HIGHs in the
+# November 2026 Hub sweep). A str argument to them is still checked.
+_PICKLE_BINARY_ARG_CALLABLES: frozenset[str] = frozenset({
+    "numpy.core.multiarray.scalar", "numpy._core.multiarray.scalar",
+})
+
+
+# A list or set this long made of strings is a vocabulary (spaCy's StringStore,
+# a tokenizer's word list), not a payload; corpus text in it includes URLs and
+# shell-like tokens. A command is handed to a launch pad as one argument.
+_PICKLE_VOCABULARY_MIN_ITEMS = 100
+
+
+# Container constructors take words as data. A bare word that happens to be a
+# denied module ('nt' as a Counter key, 'test' in a set) is not a resolver
+# target here; a dotted name ('os.system') still is, and the URL and shell
+# checks still apply to whatever they are given.
+_PICKLE_DATA_CONSTRUCTORS: frozenset[str] = frozenset({
+    "collections.Counter", "collections.OrderedDict", "collections.defaultdict",
+    "collections.deque", "builtins.set", "builtins.frozenset", "builtins.dict",
+    "builtins.list", "builtins.tuple", "__builtin__.set", "__builtin__.frozenset",
+    "__builtin__.dict", "__builtin__.list", "__builtin__.tuple",
+})
+
+# Callables that take a vocabulary: the long-string-list skip applies only to
+# these and to the data constructors above, so padding a command list to 100
+# items does not hide it from an unknown launch pad.
+_PICKLE_VOCABULARY_HOLDERS: frozenset[str] = frozenset({
+    "spacy.strings.StringStore",
 })
 
 
@@ -2017,7 +2081,7 @@ def _pickle_source_denied_target(text: str) -> str | None:
     return None
 
 
-def _iter_pickle_arg_values(value: Any, _seen: set[int] | None = None):
+def _iter_pickle_arg_values(value: Any, _seen: set[int] | None = None, skip_vocabulary: bool = False):
     """Yield every scalar nested anywhere inside a resolved argument value.
 
     Recurses over container depth an attacker controls (nested TUPLE1 opcodes),
@@ -2042,12 +2106,15 @@ def _iter_pickle_arg_values(value: Any, _seen: set[int] | None = None):
             return
         _seen.add(marker)
     if isinstance(value, (tuple, list, set, frozenset)):
+        if (skip_vocabulary and len(value) >= _PICKLE_VOCABULARY_MIN_ITEMS
+                and all(isinstance(item, str) for item in value)):
+            return
         for item in value:
-            yield from _iter_pickle_arg_values(item, _seen)
+            yield from _iter_pickle_arg_values(item, _seen, skip_vocabulary)
     elif isinstance(value, dict):
         for key, item in value.items():
-            yield from _iter_pickle_arg_values(key, _seen)
-            yield from _iter_pickle_arg_values(item, _seen)
+            yield from _iter_pickle_arg_values(key, _seen, skip_vocabulary)
+            yield from _iter_pickle_arg_values(item, _seen, skip_vocabulary)
     else:
         yield value
 
@@ -2284,9 +2351,13 @@ def _triage_unknown_pickle_call(
         arguments: Any = ()
     else:
         arguments = (_codecs_encode_as_bytes(call), call.kwargs or {})
+        binary_args = call.ref in _PICKLE_BINARY_ARG_CALLABLES
+        takes_vocabulary = call.ref in _PICKLE_DATA_CONSTRUCTORS or call.ref in _PICKLE_VOCABULARY_HOLDERS
         texts = [
             text
-            for text in (_pickle_arg_text(v) for v in _iter_pickle_arg_values(arguments))
+            for text in (_pickle_arg_text(v)
+                         for v in _iter_pickle_arg_values(arguments, skip_vocabulary=takes_vocabulary)
+                         if not (binary_args and isinstance(v, (bytes, bytearray))))
             if text is not None
         ]
 
@@ -2303,7 +2374,14 @@ def _triage_unknown_pickle_call(
         return (Severity.HIGH, "invoked with a network endpoint (host, port) argument")
 
 
-    for text in texts:
+    # Container constructors take words as data: there only a dotted name
+    # ('os.system') is read as a resolver target, not a bare word that also
+    # names a module ('nt' as a Counter key is Windows' os module).
+    name_texts = texts
+    if call.ref in _PICKLE_DATA_CONSTRUCTORS:
+        name_texts = [t for t in name_texts if "." in t]
+
+    for text in name_texts:
         # A literal string that *names* something denied, handed to some other
         # callable. This is dynamic resolution in its general form, and the
         # check needs no list of its own: it re-runs the existing
@@ -2318,6 +2396,15 @@ def _triage_unknown_pickle_call(
         # the *target* is not. Keying on the target rather than the resolver is
         # what stops this being a list-maintenance race.
         if _classify_pickle_global(text) == "denied" or _is_denied_pickle_module(text):
+            if call.ref in _PICKLE_MODULE_IMPORTERS:
+                # Importing os (or another denied module) by name inside a model
+                # file has no ordinary reason; it is the first step of every
+                # methodcaller/getattr chain that reaches os.system without naming it.
+                return (
+                    Severity.CRITICAL,
+                    f"imports {text!r} by name, which this scanner denies: the first step "
+                    f"of a chain that reaches its callables without naming them",
+                )
             return (
                 Severity.HIGH,
                 f"is invoked with {text!r}, which names a callable this scanner denies -- "
@@ -2395,7 +2482,8 @@ def _triage_unknown_pickle_call(
 
     for text in texts:
         if (_PICKLE_ARG_PATH_RE.search(text) and not is_code_builder
-                and call.ref not in _PICKLE_PATH_CONSTRUCTORS):
+                and call.ref not in _PICKLE_PATH_CONSTRUCTORS
+                and call.ref not in _PICKLE_DATA_CONSTRUCTORS):  # a '/' Counter key is a word
             # Weak on its own -- `pathlib.PurePosixPath('/home/u/model.bin')`
             # looks identical to `linecache.getline` reading a system credential file at the
             # opcode level, and a file read is not code execution either way.
