@@ -1799,8 +1799,14 @@ _PICKLE_ARG_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]{1,15}://", re.I)
 # only as command substitution, with a command between the pair: a lone one is a
 # shell syntax error, "``" is the Penn Treebank tag for an opening quote (spaCy
 # taggers carry it), and a command starts with a name, a path, a variable, a
-# quote or a subshell, so "`@`" in a float's raw bytes is not one.
-_PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`\s*[A-Za-z0-9_./~$\\\"'({][^`]*`|\s[;&|]|[;&|]\s")
+# quote or a subshell, so "`@`" in a float's raw bytes is not one. Whitespace
+# here is what a shell splits on (space, tab, newline), not every character
+# Python's \s matches: ";\x1e" in a Python 2 numpy scalar's raw bytes is not an
+# operator. The command inside backticks is plain ASCII: a tokenizer suffix rule
+# listing quote marks ("`$|‘$|´$...`") is not one.
+_PICKLE_ARG_SHELL_RE = re.compile(
+    r"\$\(|`[ \t]*[A-Za-z0-9_./~$\\\"'({][\x20-\x5f\x61-\x7e\t\n]*`|[ \t\n][;&|]|[;&|][ \t\n]"
+)
 # Callables that rebuild a code object or a function from its parts. Every
 # code object carries co_filename, the absolute path of the source it was
 # compiled from, so a path argument here is structural metadata rather than a
