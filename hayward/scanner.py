@@ -3147,6 +3147,13 @@ class ModelFileScanner:
             findings.append(f)
         return findings
 
+    @staticmethod
+    def _zip_bomb_like(info: zipfile.ZipInfo) -> bool:
+        """Whether a member past the cap could be a decompression bomb. A STORED
+        member's bytes sit in the file as they are, so it is only big (torch.save
+        writes every member STORED); a compressed one may be inflating from little."""
+        return info.compress_type != zipfile.ZIP_STORED
+
     def _oversized_member_finding(
         self, file_path: Path, label: str, size: int | None, key: str, read_start: bool,
     ) -> Finding:
@@ -3581,10 +3588,12 @@ class ModelFileScanner:
                     if not self._zip_member_may_be_pickle(zf, info, file_path):
                         findings.extend(self._scan_nested_zip_member(zf, info, file_path, spent))
                         continue
+                    raw_read = False
                     try:
                         inner = self._read_zip_member_capped(zf, name, self.MAX_ZIP_MEMBER_BYTES)
                     except (OSError, zipfile.BadZipFile, RuntimeError,
                             NotImplementedError, ValueError, EOFError):
+                        raw_read = True
                         # A member the strict reader refuses is NOT evidence of
                         # safety, and skipping it silently reported the file
                         # clean. The refusal is usually a lie: setting the
@@ -3614,6 +3623,18 @@ class ModelFileScanner:
                         )
                         if inner is None:
                             continue
+                    if (inner is None or inner is _ZIP_MEMBER_OVERSIZED) and not self._zip_bomb_like(info):
+                        # Just big (a data.pkl with tensors pickled inline), not a
+                        # bomb: a pickle is read from its start, so analyse the
+                        # capped prefix and say the rest was not checked.
+                        if raw_read:
+                            inner = self._read_zip_member_raw(
+                                file_path, info, head_bytes=self.MAX_ZIP_MEMBER_BYTES)
+                        else:
+                            with zf.open(name) as handle:
+                                inner = handle.read(self.MAX_ZIP_MEMBER_BYTES)
+                        findings.append(self._oversized_member_finding(
+                            file_path, name, info.file_size, "zip_member", read_start=True))
                     if inner is None or inner is _ZIP_MEMBER_OVERSIZED:
                         findings.append(Finding(
                             rule_id="MFV-PICKLE-003",
