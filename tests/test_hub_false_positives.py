@@ -69,6 +69,18 @@ def test_penn_treebank_quote_tag_is_not_command_substitution(tmp_path):
 
 def test_backtick_command_substitution_is_still_flagged(tmp_path):
     assert flagged(worst(tmp_path, build(Call("some.module.run", "echo `id`"))))
+    assert flagged(worst(tmp_path, build(Call("some.module.run", "a ` whoami` b"))))
+    assert flagged(worst(tmp_path, build(Call("some.module.run", "x `/bin/id` y"))))
+    for quoted in ('x `"id"` y', "x `'id'` y", "x `(id)` y", "x `{ id; }` y"):
+        assert flagged(worst(tmp_path, build(Call("some.module.run", quoted)))), quoted
+
+
+def test_binary_bytes_with_backticked_punctuation_are_data(tmp_path):
+    # 8 printable raw bytes of a float array (protocol 2 spells bytes as
+    # _codecs.encode(text, 'latin1')). Seen on a Hub sklearn pickle: no shell
+    # runs `@`, a command name starts with a letter or a path.
+    import pickle
+    assert not flagged(worst(tmp_path, pickle.dumps({"w": b"S}+`@`;?"}, protocol=2)))
 
 
 # Review findings: the false-positive fixes must stay tied to data containers.

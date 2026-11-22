@@ -531,12 +531,15 @@ class PickleMemoProfile:
     builds joblib's NumpyArrayWrapper stopped parsing in the joblib reading
     (see `_resolve_pickle_globals`), so the stream past that point was not
     read the way joblib.load reads it.
+
+    `start` is the offset the pickle begins at (-1 when not from a walk).
     """
     slots: int
     max_index: int
     out_of_band: tuple[int, ...]
     walk_budget_exceeded: bool = False
     joblib_array_unread: bool = False
+    start: int = -1
 
 
 def _profile_memo_indices(indices: set[int]) -> PickleMemoProfile:
@@ -670,6 +673,8 @@ def _record_global(globals_found: list[str], module: str, name: str, proto: int)
 # that wants to see what follows has to skip exactly those bytes.
 
 _JOBLIB_ARRAY_WRAPPER = "joblib.numpy_pickle.NumpyArrayWrapper"
+# torch.save's legacy layout opens with pickle.dumps(MAGIC_NUMBER, protocol=2).
+_TORCH_LEGACY_MAGIC_PICKLE = b"\x80\x02\x8a\nl\xfc\x9cF\xf9 j\xa8P\x19."
 # copyreg's reconstructors build an instance of their first argument.
 _COPYREG_CONSTRUCTORS = frozenset({
     "copyreg._reconstructor", "copyreg.__newobj__", "copyreg.__newobj_ex__",
@@ -1123,6 +1128,18 @@ def _resolve_pickle_globals(
             data, joblib_arrays=True)
         globals_found += more_globals
         resolved_calls += more_calls
+        # When joblib's reading read every array, a pickle the other reading
+        # starts somewhere joblib's reading does not is a piece of the array
+        # bytes or of a joblib pickle cut short by an object array's own STOP.
+        # No loader runs it as a pickle, and an array holding `r<u32>` after a
+        # PROTO byte pair looks like a far memo write (Hub sweep, November
+        # 2026), so its memo is not judged. The first pickle, the one
+        # pickle.load runs, always is, and so is every pickle of a file that
+        # opens with torch's legacy magic number, since torch.load runs the
+        # next ones too. Globals still come from both readings.
+        if not array_unread and more_profiles and not data.startswith(_TORCH_LEGACY_MAGIC_PICKLE):
+            starts = {p.start for p in more_profiles}
+            profiles = [p for i, p in enumerate(profiles) if i == 0 or p.start in starts]
         profiles += more_profiles
         budget_exceeded = budget_exceeded or more_budget
 
@@ -1173,7 +1190,7 @@ def _walk_pickles(
             # second" a better evasion than the payload alone) and stop
             # reading: the remainder is reported as a coverage gap by the
             # caller via the profile flag, never claimed as analysed.
-            profiles.append(_profile_memo_indices(memo_indices))
+            profiles.append(dataclasses.replace(_profile_memo_indices(memo_indices), start=start))
             _propagate_result_invoked(resolved_calls, calls_before)
             budget_exceeded = True
             break
@@ -1204,7 +1221,7 @@ def _walk_pickles(
         # Profiled even when this pickle stopped parsing partway: joblib
         # streams always do, and the indices read before the stop are as real
         # as any others.
-        profiles.append(_profile_memo_indices(memo_indices))
+        profiles.append(dataclasses.replace(_profile_memo_indices(memo_indices), start=start))
         # Chain marking likewise stops at the pickle boundary: stack and memo
         # reset at STOP, so a chain cannot span two pickles.
         _propagate_result_invoked(resolved_calls, calls_before)
@@ -1779,10 +1796,11 @@ _PICKLE_ARG_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]{1,15}://", re.I)
 # A shell metacharacter adjacent to whitespace, i.e. used as an operator
 # rather than merely present. A download piped into a shell matches; an ordinary
 # value like `a;b` or a base64 blob containing `+/=` does not. A backtick counts
-# only as command substitution, with something between the pair: a lone one is a
-# shell syntax error, and "``" is the Penn Treebank tag for an opening quote
-# (spaCy taggers carry it).
-_PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`[^`]+`|\s[;&|]|[;&|]\s")
+# only as command substitution, with a command between the pair: a lone one is a
+# shell syntax error, "``" is the Penn Treebank tag for an opening quote (spaCy
+# taggers carry it), and a command starts with a name, a path, a variable, a
+# quote or a subshell, so "`@`" in a float's raw bytes is not one.
+_PICKLE_ARG_SHELL_RE = re.compile(r"\$\(|`\s*[A-Za-z0-9_./~$\\\"'({][^`]*`|\s[;&|]|[;&|]\s")
 # Callables that rebuild a code object or a function from its parts. Every
 # code object carries co_filename, the absolute path of the source it was
 # compiled from, so a path argument here is structural metadata rather than a

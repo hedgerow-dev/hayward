@@ -216,3 +216,62 @@ class TestMemoProfile:
         out of band in the first stream and unremarkable in the second."""
         assert _profile_memo_indices(set(range(10)) | {5000}).out_of_band == (5000,)
         assert _profile_memo_indices(set(range(10_000)) | {5000}).out_of_band == ()
+
+
+class TestJoblibArrayBytes:
+    """joblib writes raw array bytes into its pickle. pickle.load's reading
+    walks them as opcodes, and an array that happens to contain `r<u32>`
+    looks like a memo write far past the rest (seen on autotrain sklearn
+    files in the November 2026 Hub sweep). joblib.load reads those bytes as
+    the array, so the memo is judged on that reading."""
+
+    # A PROTO marker, where pickle.load's reading resyncs after the raw data
+    # stops parsing, then a short pickle with twelve consecutive memo writes
+    # and one far past them.
+    ARRAY_BYTES = (
+        b"\x80\x02"
+        + b"".join(b"Nq" + bytes([i]) + b"0" for i in range(12))
+        + b"Nr" + struct.pack("<I", 2_000_000_000) + b"0"
+        + b"N."
+    )
+
+    def _dump(self, tmp_path, payload=b""):
+        np = pytest.importorskip("numpy")
+        joblib = pytest.importorskip("joblib")
+        arr = np.frombuffer(self.ARRAY_BYTES, dtype="u1")
+        path = tmp_path / "model.joblib"
+        joblib.dump({"weights": arr, "labels": ["a", "b"]}, path)
+        data = path.read_bytes()
+        assert data.count(self.ARRAY_BYTES) == 1
+        if payload:
+            assert data.endswith(b".")
+            data = data[:-1] + payload + b"."
+            path.write_bytes(data)
+        return path
+
+    def test_array_bytes_are_not_a_splice(self, tmp_path):
+        path = self._dump(tmp_path)
+        rules = {f.rule_id for f in ModelFileScanner().scan_file(path)}
+        assert "MFV-PICKLE-007" not in rules
+
+    def test_splice_in_the_pickle_itself_still_flagged(self, tmp_path):
+        """The memo is still judged, on the reading joblib.load does: a gap in
+        the pickle opcodes around the arrays is reported."""
+        block = _splice_block(pickle.dumps(_Payload(), protocol=2), 1_000_000_000)
+        path = self._dump(tmp_path, payload=block)
+        findings = [f for f in ModelFileScanner().scan_file(path) if f.rule_id == "MFV-PICKLE-007"]
+        assert findings and findings[0].severity == Severity.HIGH
+
+    def test_torch_legacy_pickles_keep_their_memo_judged(self, tmp_path):
+        """torch.load runs the pickles after its magic number, so a joblib
+        wrapper in the first one must not take the later ones out of the
+        memo check."""
+        import hayward._pickle_engine as engine
+        magic = pickle.dumps(0x1950A86A20F9469CFC6C, protocol=2)
+        block = _splice_block(pickle.dumps(_Payload(), protocol=2), 1_000_000_000)
+        later = pickle.dumps(list(range(20)), protocol=2)
+        later = later[:-1] + block + b"."
+        data = magic + later
+        assert data.startswith(engine._TORCH_LEGACY_MAGIC_PICKLE)
+        _globals, _calls, profile = _resolve_pickle_globals(data)
+        assert profile.out_of_band
