@@ -9,7 +9,7 @@ code, before you load it.
 
 ![License MIT](https://img.shields.io/badge/license-MIT-013D5A?style=flat-square&labelColor=013D5A)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-013D5A?style=flat-square&labelColor=013D5A)
-![Rules 47](https://img.shields.io/badge/rules-47-013D5A?style=flat-square&labelColor=013D5A)
+![Rules 53](https://img.shields.io/badge/rules-53-013D5A?style=flat-square&labelColor=013D5A)
 ![Dependencies 1](https://img.shields.io/badge/dependencies-1-708C69?style=flat-square&labelColor=013D5A)
 ![Scan makes no outbound calls](https://img.shields.io/badge/scan_outbound_calls-none-F4A25B?style=flat-square&labelColor=013D5A)
 [![GitHub Marketplace](https://img.shields.io/badge/marketplace-hayward_model_scan-013D5A?style=flat-square&labelColor=013D5A&logo=github)](https://github.com/marketplace/actions/hayward-model-scan)
@@ -28,8 +28,9 @@ CRITICAL MFV-PICKLE-001  checkpoints/model.pt
 ```
 
 Or [try it in your browser](https://huggingface.co/spaces/hedgerow-dev/hayward).
-Same scanner, compiled to WebAssembly. Drop a checkpoint on the page and it
-stays on your machine.
+Paste a Hub repo id and the Space scans it server-side, reading only the bytes
+that can run code, not the weights. Or drop a checkpoint on the page: the same
+scanner runs in WebAssembly and the file stays on your machine.
 
 Follow [@Hedgerowdotdev](https://x.com/Hedgerowdotdev) on X for releases and research.
 
@@ -123,6 +124,19 @@ hayward scan ./models -f html -o report.html   # shareable report
 hayward-gui                                    # desktop window
 ```
 
+Before you download from the Hub, or to keep a record of what you checked:
+
+```bash
+hayward hub org/name                           # scan a Hub repo, no full download
+hayward lock org/name -o hayward.lock.json     # pin the commit and every file hash
+hayward verify org/name                        # check the signed published verdict
+hayward scan ./models --receipt receipt.intoto.json   # write a scan receipt
+hayward explain model.pt                       # show what a pickle would do
+```
+
+These use the network where they name a repo; `hayward scan` itself never
+does. The [usage guide](docs/usage.md#scan-a-hub-repo) covers each one.
+
 ```python
 from hayward import ModelFileScanner
 findings = ModelFileScanner().scan_directory(Path("models"))
@@ -156,7 +170,7 @@ could not get into.
 ## Documentation
 
 - [Usage](docs/usage.md): CLI reference, exit codes, CI, pre-commit, the GUI, the MCP server, the Python API, the load guard
-- [Rules](docs/rules.md): all 47 rules with severities and CWE mappings
+- [Rules](docs/rules.md): all 53 rules with severities and CWE mappings
 - [Coverage](docs/coverage.md): what it does when it cannot read a file, and why that is a finding
 - [How it works](docs/how-it-works.md): how it reads pickle without running it, and how unknown callables are judged by their arguments
 - [GitHub Action](docs/github-action.md): run the scan in CI and upload SARIF to code scanning
