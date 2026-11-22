@@ -3148,6 +3148,15 @@ class ModelFileScanner:
         return findings
 
     @staticmethod
+    def _sniffed_text_not_pickle(name: str, data: bytes) -> bool:
+        """A zip member picked only because it opens like a protocol-0 pickle
+        (a webpack chunk starts with "("), which breaks before fetching any
+        callable. No loader unpickles it by name, and pickle.load would stop at
+        that byte having run nothing. The tar walk applies the same test."""
+        named = name.endswith((".pkl", ".pickle")) or name.rsplit("/", 1)[-1] == "data.pkl"
+        return not named and data[:1] != b"\x80" and _fails_before_any_import(data)
+
+    @staticmethod
     def _zip_bomb_like(info: zipfile.ZipInfo) -> bool:
         """Whether a member past the cap could be a decompression bomb. A STORED
         member's bytes sit in the file as they are, so it is only big (torch.save
@@ -3371,6 +3380,8 @@ class ModelFileScanner:
                             file_path, label, None, "zip_member", read_start=bool(data)))
                     if spent is not None:
                         spent[0] += len(data)
+                    if self._sniffed_text_not_pickle(inner.filename, data):
+                        continue
                     for f in self._scan_pickle(file_path, data):
                         f.message = f"[{label}] {f.message}"
                         f.metadata = {**(f.metadata or {}), "zip_member": label}
@@ -3652,6 +3663,8 @@ class ModelFileScanner:
                     exec_hits = _find_embedded_executables(inner)
                     if exec_hits:
                         findings.append(self._executable_finding(file_path, exec_hits, member=name))
+                    if self._sniffed_text_not_pickle(name, inner):
+                        continue
                     is_data_pkl = name.rsplit("/", 1)[-1] == "data.pkl"
                     for f in self._scan_pickle(file_path, inner, loader_unpickles=is_data_pkl):
                         f.message = f"[{name}] {f.message}"

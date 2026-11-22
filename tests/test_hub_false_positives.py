@@ -97,3 +97,52 @@ def test_padded_command_list_to_an_unknown_callable_is_flagged(tmp_path):
 
 def test_bare_denied_module_name_with_padding_is_still_flagged(tmp_path):
     assert flagged(worst(tmp_path, build(Call("some.module.resolve", "os", "a", "b", "c", "d", "e"))))
+
+
+# Second batch, from the full-read pass of the torch zip sweep.
+
+def test_python2_numpy_scalar_with_a_control_byte_is_not_a_command(tmp_path):
+    # Python 2 pickles carry a scalar's raw bytes as a str. "\x1e" is not a
+    # shell separator, so ";\x1e" is not an operator.
+    assert not flagged(worst(tmp_path, build(Call("numpy.core.multiarray.scalar", DTYPE, "\x11;\x1e\x00\x00\x00\x00\x00"))))
+
+
+def test_tokenizer_suffix_regex_with_backticks_is_not_a_command(tmp_path):
+    # spaCy/fastai suffix rules list quote characters, backtick included.
+    suffixes = "…$|,$|”$|“$|`$|‘$|´$|’$|«$|`"
+    assert not flagged(worst(tmp_path, build(Call("some.tokenizer.rules", suffixes))))
+
+
+def test_shell_operators_with_real_whitespace_are_still_flagged(tmp_path):
+    assert flagged(worst(tmp_path, build(Call("some.module.run", "curl x |\tsh"))))
+    assert flagged(worst(tmp_path, build(Call("some.module.run", "id ;\nwhoami"))))
+    assert flagged(worst(tmp_path, build(Call("some.module.run", "x `$HOME/run` y"))))
+    assert flagged(worst(tmp_path, build(Call("some.module.run", "x `id\nwhoami` y"))))
+
+
+def _nested_zip(tmp_path: Path, name: str, member: bytes) -> Path:
+    import io
+    import zipfile
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as zf:
+        zf.writestr(name, member)
+    p = tmp_path / "model.bin"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("archive/data.pkl", b"\x80\x02}q\x00.")
+        zf.writestr("wheels/lib.whl", inner.getvalue())
+    return p
+
+
+def _worst_of(p: Path) -> str:
+    return max((f.severity.value for f in ModelFileScanner().scan_file(p)), key=ORDER.index, default="clean")
+
+
+def test_javascript_in_a_nested_wheel_is_not_a_pickle(tmp_path):
+    # Webpack chunks open with "(", which is also a protocol-0 pickle opener.
+    js = b'(self["webpackChunk_app"]=self["webpackChunk_app"]||[]).push([[1423],{1:e=>{exec(e)}}]);'
+    assert not flagged(_worst_of(_nested_zip(tmp_path, "static/1423.js", js)))
+
+
+def test_protocol0_payload_in_a_nested_member_is_still_flagged(tmp_path):
+    payload = b"cos\nsystem\n(S'id'\ntR."
+    assert _worst_of(_nested_zip(tmp_path, "static/notes.txt", payload)) == "critical"

@@ -4,6 +4,20 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- Three more false alarms from the full-read pass of the Hub sweep:
+  - A zip member that was picked only because it opens like a protocol-0
+    pickle, and breaks before fetching any callable, is no longer scanned as a
+    pickle. A webpack JavaScript file inside a zipped wheel opens with "(" and
+    gave `MFV-PICKLE-002` on "exec(". The tar walk already did this.
+  - Shell operators count only next to a space, tab or newline, which is what a
+    shell splits on. ";\x1e" in a Python 2 numpy scalar's raw bytes is not one.
+  - A command between backticks is plain ASCII. A tokenizer suffix rule that
+    lists quote marks, backtick included, is not command substitution.
+
 ## 1.18.1 (2026-11-22)
 
 ### Fixed
