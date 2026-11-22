@@ -482,8 +482,9 @@ class TestZipLiedDeclaredSizes:
         )
 
     def test_honest_oversized_member_is_still_capped(self, tmp_path, monkeypatch):
-        """The read-path bomb cap survives the fix: a genuinely oversized
-        member is reported as MFV-PICKLE-003, never expanded."""
+        """A STORED member past the cap is big, not a bomb (torch.save writes
+        them on real Hub models): its start is read, never more, and the rest
+        is reported as not verified rather than as a zip bomb."""
         scanner = ModelFileScanner()
         monkeypatch.setattr(scanner, "MAX_ZIP_MEMBER_BYTES", 1000)
         raw = self._zip_with("data.pkl", b"\x80\x04" + b"N" * 5000 + b".",
@@ -493,7 +494,21 @@ class TestZipLiedDeclaredSizes:
 
         findings = scanner.scan_file(p)
 
-        assert any(f.rule_id == "MFV-PICKLE-003" for f in findings), (
+        rules = [f.rule_id for f in findings]
+        assert "MFV-PICKLE-003" not in rules, rules
+        assert any(f.rule_id == "MFV-SKIP-002" and is_coverage_gap(f) for f in findings), rules
+
+    def test_payload_at_the_start_of_a_big_stored_member_is_caught(self, tmp_path, monkeypatch):
+        scanner = ModelFileScanner()
+        monkeypatch.setattr(scanner, "MAX_ZIP_MEMBER_BYTES", 1000)
+        raw = self._zip_with("archive/data.pkl", _os_system_pickle("id")[:-1] + b"N0" * 3000 + b".",
+                             zipfile.ZIP_STORED)
+        p = tmp_path / "model.pt"
+        p.write_bytes(raw)
+
+        findings = scanner.scan_file(p)
+
+        assert any(f.rule_id == "MFV-PICKLE-001" for f in findings), (
             [(f.rule_id, f.message) for f in findings]
         )
 

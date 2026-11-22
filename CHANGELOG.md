@@ -4,6 +4,26 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- Two false alarms from the torch zip sweep of the Hub (November 2026):
+  - joblib files: the memo-gap check (`MFV-PICKLE-007`) is judged on the
+    reading joblib.load does when every array was read. The other reading
+    walks raw array bytes as opcodes, and an array that happens to hold a
+    memo write past a PROTO byte pair looked like a splice. Globals are still
+    taken from both readings.
+  - A backtick pair counts as command substitution only around something that
+    starts like a command (a name, a path or a variable). Printable raw bytes
+    such as "`@`" in a float array no longer read as a shell line.
+- A torch zip whose pickle member is over the 200 MB member limit but stored
+  uncompressed (as torch.save writes it) is no longer called a possible zip
+  bomb (`MFV-PICKLE-003`, HIGH). Its first 200 MB are scanned and the rest is
+  reported as not verified (`MFV-SKIP-002`). A compressed member past the
+  limit is still `MFV-PICKLE-003`. In the sweep's full-read pass, this was
+  409 of the 414 HIGHs.
+
 ## 1.18.0 (2026-11-20)
 
 ### Changed
