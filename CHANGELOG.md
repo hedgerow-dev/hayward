@@ -4,6 +4,16 @@ Notable changes, newest first. Versions follow [semantic versioning](https://sem
 Rule identifiers are part of the public interface and will not be renamed
 within a major version.
 
+## Unreleased
+
+### Fixed
+
+- PNG metadata kept by PIL (`PIL.PngImagePlugin.iTXt`, a `str` subclass) is
+  now treated as data. XMP metadata declares its namespaces by URL, which read
+  as network access (`MFV-PICKLE-005` HIGH on a real Hub checkpoint). Only the
+  `xmlns="..."` declarations are set aside: any other URL, a shell command or a
+  denied name in the text is still flagged.
+
 ## 1.18.2 (2026-11-23)
 
 ### Fixed
