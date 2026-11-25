@@ -242,7 +242,10 @@ def _verify(args: argparse.Namespace) -> int:
     else:
         statement = data
     _require_receipt(statement)
-    problems = verify(statement, args.directory, ModelFileScanner().discover_files(args.directory))
+    # Walk every folder: a receipt covers the whole directory, so a model added
+    # under build/ or venv/ must be reported, not skipped as a project scan would.
+    found = ModelFileScanner().discover_files(args.directory, skip_dirs=frozenset())
+    problems = verify(statement, args.directory, found)
     for problem in problems:
         print(f"  {problem}")
     verdict = "matches" if not problems else "does NOT match"

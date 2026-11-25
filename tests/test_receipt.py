@@ -103,6 +103,17 @@ def test_verify_fails_on_a_model_file_the_receipt_does_not_cover(tmp_path, capsy
     assert capsys.readouterr().out.count("not in the receipt") == 1
 
 
+def test_verify_walks_folders_a_project_scan_skips(tmp_path, capsys):
+    # A receipt vouches for the whole directory: a model dropped into build/ or
+    # venv/ after signing must not slip past because a project scan skips them.
+    d = _models(tmp_path)
+    out, _ = _receipt(tmp_path, d)
+    (d / "build").mkdir()
+    (d / "build" / "pytorch_model.bin").write_bytes(EVAL)
+    assert cli.main(["receipt", "verify", str(out), str(d)]) == 1
+    assert "not in the receipt: build/pytorch_model.bin" in capsys.readouterr().out
+
+
 def test_verify_rejects_something_that_is_not_a_receipt(tmp_path):
     d = _models(tmp_path)
     bad = tmp_path / "x.json"

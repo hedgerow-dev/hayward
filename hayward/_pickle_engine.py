@@ -535,7 +535,8 @@ class PickleMemoProfile:
     (see `_resolve_pickle_globals`), so the stream past that point was not
     read the way joblib.load reads it.
 
-    `start` is the offset the pickle begins at (-1 when not from a walk).
+    `start` is the offset the pickle begins at (-1 when not from a walk), and
+    `stopped` is True when it stopped parsing before its STOP.
     """
     slots: int
     max_index: int
@@ -543,6 +544,7 @@ class PickleMemoProfile:
     walk_budget_exceeded: bool = False
     joblib_array_unread: bool = False
     start: int = -1
+    stopped: bool = False
 
 
 def _profile_memo_indices(indices: set[int]) -> PickleMemoProfile:
@@ -1139,10 +1141,14 @@ def _resolve_pickle_globals(
         # 2026), so its memo is not judged. The first pickle, the one
         # pickle.load runs, always is, and so is every pickle of a file that
         # opens with torch's legacy magic number, since torch.load runs the
-        # next ones too. Globals still come from both readings.
+        # next ones too. Globals still come from both readings. The first
+        # pickle's memo is left to joblib's reading only when the other reading
+        # broke off inside it: joblib <= 1.1 wrote no padding, so that reading
+        # runs straight into the first array's bytes and dies there.
         if not array_unread and more_profiles and not data.startswith(_TORCH_LEGACY_MAGIC_PICKLE):
             starts = {p.start for p in more_profiles}
-            profiles = [p for i, p in enumerate(profiles) if i == 0 or p.start in starts]
+            profiles = [p for i, p in enumerate(profiles)
+                        if (i == 0 and not p.stopped) or (i > 0 and p.start in starts)]
         profiles += more_profiles
         budget_exceeded = budget_exceeded or more_budget
 
@@ -1224,7 +1230,8 @@ def _walk_pickles(
         # Profiled even when this pickle stopped parsing partway: joblib
         # streams always do, and the indices read before the stop are as real
         # as any others.
-        profiles.append(dataclasses.replace(_profile_memo_indices(memo_indices), start=start))
+        profiles.append(dataclasses.replace(
+            _profile_memo_indices(memo_indices), start=start, stopped=stopped))
         # Chain marking likewise stops at the pickle boundary: stack and memo
         # reset at STOP, so a chain cannot span two pickles.
         _propagate_result_invoked(resolved_calls, calls_before)
@@ -1971,8 +1978,10 @@ _PICKLE_ALLOWED_STRING_ARG_OK: frozenset[str] = frozenset({
     # name, and path segments, absolute ones included.
     "decimal.Decimal", "uuid.UUID", "fractions.Fraction",
     # int('42'), float('1.5'), str('x'), bytes('abc', 'utf-8'): text in, a value out.
-    "builtins.int", "builtins.float", "builtins.str", "builtins.bytes",
+    # bytearray(b'...') too: XGBoost keeps a Booster's JSON config in one.
+    "builtins.int", "builtins.float", "builtins.str", "builtins.bytes", "builtins.bytearray",
     "__builtin__.int", "__builtin__.float", "__builtin__.str", "__builtin__.bytes",
+    "__builtin__.bytearray",
     "PIL.PngImagePlugin.iTXt",           # iTXt(text, lang, tkey): a PNG text chunk
     "datetime.timezone",
     "pathlib.PurePosixPath", "pathlib.PureWindowsPath",
