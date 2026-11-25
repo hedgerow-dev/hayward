@@ -262,6 +262,35 @@ class TestJoblibArrayBytes:
         findings = [f for f in ModelFileScanner().scan_file(path) if f.rule_id == "MFV-PICKLE-007"]
         assert findings and findings[0].severity == Severity.HIGH
 
+    def test_unaligned_array_in_the_first_pickle_is_not_a_splice(self, tmp_path):
+        """joblib <= 1.1 wrote no alignment padding, so pickle.load's reading
+        of the first pickle runs straight into the array bytes. A Keras model
+        joblib-dumped as a uint8 array opened with `r<u32>` (Hub sweep,
+        November 2026): a far memo write in bytes joblib.load reads as data."""
+        def sbu(text):
+            return b"\x8c" + bytes([len(text)]) + text.encode()
+
+        def glob(module, name):
+            return sbu(module) + sbu(name) + b"\x93"
+
+        raw = b"r" + struct.pack("<I", 792_358_241) + b"\xff" * 27
+        dtype = (glob("numpy", "dtype") + sbu("u1") + b"\x89\x88\x87R"
+                 + b"(K\x03" + sbu("|") + b"NNNJ\xff\xff\xff\xffJ\xff\xff\xff\xffK\x00tb")
+        state = (b"}(" + sbu("subclass") + glob("numpy", "ndarray")
+                 + sbu("shape") + b"K" + bytes([len(raw)]) + b"\x85"
+                 + sbu("order") + sbu("C") + sbu("dtype") + dtype
+                 + sbu("allow_mmap") + b"\x88u")
+        memo = b"".join(b"N\x94" for _ in range(12))
+        data = (b"\x80\x04](" + memo + glob("joblib.numpy_pickle", "NumpyArrayWrapper")
+                + b")\x81" + state + b"b" + raw + b"e.")
+        path = tmp_path / "model.joblib"
+        path.write_bytes(data)
+        rules = {f.rule_id for f in ModelFileScanner().scan_file(path)}
+        assert "MFV-PICKLE-007" not in rules
+        # The same bytes in the pickle itself, not behind an array, still count.
+        _globals, _calls, profile = _resolve_pickle_globals(b"\x80\x04](" + memo + raw[:5] + b"N0e.")
+        assert profile.out_of_band
+
     def test_torch_legacy_pickles_keep_their_memo_judged(self, tmp_path):
         """torch.load runs the pickles after its magic number, so a joblib
         wrapper in the first one must not take the later ones out of the

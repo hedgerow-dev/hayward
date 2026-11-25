@@ -13,6 +13,21 @@ within a major version.
   as network access (`MFV-PICKLE-005` HIGH on a real Hub checkpoint). Only the
   `xmlns="..."` declarations are set aside: any other URL, a shell command or a
   denied name in the text is still flagged.
+- A joblib file written by joblib 1.1 or older whose first array starts with
+  bytes that read as a memo write (a Keras model stored as a uint8 array) no
+  longer gives `MFV-PICKLE-007` HIGH. Those files have no padding before the
+  array, so `pickle.load`'s reading runs into the array and stops there; the
+  memo is now judged on the reading `joblib.load` does. Globals and calls are
+  still taken from both readings.
+- `bytearray(b'...')` is treated like `bytes(...)`: XGBoost keeps a model's
+  JSON config in one (`MFV-PICKLE-006` MEDIUM on an autotrain model). A
+  command or a denied name inside it is still flagged.
+
+### Security
+
+- `hayward receipt verify` now walks every folder. It skipped the ones a
+  project scan skips (`build/`, `venv/`, `dist/`, ...), so a model file added
+  there after the receipt was written was not reported.
 
 ## 1.18.2 (2026-11-23)
 

